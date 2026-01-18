@@ -28,15 +28,17 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
+        working-directory: devforge
         run: npm install
 
       - name: Build project
+        working-directory: devforge
         run: npm run build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: devforge/dist
 
   deploy:
     runs-on: ubuntu-latest
