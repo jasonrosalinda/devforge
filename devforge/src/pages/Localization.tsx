@@ -12,7 +12,7 @@ interface LocalizationEntry {
   ValueId: string;
 }
 
-export default function DataManagement() {
+export default function Localization() {
   const [data, setData] = useState<LocalizationEntry[]>([]);
   const { showToast } = useToast();
 

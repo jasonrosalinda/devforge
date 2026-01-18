@@ -27,3 +27,12 @@ export function CardBody({ className, ...props }: React.HTMLAttributes<HTMLDivEl
     />
   );
 }
+
+export function CardFooter({className,...props}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={`border-t px-4 py-3 text-right ${className ?? ""}`}
+      {...props}
+    />
+  );
+}

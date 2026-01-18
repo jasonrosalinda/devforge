@@ -2,6 +2,7 @@ import { useState } from "react";
 import Sidebar from "./components/layout/Sidebar";
 import Header from "./components/layout/Header";
 import Localization from "./pages/Localization";
+import PageSpeedInsight from "./pages/PageSpeedInsight";
 
 import { ToastProvider } from "./components/ui/contexts/ToastContext";
 import { ConfirmDialogProvider } from './components/ui/contexts/ConfirmDialogContext';
@@ -15,6 +16,8 @@ export default function App() {
     switch (activePage) {
       case "Translation":
         return <Localization />;
+      case "PageSpeed Insight":
+        return <PageSpeedInsight />;
       default:
         return <Localization />;
     }

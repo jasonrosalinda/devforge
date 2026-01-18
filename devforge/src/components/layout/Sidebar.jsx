@@ -3,6 +3,7 @@ import { Home, Users, Settings, FileText, BarChart, Menu, Languages, X } from 'l
 export default function Sidebar({ isSidebarOpen, setIsSidebarOpen, activePage, setActivePage }) {
   const menuItems = [
     { name: 'Translation', icon: Languages  },
+    { name: 'PageSpeed Insight', icon: BarChart  },
   ];
 
   return (
