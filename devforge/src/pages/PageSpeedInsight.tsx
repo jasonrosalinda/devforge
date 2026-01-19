@@ -5,21 +5,26 @@ import { Card, CardBody, CardHeader } from "../components/ui";
 export default function PageSpeedMobileMetrics() {
   return (
     <div className="space-y-12">
-      <Card>
-        <CardHeader className="bg-gray-900 text-white">
-          <h2 className="text-2xl font-bold">PageSpeed Insights</h2>
-        </CardHeader>
-        <CardBody>
-          <PageSpeedInsightResult />
-        </CardBody>
-      </Card>
-      <div className="border-b border-black/10 pb-12">
-        <Card>
-          <CardHeader className="bg-gray-900 text-white">
-            <h2 className="text-2xl font-bold">
-              PageSpeed Insights Comparison
-            </h2>
-          </CardHeader>
+      <div>
+        <h2 className="text-2xl font-bold text-gray-800">PageSpeed Insights</h2>
+        <p className="text-gray-600 mt-1">
+          Analyze mobile performance metrics for your web pages.
+        </p>
+        <Card className="mt-6">
+          <CardBody>
+            <PageSpeedInsightResult />
+          </CardBody>
+        </Card>
+      </div>
+
+      <div>
+        <h2 className="text-2xl font-bold text-gray-800">
+          PageSpeed Insights Comparison
+        </h2>
+        <p className="text-gray-600 mt-1">
+          Analyze and compare performance metrics for your web pages.
+        </p>
+        <Card className="mt-6">
           <CardBody>
             <PageSpeedComparison />
           </CardBody>

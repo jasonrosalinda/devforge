@@ -1,8 +1,9 @@
-import { useState } from 'react';
-import { Download, Clipboard } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Download, Clipboard, Upload, Trash2 } from 'lucide-react';
 import DataGrid from '../components/ui/DataGrid';
 import { Column, RibbonButton } from '../components/ui/types/DataGrid.types';
 import { useToast } from "../components/ui/contexts/ToastContext";
+import { useConfirm } from '../components/ui/contexts/ConfirmDialogContext';
 
 interface LocalizationEntry {
   id: number;
@@ -15,6 +16,8 @@ interface LocalizationEntry {
 export default function Localization() {
   const [data, setData] = useState<LocalizationEntry[]>([]);
   const { showToast } = useToast();
+  const { confirm } = useConfirm();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Define table columns
   const columns: Column<LocalizationEntry>[] = [
@@ -66,6 +69,92 @@ export default function Localization() {
       'Value_VN': 'ValueVn' as keyof LocalizationEntry
     },
     formatValue: (key: string, value: any) => value
+  };
+
+  // Parse SQL file and extract data
+  const parseSqlFile = (sqlContent: string): LocalizationEntry[] => {
+    const entries: LocalizationEntry[] = [];
+    let currentId = 1;
+
+    // Split by EXEC statements
+    const execStatements = sqlContent.split(/EXEC\s+\[dbo\]\.\[sp_InsertUpdateTranslation\]/gi);
+    
+    // Skip the first element as it's content before the first EXEC
+    for (let i = 1; i < execStatements.length; i++) {
+      const paramBlock = execStatements[i];
+      
+      // Extract parameters - handle both single quotes and escaped quotes
+      const extractValue = (paramName: string): string => {
+        // Match parameter with NULL
+        const nullMatch = paramBlock.match(new RegExp(`@${paramName}\\s*=\\s*NULL`, 'i'));
+        if (nullMatch) return '';
+        
+        // Match parameter with value (handles multi-line and escaped quotes)
+        const valueMatch = paramBlock.match(new RegExp(`@${paramName}\\s*=\\s*N?'((?:[^']|'')*)'`, 'i'));
+        if (valueMatch) {
+          // Unescape double single quotes
+          return valueMatch[1].replace(/''/g, "'");
+        }
+        
+        return '';
+      };
+
+      const translationKey = extractValue('TranslationKey');
+      const valueEn = extractValue('Value_EN');
+      const valueId = extractValue('Value_ID');
+      const valueVn = extractValue('Value_VN');
+
+      // Only add if we have at least a translation key
+      if (translationKey) {
+        entries.push({
+          id: currentId++,
+          TranslationKey: translationKey,
+          ValueEn: valueEn,
+          ValueVn: valueVn,
+          ValueId: valueId
+        });
+      }
+    }
+
+    return entries;
+  };
+
+  // Handle file upload
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Check file extension
+    if (!file.name.toLowerCase().endsWith('.sql')) {
+      showToast("Please upload a valid SQL file", "danger");
+      return;
+    }
+
+    try {
+      const fileContent = await file.text();
+      const parsedData = parseSqlFile(fileContent);
+
+      if (parsedData.length === 0) {
+        showToast("No valid translation entries found in the SQL file", "warning");
+        return;
+      }
+
+      setData(parsedData);
+      showToast(`Successfully loaded ${parsedData.length} translation entries`, "success");
+    } catch (error) {
+      console.error('Error reading SQL file:', error);
+      showToast("Error reading SQL file", "danger");
+    } finally {
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  // Trigger file input click
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
   };
 
   // Generate SQL Script
@@ -136,8 +225,37 @@ export default function Localization() {
     }
   };
 
+  // Clear all data
+  const handleClearData = async () => {
+    if (data.length === 0) {
+      showToast("Table is already empty", "info");
+      return;
+    }
+
+    const confirmed = await confirm({
+      title: 'Clear All Data',
+      message: `Are you sure you want to clear all ${data.length} entries? This action cannot be undone.`,
+      confirmLabel: 'Clear All',
+      cancelLabel: 'Cancel',
+      variant: 'danger'
+    });
+
+    if (confirmed) {
+      setData([]);
+      showToast("All data cleared successfully", "success");
+    }
+  };
+
   // Custom Ribbon Buttons
   const ribbonButtons: RibbonButton[] = [
+    {
+      label: 'Upload SQL',
+      icon: <Upload size={18} />,
+      onClick: handleUploadClick,
+      variant: 'secondary',
+      tooltip: 'Upload SQL File',
+      iconOnly: true
+    },
     {
       label: 'Download SQL',
       icon: <Download size={18} />,
@@ -152,6 +270,14 @@ export default function Localization() {
       onClick: () => onCopySql(),
       variant: 'primary',
       tooltip: 'Copy SQL Script',
+      iconOnly: true
+    },
+    {
+      label: 'Clear All',
+      icon: <Trash2 size={18} />,
+      onClick: handleClearData,
+      variant: 'danger',
+      tooltip: 'Clear All Data',
       iconOnly: true
     }
   ];
@@ -173,18 +299,29 @@ export default function Localization() {
   };
 
   return (
-    <DataGrid<LocalizationEntry>
-      title="Localization Management"
-      description="Manage localization entries with DataGrid"
-      columns={columns}
-      data={data}
-      onAdd={handleAdd}
-      onEdit={handleEdit}
-      onDelete={handleDelete}
-      enablePagination={true}
-      pageSize={10}
-      enableSorting={true}
-      ribbonButtons={ribbonButtons}
-    />
+    <>
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".sql"
+        onChange={handleFileUpload}
+        style={{ display: 'none' }}
+      />
+      
+      <DataGrid<LocalizationEntry>
+        title="Localization Management"
+        description="Manage localization entries with DataGrid"
+        columns={columns}
+        data={data}
+        onAdd={handleAdd}
+        onEdit={handleEdit}
+        onDelete={handleDelete}
+        enablePagination={true}
+        pageSize={10}
+        enableSorting={true}
+        ribbonButtons={ribbonButtons}
+      />
+    </>
   );
 }
