@@ -310,8 +310,6 @@ export default function Localization() {
       />
       
       <DataGrid<LocalizationEntry>
-        title="Localization Management"
-        description="Manage localization entries with DataGrid"
         columns={columns}
         data={data}
         onAdd={handleAdd}

@@ -3,6 +3,7 @@ import Sidebar from "./components/layout/Sidebar";
 import Header from "./components/layout/Header";
 import Localization from "./pages/Localization";
 import PageSpeedInsight from "./pages/PageSpeedInsight";
+import MEDUCache from "./pages/MEDUCache";
 
 import { ToastProvider } from "./components/ui/contexts/ToastContext";
 import { ConfirmDialogProvider } from './components/ui/contexts/ConfirmDialogContext';
@@ -18,6 +19,8 @@ export default function App() {
         return <Localization />;
       case "PageSpeed Insight":
         return <PageSpeedInsight />;
+      case "MEDU Cache":
+        return <MEDUCache />;
       default:
         return <Localization />;
     }

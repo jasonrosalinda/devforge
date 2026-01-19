@@ -1,9 +1,10 @@
-import { Home, Users, Settings, FileText, BarChart, Menu, Languages, X } from 'lucide-react';
+import { DatabaseZap, BarChart, Menu, Languages, X } from 'lucide-react';
 
 export default function Sidebar({ isSidebarOpen, setIsSidebarOpen, activePage, setActivePage }) {
   const menuItems = [
     { name: 'Translation', icon: Languages  },
     { name: 'PageSpeed Insight', icon: BarChart  },
+    { name: 'MEDU Cache', icon: DatabaseZap  },
   ];
 
   return (

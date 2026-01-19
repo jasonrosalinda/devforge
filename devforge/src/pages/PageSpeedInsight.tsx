@@ -6,11 +6,8 @@ export default function PageSpeedMobileMetrics() {
   return (
     <div className="space-y-12">
       <div>
-        <h2 className="text-2xl font-bold text-gray-800">PageSpeed Insights</h2>
-        <p className="text-gray-600 mt-1">
-          Analyze mobile performance metrics for your web pages.
-        </p>
         <Card className="mt-6">
+          <CardHeader className="text-2xl rounded-t-lg bg-gray-900 font-bold text-white">Single PageSpeed Insight</CardHeader>
           <CardBody>
             <PageSpeedInsightResult />
           </CardBody>
@@ -18,13 +15,8 @@ export default function PageSpeedMobileMetrics() {
       </div>
 
       <div>
-        <h2 className="text-2xl font-bold text-gray-800">
-          PageSpeed Insights Comparison
-        </h2>
-        <p className="text-gray-600 mt-1">
-          Analyze and compare performance metrics for your web pages.
-        </p>
         <Card className="mt-6">
+             <CardHeader className="text-2xl rounded-t-lg bg-gray-900 font-bold text-white">PageSpeed Insights Comparison</CardHeader>
           <CardBody>
             <PageSpeedComparison />
           </CardBody>

@@ -1,4 +1,4 @@
-import { useState, useMemo, ChangeEvent } from "react";
+import { useState, useMemo, ChangeEvent, ReactNode } from "react";
 import { useConfirm } from './contexts/ConfirmDialogContext';
 
 import {
@@ -13,7 +13,41 @@ import {
   ArrowUp,
   ArrowDown,
 } from "lucide-react";
-import { DataGridProps, Column, SortConfig } from "./types/DataGrid.types";
+
+// Import types from the types file
+import { Column, RibbonButton, SortConfig } from './types/DataGrid.types';
+
+// Additional types not in DataGrid.types
+interface RowAction<T> {
+  label: string;
+  icon?: ReactNode;
+  onClick: (row: T) => void;
+  variant?: 'primary' | 'secondary' | 'danger' | 'success' | 'warning';
+  disabled?: boolean | ((row: T) => boolean);
+  hidden?: boolean | ((row: T) => boolean);
+  tooltip?: string;
+}
+
+interface DataGridProps<T extends { id: number | string }> {
+  columns: Column<T>[];
+  data: T[];
+  onAdd?: (newRow: Partial<T>) => void;
+  onEdit?: (id: number | string, updatedRow: T) => void;
+  onDelete?: (id: number | string) => void;
+  title?: string;
+  description?: string;
+  enablePagination?: boolean;
+  pageSize?: number;
+  enableSorting?: boolean;
+  ribbonButtons?: RibbonButton[];
+  rowActions?: RowAction<T>[];
+  showDefaultActions?: {
+    add?: boolean;
+    edit?: boolean;
+    delete?: boolean;
+  };
+  emptyMessage?: string;
+}
 
 export default function DataGrid<T extends { id: number | string }>({
   columns,
@@ -21,12 +55,15 @@ export default function DataGrid<T extends { id: number | string }>({
   onAdd,
   onEdit,
   onDelete,
-  title = "Data Management",
-  description = "Manage your data",
+  title = "",
+  description = "",
   enablePagination = true,
   pageSize = 10,
   enableSorting = true,
   ribbonButtons = [],
+  rowActions = [],
+  showDefaultActions = { add: true, edit: true, delete: true },
+  emptyMessage = "No data available"
 }: DataGridProps<T>) {
   const [editingId, setEditingId] = useState<number | string | null>(null);
   const [editForm, setEditForm] = useState<Partial<T>>({});
@@ -43,6 +80,33 @@ export default function DataGrid<T extends { id: number | string }>({
     key: null,
     direction: null,
   });
+
+  // Check if any default actions are enabled
+  const hasDefaultActions = showDefaultActions.edit || showDefaultActions.delete;
+  const hasAnyActions = hasDefaultActions || rowActions.length > 0;
+  
+  // Check if any column is editable
+  const hasEditableColumns = useMemo(() => {
+    return columns.some(col => {
+      if (typeof col.editable === 'function') {
+        return true; // If it's a function, it can be editable for some rows
+      }
+      return col.editable === true;
+    });
+  }, [columns]);
+
+  // Check if a specific column is editable for a row
+  const isColumnEditable = (column: Column<T>, row: T): boolean => {
+    if (typeof column.editable === 'function') {
+      return column.editable(row);
+    }
+    return column.editable === true;
+  };
+
+  // Check if a row has any editable columns
+  const rowHasEditableColumns = (row: T): boolean => {
+    return columns.some(col => isColumnEditable(col, row));
+  };
 
   // Sort data
   const sortedData = useMemo(() => {
@@ -135,7 +199,8 @@ export default function DataGrid<T extends { id: number | string }>({
   const initializeNewForm = (): Partial<T> => {
     const form: any = {};
     columns.forEach((col) => {
-      if (col.editable) {
+      const isEditable = typeof col.editable === 'function' ? true : col.editable;
+      if (isEditable) {
         form[col.key] = col.defaultValue !== undefined ? col.defaultValue : "";
       }
     });
@@ -143,14 +208,14 @@ export default function DataGrid<T extends { id: number | string }>({
   };
 
   // Start editing a row
-  const handleEdit = (row: T) => {
+  const handleEditRow = (row: T) => {
     setEditingId(row.id);
     setEditForm({ ...row });
   };
 
   // Save edited row
   const handleSave = () => {
-    if (editingId !== null) {
+    if (editingId !== null && onEdit) {
       onEdit(editingId, editForm as T);
       setEditingId(null);
       setEditForm({});
@@ -164,16 +229,16 @@ export default function DataGrid<T extends { id: number | string }>({
   };
 
   // Delete a row
-  const handleDelete = async (id: number | string) => {
+  const handleDeleteRow = async (id: number | string) => {
     const confirmed = await confirm({
       title: title,
       message: 'Are you sure you want to delete this row?',
-      confirmLabel: 'OK',
+      confirmLabel: 'Delete',
       cancelLabel: 'Cancel',
       variant: 'danger'
     });
 
-    if (confirmed) {
+    if (confirmed && onDelete) {
       onDelete(id);
       handleDataChange();
     }
@@ -181,12 +246,14 @@ export default function DataGrid<T extends { id: number | string }>({
 
   // Add new row
   const handleAddNew = () => {
-    onAdd(newForm);
-    setNewForm(initializeNewForm());
-    setIsAdding(false);
-    if (enablePagination) {
-      const newTotalPages = Math.ceil((data.length + 1) / itemsPerPage);
-      setCurrentPage(newTotalPages);
+    if (onAdd) {
+      onAdd(newForm);
+      setNewForm(initializeNewForm());
+      setIsAdding(false);
+      if (enablePagination) {
+        const newTotalPages = Math.ceil((data.length + 1) / itemsPerPage);
+        setCurrentPage(newTotalPages);
+      }
     }
   };
 
@@ -210,6 +277,38 @@ export default function DataGrid<T extends { id: number | string }>({
   const handleItemsPerPageChange = (value: string) => {
     setItemsPerPage(Number(value));
     setCurrentPage(1);
+  };
+
+  // Get button variant classes
+  const getButtonVariant = (variant?: string): string => {
+    switch (variant) {
+      case 'danger':
+        return 'text-red-600 hover:bg-red-100';
+      case 'success':
+        return 'text-green-600 hover:bg-green-100';
+      case 'warning':
+        return 'text-yellow-600 hover:bg-yellow-100';
+      case 'secondary':
+        return 'text-gray-600 hover:bg-gray-100';
+      default:
+        return 'text-blue-600 hover:bg-blue-100';
+    }
+  };
+
+  // Check if action button should be disabled
+  const isActionDisabled = (action: RowAction<T>, row: T): boolean => {
+    if (typeof action.disabled === 'function') {
+      return action.disabled(row);
+    }
+    return action.disabled || false;
+  };
+
+  // Check if action button should be hidden
+  const isActionHidden = (action: RowAction<T>, row: T): boolean => {
+    if (typeof action.hidden === 'function') {
+      return action.hidden(row);
+    }
+    return action.hidden || false;
   };
 
   // Render input field based on column type
@@ -290,71 +389,80 @@ export default function DataGrid<T extends { id: number | string }>({
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800">{title}</h2>
-          <p className="text-gray-600 mt-1">{description}</p>
+      {(title || description) && (
+        <div className="flex justify-between items-center">
+          <div>
+            {title && <h2 className="text-2xl font-bold text-gray-800">{title}</h2>}
+            {description && <p className="text-gray-600 mt-1">{description}</p>}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="bg-white rounded-lg shadow overflow-hidden">
-   
         {/* Ribbon/Menu Buttons */}
-        <div className="bg-gray-900 shadow p-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Add New Button */}
-            <button onClick={handleOpenAdd} className="flex items-center gap-2 p-2 text-white rounded-lg transition-colors" title="Add New">
-              <Plus size={18} />
-            </button>
+        {(showDefaultActions.add || ribbonButtons.length > 0) && (
+          <div className="bg-gray-900 shadow p-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Add New Button */}
+              {showDefaultActions.add && onAdd && (
+                <button
+                  onClick={handleOpenAdd}
+                  className="flex items-center gap-2 p-2 text-white rounded-lg transition-colors"
+                  title="Add New"
+                >
+                  <Plus size={18} />
+                </button>
+              )}
 
-            {/* Separator */}
-            {ribbonButtons.length > 0 && (
-              <div className="h-8 w-px bg-gray-300 mx-2"></div>
-            )}
+              {/* Separator */}
+              {showDefaultActions.add && ribbonButtons.length > 0 && (
+                <div className="h-8 w-px bg-gray-300 mx-2"></div>
+              )}
 
-            {/* Custom Ribbon Buttons */}
-            {ribbonButtons.map((button, index) => {
-              // Icon-only button (no label)
-              if (button.iconOnly) {
+              {/* Custom Ribbon Buttons */}
+              {ribbonButtons.map((button, index) => {
+                // Icon-only button (no label)
+                if (button.iconOnly) {
+                  return (
+                    <button
+                      key={index}
+                      onClick={button.onClick}
+                      className={`p-2 rounded-lg transition-colors text-white ${button.className || ""}`}
+                      disabled={button.disabled}
+                      title={button.tooltip}
+                    >
+                      {button.icon}
+                    </button>
+                  );
+                }
+
+                // Regular button with icon and label
                 return (
                   <button
                     key={index}
                     onClick={button.onClick}
-                    className={`p-2 rounded-lg transition-colors text-white ${button.className || ""}`}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                      button.variant === "danger"
+                        ? "bg-red-600 text-white hover:bg-red-700"
+                        : button.variant === "success"
+                          ? "bg-green-600 text-white hover:bg-green-700"
+                          : button.variant === "warning"
+                            ? "bg-yellow-500 text-white hover:bg-yellow-600"
+                            : button.variant === "secondary"
+                              ? "bg-gray-600 text-white hover:bg-gray-700"
+                              : "bg-blue-600 text-white hover:bg-blue-700"
+                    } ${button.className || ""}`}
                     disabled={button.disabled}
                     title={button.tooltip}
                   >
                     {button.icon}
+                    {button.label}
                   </button>
                 );
-              }
-
-              // Regular button with icon and label
-              return (
-                <button
-                  key={index}
-                  onClick={button.onClick}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                    button.variant === "danger"
-                      ? "bg-red-600 text-white hover:bg-red-700"
-                      : button.variant === "success"
-                        ? "bg-green-600 text-white hover:bg-green-700"
-                        : button.variant === "warning"
-                          ? "bg-yellow-500 text-white hover:bg-yellow-600"
-                          : button.variant === "secondary"
-                            ? "bg-gray-600 text-white hover:bg-gray-700"
-                            : "bg-blue-600 text-white hover:bg-blue-700"
-                  } ${button.className || ""}`}
-                  disabled={button.disabled}
-                  title={button.tooltip}
-                >
-                  {button.icon}
-                  {button.label}
-                </button>
-              );
-            })}
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Table */}
         <table className="min-w-full divide-y divide-gray-200">
@@ -378,44 +486,51 @@ export default function DataGrid<T extends { id: number | string }>({
                   </div>
                 </th>
               ))}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Actions
-              </th>
+              {hasAnyActions && (
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
+              )}
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {/* Add New Row Form */}
             {isAdding && (
               <tr className="bg-blue-50">
-                {columns.map((col) => (
-                  <td key={col.key} className="px-6 py-4">
-                    {col.editable ? (
-                      renderInput(col, (newForm as any)[col.key], (key, val) =>
-                        setNewForm({ ...newForm, [key]: val }),
-                      )
-                    ) : (
-                      <span className="text-sm text-gray-400">Auto</span>
-                    )}
+                {columns.map((col) => {
+                  const isEditable = typeof col.editable === 'function' ? true : col.editable;
+                  return (
+                    <td key={col.key} className="px-6 py-4">
+                      {isEditable ? (
+                        renderInput(col, (newForm as any)[col.key], (key, val) =>
+                          setNewForm({ ...newForm, [key]: val }),
+                        )
+                      ) : (
+                        <span className="text-sm text-gray-400">Auto</span>
+                      )}
+                    </td>
+                  );
+                })}
+                {hasAnyActions && (
+                  <td className="px-6 py-4">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleAddNew}
+                        className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
+                        title="Save"
+                      >
+                        <Save size={18} />
+                      </button>
+                      <button
+                        onClick={handleCancelAdd}
+                        className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
+                        title="Cancel"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
                   </td>
-                ))}
-                <td className="px-6 py-4">
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleAddNew}
-                      className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
-                      title="Save"
-                    >
-                      <Save size={18} />
-                    </button>
-                    <button
-                      onClick={handleCancelAdd}
-                      className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
-                      title="Cancel"
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                </td>
+                )}
               </tr>
             )}
 
@@ -429,7 +544,7 @@ export default function DataGrid<T extends { id: number | string }>({
               >
                 {columns.map((col) => (
                   <td key={col.key} className="px-6 py-4 whitespace-nowrap">
-                    {editingId === row.id && col.editable
+                    {editingId === row.id && isColumnEditable(col, row)
                       ? renderInput(
                           col,
                           (editForm as any)[col.key],
@@ -439,43 +554,69 @@ export default function DataGrid<T extends { id: number | string }>({
                       : renderCell(col, row)}
                   </td>
                 ))}
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {editingId === row.id ? (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleSave}
-                        className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
-                        title="Save"
-                      >
-                        <Save size={18} />
-                      </button>
-                      <button
-                        onClick={handleCancel}
-                        className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
-                        title="Cancel"
-                      >
-                        <X size={18} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleEdit(row)}
-                        className="p-1 text-blue-600 hover:bg-blue-100 rounded transition-colors"
-                        title="Edit"
-                      >
-                        <Edit2 size={18} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(row.id)}
-                        className="p-1 text-red-600 hover:bg-red-100 rounded transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </div>
-                  )}
-                </td>
+                {hasAnyActions && (
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    {editingId === row.id ? (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleSave}
+                          className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
+                          title="Save"
+                        >
+                          <Save size={18} />
+                        </button>
+                        <button
+                          onClick={handleCancel}
+                          className="p-1 text-gray-600 hover:bg-gray-100 rounded transition-colors"
+                          title="Cancel"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        {/* Default Edit Button */}
+                        {showDefaultActions.edit && onEdit && hasEditableColumns && rowHasEditableColumns(row) && (
+                          <button
+                            onClick={() => handleEditRow(row)}
+                            className="p-1 text-blue-600 hover:bg-blue-100 rounded transition-colors"
+                            title="Edit"
+                          >
+                            <Edit2 size={18} />
+                          </button>
+                        )}
+
+                        {/* Default Delete Button */}
+                        {showDefaultActions.delete && onDelete && (
+                          <button
+                            onClick={() => handleDeleteRow(row.id)}
+                            className="p-1 text-red-600 hover:bg-red-100 rounded transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        )}
+
+                        {/* Custom Row Actions */}
+                        {rowActions.map((action, index) => {
+                          if (isActionHidden(action, row)) return null;
+
+                          return (
+                            <button
+                              key={index}
+                              onClick={() => action.onClick(row)}
+                              disabled={isActionDisabled(action, row)}
+                              className={`p-1 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${getButtonVariant(action.variant)}`}
+                              title={action.tooltip || action.label}
+                            >
+                              {action.icon || <span className="text-xs">{action.label}</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -484,10 +625,12 @@ export default function DataGrid<T extends { id: number | string }>({
         {/* Empty State */}
         {data.length === 0 && !isAdding && (
           <div className="text-center py-12">
-            <p className="text-gray-500 text-lg">No data available</p>
-            <p className="text-gray-400 text-sm mt-2">
-              Click "Add New" to create your first entry
-            </p>
+            <p className="text-gray-500 text-lg">{emptyMessage}</p>
+            {showDefaultActions.add && onAdd && (
+              <p className="text-gray-400 text-sm mt-2">
+                Click "Add New" to create your first entry
+              </p>
+            )}
           </div>
         )}
       </div>

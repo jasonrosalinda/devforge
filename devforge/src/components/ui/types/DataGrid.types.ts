@@ -1,10 +1,12 @@
 import { ReactNode } from 'react';
 
-export interface Column<T = any> {
+type EditableResolver<T> = boolean | ((row: T) => boolean);
+
+export interface Column<T> {
   key: string;
   label: string;
   type?: 'text' | 'email' | 'number' | 'select';
-  editable?: boolean;
+  editable?: EditableResolver<T>;
   placeholder?: string;
   defaultValue?: any;
   sortable?: boolean;
