@@ -6,4 +6,4 @@ export const COUNTRY_LIST = [
     { code: "VN", name: "Vietnam" },
     { code: "TH", name: "Thailand" },
     { code: "IN", name: "India" }
-];
+] as const;

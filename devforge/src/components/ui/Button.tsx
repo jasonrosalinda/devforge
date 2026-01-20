@@ -1,5 +1,4 @@
-// src/components/ui/Button.tsx
-import { cn } from "../../lib/cn";
+import { mergeCss } from "../../utils/helpers";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "danger" | "outline";
@@ -14,7 +13,7 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
-      className={cn(
+      className={mergeCss(
         "inline-flex items-center justify-center rounded-md font-medium transition focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50",
         variantStyles[variant],
         sizeStyles[size],

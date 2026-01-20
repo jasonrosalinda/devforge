@@ -1,10 +1,9 @@
-// src/components/ui/Card.tsx
-import { cn } from "../../lib/cn";
+import { mergeCss } from "../../utils/helpers";
 
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("rounded-lg border bg-white shadow-sm", className)}
+      className={mergeCss("rounded-lg border bg-white shadow-sm", className)}
       {...props}
     />
   );
@@ -13,7 +12,7 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
 export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("border-b px-4 py-3 font-semibold", className)}
+      className={mergeCss("border-b px-4 py-3 font-semibold", className)}
       {...props}
     />
   );
@@ -22,7 +21,7 @@ export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDiv
 export function CardBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("px-4 py-3 text-sm text-gray-700", className)}
+      className={mergeCss("px-4 py-3 text-sm text-gray-700", className)}
       {...props}
     />
   );

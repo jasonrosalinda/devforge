@@ -1,5 +1,5 @@
 // src/components/ui/Alert.tsx
-import { cn } from "../../lib/cn";
+import { mergeCss } from "../../utils/helpers";
 
 type AlertProps = {
   variant?: "info" | "success" | "warning" | "danger";
@@ -12,7 +12,7 @@ export function Alert({
 }: AlertProps) {
   return (
     <div
-      className={cn(
+      className={mergeCss(
         "rounded-md px-4 py-3 text-sm",
         alertStyles[variant],
         className

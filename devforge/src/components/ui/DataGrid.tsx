@@ -1,5 +1,5 @@
 import { useState, useMemo, ChangeEvent, ReactNode } from "react";
-import { useConfirm } from './contexts/ConfirmDialogContext';
+import { useConfirm } from '../../contexts/ConfirmDialogContext';
 
 import {
   Edit2,
@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 // Import types from the types file
-import { Column, RibbonButton, SortConfig } from './types/DataGrid.types';
+import { Column, RibbonButton, SortConfig } from '../../types/DataGrid.types';
 
 // Additional types not in DataGrid.types
 interface RowAction<T> {

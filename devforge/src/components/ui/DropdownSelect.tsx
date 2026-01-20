@@ -1,6 +1,6 @@
 // src/components/ui/DropdownSelect.tsx
 import { useState, useRef, useEffect, ReactNode } from "react";
-import { cn } from "../../lib/cn";
+import { mergeCss } from "../../utils/helpers";
 
 type DropdownSelectProps = {
   options: string[]; // list of items
@@ -33,7 +33,7 @@ export default function DropdownSelect({ options, placeholder = "Select", onChan
   };
 
   return (
-    <div className={cn("relative inline-block text-left", className)} ref={dropdownRef}>
+    <div className={mergeCss("relative inline-block text-left", className)} ref={dropdownRef}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -52,7 +52,7 @@ export default function DropdownSelect({ options, placeholder = "Select", onChan
       </button>
 
       <div
-        className={cn(
+        className={mergeCss(
           "absolute mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10 transform transition-all origin-top",
           open ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none"
         )}

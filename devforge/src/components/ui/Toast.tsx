@@ -1,6 +1,6 @@
 // src/components/ui/Toast.tsx
 import { useEffect, useState } from "react";
-import { cn } from "../../lib/cn";
+import { mergeCss } from "../../utils/helpers";
 
 type ToastProps = {
   message: string;
@@ -35,7 +35,7 @@ export function Toast({
 
   return (
     <div
-      className={cn(
+      className={mergeCss(
         "fixed bottom-4 right-4 px-4 py-3 border rounded shadow transform transition-all",
         variantStyles[variant],
         visible ? "opacity-100 translate-y-0 duration-300" : "opacity-0 translate-y-4 duration-300"

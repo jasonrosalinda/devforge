@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { COUNTRY_LIST } from "../constants/MEDUConstants";
-import { Column } from "../components/ui/types/DataGrid.types";
+import { COUNTRY_LIST } from "../utils/constants";
+import { Column, RibbonButton } from "../types/DataGrid.types";
 import DataGrid from "../components/ui/DataGrid";
-import { DatabaseZap } from "lucide-react";
-import { useToast } from "../components/ui/contexts/ToastContext";
+import { DatabaseZap, Upload } from "lucide-react";
+import { useToast } from "../contexts/ToastContext";
 import DropdownSelect from "../components/ui/DropdownSelect";
-import { ApiResult } from "../components/ui/types/Results.types";
+import { ApiResult } from "../types/Results.types";
+import { CardModule } from "../components/ui/CardModule";
 
 interface CacheEntry {
   id: number;
@@ -191,45 +192,53 @@ export default function MEDUCache() {
   };
 
   return (
-    <div>
-      <DropdownSelect
-        className="w-full mb-4"
-        placeholder="Select Environment"
-        options={["SIT", "UAT", "STG", "PRD"]}
-        onChange={(value) => setEnv(value)}
-      />
-
-      <DataGrid
-        columns={columns}
-        data={data}
-        showDefaultActions={{ add: false, edit: true, delete: false }}
-        onEdit={handleEdit}
-        rowActions={[
-          {
-            label: "Clear Cache",
-            icon: <DatabaseZap size={18} />,
-            hidden: (row) => row.mandatoryParam && !row.param,
-            onClick: (row) => handleClearCache(row),
-            variant: "danger",
-          },
-        ]}
-      />
-
-      {evnt.length > 0 && (
-        <div className="mt-4 p-4 border rounded bg-gray-900">
-          <h3 className="font-medium mb-2 text-white">Events Triggered:</h3>
-          <ul className="list-disc list-inside overflow-y-auto max-h-40">
-            {evnt.map((e, index) => (
-              <li
-                className={`mb-1 ${e.state == "info" ? "text-blue-300" : e.state == "success" ? "text-green-300" : e.state == "warning" ? "text-yellow-300" : "text-red-300"}`}
-                key={e.id}
-              >
-                {e.timestamp}: {e.message}
-              </li>
-            ))}
-          </ul>
+    <CardModule
+      header={
+        <div className="flex items-end flex-1 justify-end">
+          <select value={env} onChange={(e) => setEnv(e.target.value)}
+            className="w-32 px-3 py-2 border border-gray-700 bg-gray-800 text-white rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-gray-800">
+            <option value="SIT">SIT</option>
+            <option value="UAT">UAT</option>
+            <option value="STG">STG</option>
+            <option value="PRD">PRD</option>
+          </select>
         </div>
-      )}
-    </div>
+      }
+      body={
+        <>
+          <DataGrid
+            columns={columns}
+            data={data}
+            showDefaultActions={{ add: false, edit: true, delete: false }}
+            onEdit={handleEdit}
+            rowActions={[
+              {
+                label: "Clear Cache",
+                icon: <DatabaseZap size={18} />,
+                hidden: (row) => row.mandatoryParam && !row.param,
+                onClick: (row) => handleClearCache(row),
+                variant: "danger",
+              },
+            ]}
+          />
+
+          {evnt.length > 0 && (
+            <div className="mt-4 p-4 border rounded bg-gray-900">
+              <h3 className="font-medium mb-2 text-white">Events Triggered:</h3>
+              <ul className="list-disc list-inside overflow-y-auto max-h-40">
+                {evnt.map((e, index) => (
+                  <li
+                    className={`mb-1 ${e.state == "info" ? "text-blue-300" : e.state == "success" ? "text-green-300" : e.state == "warning" ? "text-yellow-300" : "text-red-300"}`}
+                    key={e.id}
+                  >
+                    {e.timestamp}: {e.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      }>
+    </CardModule>
   );
 }

@@ -5,8 +5,8 @@ import Localization from "./pages/Localization";
 import PageSpeedInsight from "./pages/PageSpeedInsight";
 import MEDUCache from "./pages/MEDUCache";
 
-import { ToastProvider } from "./components/ui/contexts/ToastContext";
-import { ConfirmDialogProvider } from './components/ui/contexts/ConfirmDialogContext';
+import { ToastProvider } from "./contexts/ToastContext";
+import { ConfirmDialogProvider } from './contexts/ConfirmDialogContext';
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);

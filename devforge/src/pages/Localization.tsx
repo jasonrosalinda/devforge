@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react';
 import { Download, Clipboard, Upload, Trash2 } from 'lucide-react';
 import DataGrid from '../components/ui/DataGrid';
-import { Column, RibbonButton } from '../components/ui/types/DataGrid.types';
-import { useToast } from "../components/ui/contexts/ToastContext";
-import { useConfirm } from '../components/ui/contexts/ConfirmDialogContext';
+import { Column, RibbonButton } from '../types/DataGrid.types';
+import { useToast } from "../contexts/ToastContext";
+import { useConfirm } from '../contexts/ConfirmDialogContext';
 
 interface LocalizationEntry {
   id: number;
