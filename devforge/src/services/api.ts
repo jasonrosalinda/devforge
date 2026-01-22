@@ -1,4 +1,4 @@
-import { ApiResponse, ApiError } from '../types/common.types';
+import type { ApiResponse, ApiError } from '../types/common.types';
 
 const API_BASE_URL = 'https://api.example.com';
 

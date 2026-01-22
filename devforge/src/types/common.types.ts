@@ -27,3 +27,7 @@ export type ButtonSize = 'small' | 'medium' | 'large';
 export interface FormErrors {
   [key: string]: string;
 }
+
+export const Envs = ["SIT", "UAT", "STG", "PRD"] as const;
+
+export type Env = (typeof Envs)[number];

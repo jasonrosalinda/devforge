@@ -1,47 +1,63 @@
-// src/components/ui/Toast.tsx
-import { useEffect, useState } from "react";
-import { mergeCss } from "../../utils/helpers";
+import { toast, type ExternalToast } from "sonner";
 
 type ToastProps = {
-  message: string;
-  variant?: "info" | "success" | "warning" | "danger";
-  duration?: number; 
-  onClose: () => void;
+    success: (message: string) => void;
+    info: (message: string) => void;
+    warning: (message: string) => void;
+    error: (message: string) => void;
+    promise: <T>(
+        promise: Promise<T>,
+        messages: {
+            loading: string;
+            success: string | ((data: T) => string);
+            error: string | ((error: any) => string);
+        }
+    ) => (string & { unwrap: () => Promise<T> }) | (number & { unwrap: () => Promise<T> }) | { unwrap: () => Promise<T> };
 };
 
-export function Toast({
-  message,
-  variant = "info",
-  duration = 3000,
-  onClose,
-}: ToastProps) {
-  const [visible, setVisible] = useState(false);
+export const Toast = (): ToastProps => {
+    const externalToast: ExternalToast = { position: "bottom-right" };
 
-  useEffect(() => {
-    setVisible(true);
-    const timer = setTimeout(() => {
-      setVisible(false);
-      setTimeout(onClose, 300); // wait for fade out
-    }, duration);
-    return () => clearTimeout(timer);
-  }, [duration, onClose]);
+    const success = (message: string) => {
+        toast.success(message, externalToast);
+    };
 
-  const variantStyles = {
-    info: "bg-blue-50 text-blue-800 border-blue-200",
-    success: "bg-green-50 text-green-800 border-green-200",
-    warning: "bg-yellow-50 text-yellow-800 border-yellow-200",
-    danger: "bg-red-50 text-red-800 border-red-200",
-  };
+    const info = (message: string) => {
+        toast.info(message, externalToast);
+    };
 
-  return (
-    <div
-      className={mergeCss(
-        "fixed bottom-4 right-4 px-4 py-3 border rounded shadow transform transition-all",
-        variantStyles[variant],
-        visible ? "opacity-100 translate-y-0 duration-300" : "opacity-0 translate-y-4 duration-300"
-      )}
-    >
-      {message}
-    </div>
-  );
-}
+    const warning = (message: string) => {
+        toast.warning(message, externalToast);
+    };
+
+    const error = (message: string) => {
+        toast.error(message, externalToast);
+    };
+
+    const promise = <T,>(
+        promiseToResolve: Promise<T>,
+        messages: {
+            loading: string;
+            success: string | ((data: T) => string);
+            error: string | ((error: any) => string);
+        }
+    ) => {
+        return toast.promise(
+            promiseToResolve,
+            {
+                loading: messages.loading,
+                success: messages.success,
+                error: messages.error,
+                ...externalToast
+            }
+        );
+    };
+
+    return {
+        success,
+        info,
+        warning,
+        error,
+        promise,
+    };
+};

@@ -1,5 +1,5 @@
-import { PageSpeedErrorResponse, PageSpeedMetrics } from "../types/pageSpeedInsight.types";
-import { ApiError } from "../types/common.types";
+import type { PageSpeedErrorResponse, PageSpeedMetrics } from "../types/pageSpeedInsight.types";
+import type { ApiError } from "../types/common.types";
 
 const API_BASE_URL = "https://www.googleapis.com";
 

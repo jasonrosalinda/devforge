@@ -1,13 +1,13 @@
 import { useState } from "react";
-import {
+import type {
     PageSpeedMetrics,
     PageSpeedInsightResult,
     PageSpeedInsightConfig,
     UsePageSpeedInsightHooks,
     PageSpeedErrorResponse
-} from "../types/pageSpeedInsight.types";
-import { googleApi } from "../services/googleApi";
-import { useToast } from "../contexts/ToastContext";
+} from "@/types/pageSpeedInsight.types";
+import { googleApi } from "@/services/googleApi";
+import { Toast } from "@/components/ui/toast";
 
 export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
     const [config, setConfig] = useState<PageSpeedInsightConfig>({
@@ -16,7 +16,7 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
     });
 
     const [results, setResults] = useState<PageSpeedInsightResult[]>([]);
-    const { showToast } = useToast();
+    const toast = Toast();
 
     const getPageSpeedMetrics = async (url: string): Promise<PageSpeedMetrics> => {
         const strategy = config.strategy?.toLowerCase() === "mobile" ? "mobile" : "desktop";
@@ -34,25 +34,27 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
 
             if (existingIndex !== -1) {
                 const updated = [...prev];
+                const existingItem = updated[existingIndex];
 
-                if (type === 'before') {
-                    updated[existingIndex] = {
-                        url: updated[existingIndex].url,
-                        before: metrics || updated[existingIndex].before,
-                        after: updated[existingIndex].after,
-                        generatingBefore: generating,
-                        generatingAfter: updated[existingIndex].generatingAfter,
-                    };
-                } else {
-                    updated[existingIndex] = {
-                        url: updated[existingIndex].url,
-                        before: updated[existingIndex].before,
-                        after: metrics || updated[existingIndex].after,
-                        generatingBefore: updated[existingIndex].generatingBefore,
-                        generatingAfter: generating,
-                    };
+                if (existingItem) {
+                    if (type === 'before') {
+                        updated[existingIndex] = {
+                            url: existingItem.url,
+                            before: metrics || existingItem.before,
+                            after: existingItem.after,
+                            generatingBefore: generating,
+                            generatingAfter: existingItem.generatingAfter,
+                        };
+                    } else {
+                        updated[existingIndex] = {
+                            url: existingItem.url,
+                            before: existingItem.before,
+                            after: metrics || existingItem.after,
+                            generatingBefore: existingItem.generatingBefore,
+                            generatingAfter: generating,
+                        };
+                    }
                 }
-
                 return updated;
             } else {
                 const newResult: PageSpeedInsightResult = {
@@ -69,59 +71,59 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
 
     const generateBefore = async (url: string): Promise<void> => {
         if (!config.apiKey) {
-            showToast("API Key is required", "danger");
+            toast.error("API Key is required");
             return;
         }
 
         if (!url) {
-            showToast("Please provide a URL", "danger");
+            toast.error("Please provide a URL");
             return;
         }
 
         try {
-            showToast(`Running 'Pre-release' pagespeed for ${url}...`, "info");
+            toast.info(`Running 'Pre-release' pagespeed for ${url}...`);
             updateResult(url, 'before', true);
 
             const metrics = await getPageSpeedMetrics(url);
             updateResult(url, 'before', false, metrics);
-            showToast(`Pre-release pagespeed run completed for ${url}!`, "success");
+            toast.success(`Pre-release pagespeed run completed for ${url}!`);
         } catch (err) {
             const error = err as PageSpeedErrorResponse;
             console.error("Error during Pre-release pagespeed run:", err);
             updateResult(url, 'before', false);
-            showToast(`Failed: ${error.message || "Unknown error"}`, "danger");
+            toast.error(`Failed: ${error.message || "Unknown error"}`);
         }
     };
 
     const generateAfter = async (url: string): Promise<void> => {
         if (!config.apiKey) {
-            showToast("API Key is required", "danger");
+            toast.error("API Key is required");
             return;
         }
 
         if (!url) {
-            showToast("Please provide a URL", "danger");
+            toast.error("Please provide a URL");
             return;
         }
 
         const existingResult = results.find((r) => r.url === url);
         if (!existingResult || !existingResult.before) {
-            showToast("Please run 'Pre-release' pagespeed run first", "danger");
+            toast.error("Please run 'Pre-release' pagespeed run first");
             return;
         }
 
         try {
-            showToast(`Running 'Post-release' pagespeed run for ${url}...`, "info");
+            toast.info(`Running 'Post-release' pagespeed run for ${url}...`);
             updateResult(url, 'after', true);
 
             const metrics = await getPageSpeedMetrics(url);
             updateResult(url, 'after', false, metrics);
-            showToast(`Post-release pagespeed run completed for ${url}!`, "success");
+            toast.success(`Post-release pagespeed run completed for ${url}!`);
         } catch (err) {
             const error = err as PageSpeedErrorResponse;
             console.error("Error during Post-release pagespeed run:", err);
             updateResult(url, 'after', false);
-            showToast(`Failed: ${error.message || "Unknown error"}`, "danger");
+            toast.error(`Failed: ${error.message || "Unknown error"}`);
         }
     };
 
@@ -132,11 +134,11 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
     };
 
     const setApiKey = (apiKey: string) => {
-        setConfig((prev) => ({ ...prev, apiKey }));
+        setConfig((prev: PageSpeedInsightConfig) => ({ ...prev, apiKey }));
     };
 
     const setStrategy = (strategy: string) => {
-        setConfig((prev) => ({ ...prev, strategy }));
+        setConfig((prev: PageSpeedInsightConfig) => ({ ...prev, strategy }));
     };
 
     const reset = () => {

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { useToast } from "../contexts/ToastContext";
+import { Toast } from "@/components/ui/toast";
 
 interface UseCopyElementAsImageOptions {
     scale?: number;
@@ -38,7 +38,7 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
         fileNamePrefix = "image",
     } = options ?? {};
 
-    const { showToast } = useToast();
+    const toast = Toast();
     const elementRef = useRef<T | null>(null);
     const [isCopying, setIsCopying] = useState(false);
 
@@ -67,7 +67,7 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
                 await navigator.clipboard.write([
                     new ClipboardItem({ "image/png": blob }),
                 ]);
-                showToast("Copied image to clipboard", "success");
+                toast.success("Copied image to clipboard");
             } else {
                 throw new Error("Clipboard API not supported");
             }
@@ -89,12 +89,12 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
                 link.click();
                 URL.revokeObjectURL(url);
 
-                showToast?.("Image downloaded", "success");
+                toast.success("Image downloaded");
             }
         } finally {
             setIsCopying(false);
         }
-    }, [backgroundColor, scale, fileNamePrefix, showToast, isCopying]);
+    }, [backgroundColor, scale, fileNamePrefix, toast, isCopying]);
 
     return {
         elementRef: elementRef as React.RefObject<T & any>,
