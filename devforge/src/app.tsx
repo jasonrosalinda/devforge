@@ -8,6 +8,7 @@ import { Toaster } from "@/components/ui/sonner"
 import LocalizationPage from "./pages/localizationPage";
 import PageSpeedResultPage from "./pages/pagespeedResultPage";
 import MEDUCachePage from "./pages/meduCachePage";
+import CSSAuditPage from "./pages/cssAuditPage";
 
 export default function App() {
     const [activePage, setActivePage] = useState("");
@@ -21,6 +22,8 @@ export default function App() {
                 return <PageSpeedResultPage />;
             case "MEDU Cache":
                 return <MEDUCachePage />;
+            case "CSS Audit":
+                return <CSSAuditPage />;
             default:
                 return <></>;
         }

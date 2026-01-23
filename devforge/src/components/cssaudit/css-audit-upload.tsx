@@ -1,0 +1,137 @@
+import { useCssAudit } from "@/hooks/useCssAudit";
+import { useRef, useState } from "react";
+import { Button } from "../ui/button";
+import { Trash2, Upload } from "lucide-react";
+import { Input } from "../ui";
+import { Label } from "@radix-ui/react-dropdown-menu";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
+import CSSFileSource from "./css-file-source";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
+import CssTableResult from "./css-table-result";
+import { Table, TableBody, TableCell, TableRow } from "../ui/table";
+
+
+export default function CSSAuditUpload() {
+    const {
+        cssContent,
+        htmlFiles,
+        handleCSSUpload,
+        handleHTMLUpload,
+        removeHtmlFile,
+        getAllHtmlClasses,
+        getUnusedCssClasses,
+        getMissingCssClasses,
+        getClassUsageByFile,
+    } = useCssAudit();
+
+    const [selectedClass, setSelectedClass] = useState<string | null>(null);
+
+    const allHtmlClasses = getAllHtmlClasses();
+    const unusedCssClasses = getUnusedCssClasses() ?? [];
+    const missingCssClasses = getMissingCssClasses() ?? [];
+
+    const cssInputUpload = useRef<HTMLInputElement>(null);
+    const htmlInputUpload = useRef<HTMLInputElement>(null);
+
+    const htmlFileNames = htmlFiles.length > 1 ? `${htmlFiles.length} files` : htmlFiles[0]?.url || "Upload HTML Files...";
+
+    const onCssUploadClick = () => {
+        cssInputUpload.current?.click();
+    };
+
+    const onHtmlUploadClick = () => {
+        htmlInputUpload.current?.click();
+    };
+
+    return (
+        <>
+            <input ref={cssInputUpload} type="file" accept=".css" onChange={handleCSSUpload} className="hidden" />
+
+            <input ref={htmlInputUpload} type="file" accept=".html,.htm" multiple onChange={handleHTMLUpload} className="hidden" />
+
+            <div className="grid grid-cols-5 gap-4">
+
+                <Card className="col-span-2 @container/card">
+                    <CardHeader>
+                        <CardTitle className="mb-5">CSS File</CardTitle>
+                        <CardDescription>
+                            <InputGroup>
+                                <InputGroupInput value={cssContent?.name} onClick={onCssUploadClick} className="cursor-pointer" placeholder="Upload CSS File..." />
+                                <InputGroupAddon>
+                                    <Upload />
+                                </InputGroupAddon>
+                                <InputGroupAddon align="inline-end">
+                                    <>
+                                        {(cssContent?.classes?.length ?? 0) > 0 && (
+                                            <p className="text-sm text-gray-600">
+                                                {cssContent?.classes?.length} found
+                                            </p>
+                                        )}
+                                    </>
+                                    {cssContent && (
+                                        <CSSFileSource name={cssContent?.name} source={cssContent?.source} />
+                                    )}
+                                </InputGroupAddon>
+                            </InputGroup>
+
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="h-[30vh]">
+                        <CssTableResult css={cssContent?.classes ?? []} />
+                    </CardContent>
+                </Card>
+
+                <Card className="col-span-3 @container/card">
+                    <CardHeader>
+                        <CardTitle className="mb-5">HTML Files</CardTitle>
+                        <CardDescription>
+                            <InputGroup>
+                                <InputGroupInput value={htmlFileNames} onClick={onHtmlUploadClick} className="cursor-pointer" placeholder="Upload HTML Files..." />
+                                <InputGroupAddon>
+                                    <Upload />
+                                </InputGroupAddon>
+                            </InputGroup>
+
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="h-[30vh]">
+                        <div className="grid grid-cols-5 gap-4 h-full">
+                            <div className="col-span-2 h-full overflow-y-auto">
+                                <Table className="border">
+                                    <TableBody>
+                                        {htmlFiles.map((file, index) => {
+                                            return (
+                                                <TableRow key={index} className="border">
+                                                    <TableCell className="truncate max-w-40" title={file.url}>
+                                                        {file.url}
+                                                    </TableCell>
+                                                    <TableCell className="text-right">
+                                                        <Button variant="ghost" size="icon"
+                                                            onClick={() => removeHtmlFile(index)}>
+                                                            <Trash2 />
+                                                        </Button>
+                                                    </TableCell>
+                                                </TableRow>
+                                            );
+                                        })}
+                                    </TableBody>
+                                </Table>
+                            </div>
+                            <div className="col-span-3 h-full overflow-y-auto">
+                                <CssTableResult css={getAllHtmlClasses()} />
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+
+            </div>
+
+            <Card className="@container/card h-[45vh]">
+                <CardHeader className="mb-5">Results</CardHeader>
+                <CardContent className="h-[35vh] overflow-y-auto">
+                    <CssTableResult css={getUnusedCssClasses() ?? []} />
+                </CardContent>
+            </Card>
+        </>
+    );
+}

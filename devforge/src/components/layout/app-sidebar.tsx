@@ -1,4 +1,4 @@
-import { DatabaseZap, BarChart, Languages, Anvil } from "lucide-react"
+import { DatabaseZap, BarChart, Languages, Anvil, Eclipse } from "lucide-react"
 
 import {
     Sidebar,
@@ -27,6 +27,10 @@ const items = [
     {
         title: "MEDU Cache",
         icon: DatabaseZap,
+    },
+    {
+        title: "CSS Audit",
+        icon: Eclipse,
     }
 ]
 
