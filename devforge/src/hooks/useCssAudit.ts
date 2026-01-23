@@ -36,7 +36,6 @@ export const useCssAudit = () => {
 
         Promise.all(filePromises).then(parsedFiles => {
             setHtmlFiles(prev => [...prev, ...parsedFiles]);
-            console.log(getAllHtmlClasses());
         });
     };
 

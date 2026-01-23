@@ -57,9 +57,6 @@ export default function CSSAuditUpload() {
                         <CardDescription>
                             <InputGroup>
                                 <InputGroupInput value={cssContent?.name} onClick={onCssUploadClick} className="cursor-pointer" placeholder="Upload CSS File..." />
-                                <InputGroupAddon>
-                                    <Upload />
-                                </InputGroupAddon>
                                 <InputGroupAddon align="inline-end">
                                     <>
                                         {(cssContent?.classes?.length ?? 0) > 0 && (
@@ -68,12 +65,9 @@ export default function CSSAuditUpload() {
                                             </p>
                                         )}
                                     </>
-                                    {cssContent && (
-                                        <CSSFileSource name={cssContent?.name} source={cssContent?.source} />
-                                    )}
+                                    <Upload />
                                 </InputGroupAddon>
                             </InputGroup>
-
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="h-[30vh]">
@@ -87,7 +81,7 @@ export default function CSSAuditUpload() {
                         <CardDescription>
                             <InputGroup>
                                 <InputGroupInput value={htmlFileNames} onClick={onHtmlUploadClick} className="cursor-pointer" placeholder="Upload HTML Files..." />
-                                <InputGroupAddon>
+                                <InputGroupAddon align="inline-end">
                                     <Upload />
                                 </InputGroupAddon>
                             </InputGroup>
@@ -127,9 +121,9 @@ export default function CSSAuditUpload() {
             </div>
 
             <Card className="@container/card h-[45vh]">
-                <CardHeader className="mb-5">Results</CardHeader>
-                <CardContent className="h-[35vh] overflow-y-auto">
-                    <CssTableResult css={getUnusedCssClasses() ?? []} />
+                <CardHeader>Unused CSS Classes ({unusedCssClasses.length})</CardHeader>
+                <CardContent className="h-[38vh] overflow-y-auto">
+                    <CssTableResult css={unusedCssClasses} />
                 </CardContent>
             </Card>
         </>

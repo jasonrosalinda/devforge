@@ -64,7 +64,6 @@ export class HtmlCss implements IHtmlCss {
             actualHtml = textContent;
         }
 
-        console.log('Parsing HTML:', actualHtml.substring(0, 500));
 
         const classRegex = /class\s*=\s*["']([^"']+)["']/gi;
 
