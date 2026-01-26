@@ -7,15 +7,10 @@ export const useCssAudit = () => {
 
     const htmlCssClasses = useMemo(() => CssInstance.merge(htmlFiles.flatMap(file => file.classes)), [htmlFiles]);
 
-    const compareCss = useMemo(() => {
-        if (!cssContent?.classes) return new CssInstance();
-        return cssContent.classes.compare([htmlCssClasses]);
-    }, [cssContent, htmlCssClasses]);
-
     const unusedCssClasses = useMemo(() => {
-        if (!compareCss) return new CssInstance();
-        return compareCss.unused();
-    }, [compareCss]);
+        if (!cssContent?.classes) return new CssInstance();
+        return cssContent.getUnusedClasses([htmlCssClasses]);
+    }, [cssContent, htmlCssClasses]);
 
     const handleCSSUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -34,7 +29,12 @@ export const useCssAudit = () => {
         const files = e.target.files;
         if (!files) return;
 
-        const filePromises = Array.from(files).map(file => {
+        const htmls = Array.from(files).filter(file =>
+            file.name.endsWith(".html") &&
+            !htmlFiles.some(existing => existing.url === file.name)
+        );
+
+        const filePromises = htmls.map(file => {
             return new Promise<HtmlCss>((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (event) => {
@@ -55,15 +55,19 @@ export const useCssAudit = () => {
         setHtmlFiles(prev => prev.filter((_, i) => i !== index));
     };
 
+    const clearHtmlFiles = () => {
+        setHtmlFiles([]);
+    };
+
     return {
         cssContent,
         htmlFiles,
         htmlCssClasses,
-        compareCss,
         unusedCssClasses,
         handleCSSUpload,
         handleHTMLUpload,
-        removeHtmlFile
+        removeHtmlFile,
+        clearHtmlFiles
     };
 
 }

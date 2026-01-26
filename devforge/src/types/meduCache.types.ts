@@ -21,7 +21,6 @@ export type MeduCacheResponse = {
 export type MeduCacheHook = {
     env: MeduCacheEnv;
     setEnv: (env: MeduCacheEnv) => void;
-    results: MeduCacheResponse[];
     data: MeduCacheEntry[];
     clearCache: (row: MeduCacheEntry) => Promise<void>;
 }

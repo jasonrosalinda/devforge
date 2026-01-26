@@ -4,8 +4,8 @@ import { Button } from "../ui/button";
 import { Trash2, Upload } from "lucide-react";
 import { Input } from "../ui";
 import { Label } from "@radix-ui/react-dropdown-menu";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
-import CSSFileSource from "./css-file-source";
+import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "../ui/input-group";
+import CSSFileSource from "./css-selector";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
 import CssTableResult from "./css-table-result";
 import { Table, TableBody, TableCell, TableRow } from "../ui/table";
@@ -17,16 +17,17 @@ export default function CSSAuditUpload() {
         cssContent,
         htmlFiles,
         htmlCssClasses,
-        compareCss,
         unusedCssClasses,
         handleCSSUpload,
         handleHTMLUpload,
         removeHtmlFile,
+        clearHtmlFiles
     } = useCssAudit();
 
     const cssInputUpload = useRef<HTMLInputElement>(null);
     const htmlInputUpload = useRef<HTMLInputElement>(null);
     const htmlFileNames = useMemo(() => htmlFiles.length > 1 ? `${htmlFiles.length} files` : htmlFiles[0]?.url || "Upload HTML Files...", [htmlFiles]);
+    const hasHtmlFiles = useMemo(() => htmlFiles.length > 0, [htmlFiles]);
 
     const onCssUploadClick = () => {
         cssInputUpload.current?.click();
@@ -44,98 +45,49 @@ export default function CSSAuditUpload() {
 
             <div className="grid grid-cols-5 gap-4">
 
-                <Card className="col-span-2 @container/card">
-                    <CardHeader>
-                        <CardTitle className="mb-5">CSS File</CardTitle>
-                        <CardDescription>
-                            <InputGroup>
-                                <InputGroupInput value={cssContent?.name} onClick={onCssUploadClick} className="cursor-pointer" placeholder="Upload CSS File..." />
-                                <InputGroupAddon align="inline-end">
-                                    <>
-                                        {cssContent.classes.isNotEmpty() && (
-                                            <p className="text-sm text-gray-600">
-                                                {cssContent.classes.count()} found
-                                            </p>
-                                        )}
-                                    </>
-                                    <Upload />
-                                </InputGroupAddon>
-                            </InputGroup>
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="h-[30vh]">
-                        <CssTableResult css={compareCss ?? []}
-                            badgeContent={(_className, count) => {
-                                return (
-                                    <>
-                                        {(() => {
-                                            if (count === 0) {
-                                                return (
-                                                    <Badge variant="destructive">Unused</Badge>
-                                                )
-                                            } else {
-                                                return (
-                                                    <Badge variant="default">{count}</Badge>
-                                                )
-                                            }
-                                        })()}
-                                    </>
-                                )
-                            }} />
-                    </CardContent>
-                </Card>
+                <CssTableResult
+                    header={() => (
+                        <InputGroup onClick={onCssUploadClick} className="cursor-pointer">
+                            <InputGroupText className="p-2 text-xs font-bold">CSS File</InputGroupText>
+                            <InputGroupInput readOnly value={cssContent?.name} className="cursor-pointer" placeholder="Upload CSS File..." />
+                            <InputGroupAddon align="inline-end" className="cursor-pointer">
+                                <>
+                                    {cssContent.classes.isNotEmpty() && (
+                                        <p className="text-sm text-gray-600">
+                                            {cssContent.classes.count()} found
+                                        </p>
+                                    )}
+                                </>
+                                <Upload />
+                            </InputGroupAddon>
+                        </InputGroup>
+                    )}
+                    data={cssContent?.classes ?? []}
+                    className="col-span-2 h-[40vh]" />
 
-                <Card className="col-span-3 @container/card">
-                    <CardHeader>
-                        <CardTitle className="mb-5">HTML Files</CardTitle>
-                        <CardDescription>
-                            <InputGroup>
-                                <InputGroupInput value={htmlFileNames} onClick={onHtmlUploadClick} className="cursor-pointer" placeholder="Upload HTML Files..." />
-                                <InputGroupAddon align="inline-end">
-                                    <Upload />
-                                </InputGroupAddon>
-                            </InputGroup>
-
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="h-[30vh]">
-                        <div className="grid grid-cols-5 gap-4 h-full">
-                            <div className="col-span-2 h-full overflow-y-auto">
-                                <Table className="border">
-                                    <TableBody>
-                                        {htmlFiles.map((file, index) => {
-                                            return (
-                                                <TableRow key={index} className="border">
-                                                    <TableCell className="truncate max-w-40" title={file.url}>
-                                                        {file.url}
-                                                    </TableCell>
-                                                    <TableCell className="text-right">
-                                                        <Button variant="ghost" size="icon"
-                                                            onClick={() => removeHtmlFile(index)}>
-                                                            <Trash2 />
-                                                        </Button>
-                                                    </TableCell>
-                                                </TableRow>
-                                            );
-                                        })}
-                                    </TableBody>
-                                </Table>
-                            </div>
-                            <div className="col-span-3 h-full overflow-y-auto">
-                                <CssTableResult css={htmlCssClasses} />
-                            </div>
-                        </div>
-                    </CardContent>
-                </Card>
+                <CssTableResult
+                    header={() => (
+                        <InputGroup className="cursor-pointer">
+                            <InputGroupText className="p-2 text-xs font-bold" onClick={onHtmlUploadClick}>HTML Files</InputGroupText>
+                            <InputGroupInput readOnly value={htmlFileNames} onClick={onHtmlUploadClick} className="cursor-pointer w-full" placeholder="Upload HTML Files..." />
+                            <InputGroupAddon align="inline-end" className="cursor-pointer">
+                                <Upload onClick={onHtmlUploadClick} />
+                                {hasHtmlFiles && (
+                                    <Trash2 onClick={clearHtmlFiles} />
+                                )}
+                            </InputGroupAddon>
+                        </InputGroup>
+                    )} data={htmlCssClasses}
+                    className="col-span-3 h-[40vh]" />
 
             </div>
 
-            <Card className="@container/card h-[45vh]">
-                <CardHeader>Unused CSS Classes ({unusedCssClasses?.count()})</CardHeader>
-                <CardContent className="h-[38vh] overflow-y-auto">
-                    <CssTableResult css={unusedCssClasses ?? []} />
-                </CardContent>
-            </Card>
+            <CssTableResult
+                header={() => (
+                    <Label>Unused CSS Classes ({unusedCssClasses?.count()})</Label>
+                )}
+                data={unusedCssClasses}
+                className="h-[45vh]" />
         </>
     );
 }

@@ -1,78 +1,72 @@
-export class CssInstance {
-    classes: Record<string, number>;
+export class CssInfo {
+    name: string;
+    instances: number;
+    selectors: string[];
 
-    constructor() {
-        this.classes = {};
+    constructor(name: string, selector?: string) {
+        this.name = name;
+        this.instances = 0;
+        this.selectors = [];
+        if (selector) this.addSelector(selector)
     }
 
-    add(className: string) {
-        this.classes[className] = (this.classes[className] || 0) + 1;
+    addSelector(selector: string) {
+        this.instances++;
+        if (!this.selectors.includes(selector)) {
+            this.selectors.push(selector);
+        }
+    }
+}
+
+export class CssInstance {
+    classes: CssInfo[];
+
+    constructor() {
+        this.classes = [];
+    }
+
+    add(className: string, selector?: string) {
+        const existingClass = this.classes.find(cls => cls.name === className);
+
+        if (!existingClass) {
+            this.classes.push(new CssInfo(className, selector));
+        } else if (selector) {
+            existingClass.addSelector(selector);
+        }
     }
 
     static merge(instances: CssInstance[]): CssInstance {
         const merged = new CssInstance();
         for (const instance of instances) {
-            for (const [className, count] of Object.entries(instance.classes)) {
-                merged.classes[className] = (merged.classes[className] || 0) + count;
+            for (const cls of instance.classes) {
+                const existingClass = merged.classes.find(c => c.name === cls.name);
+
+                if (!existingClass) {
+                    // Deep copy the class
+                    const newClass = new CssInfo(cls.name);
+                    newClass.instances = cls.instances;
+                    newClass.selectors = [...cls.selectors];
+                    merged.classes.push(newClass);
+                } else {
+                    // Merge selectors and update instances
+                    existingClass.instances += cls.instances;
+                    for (const selector of cls.selectors) {
+                        if (!existingClass.selectors.includes(selector)) {
+                            existingClass.selectors.push(selector);
+                        }
+                    }
+                }
             }
         }
         return merged;
     }
 
-    compare(instances: CssInstance[]): CssInstance {
-        const compare = new CssInstance();
-        const merged = CssInstance.merge(instances);
-        for (const [className] of Object.entries(this.classes)) {
-            const exists = merged.classes[className];
-            if (exists) {
-                compare.classes[className] = exists;
-            } else {
-                compare.classes[className] = 0;
-            }
-        }
-
-        return compare;
-    }
-
     isNotEmpty(): boolean {
-        return Object.values(this.classes).length > 0;
+        return this.classes.length > 0;
     }
 
     count(): number {
-        return Object.values(this.classes).length ?? 0;
-    }
-
-    getClassNames(): Set<string> {
-        return new Set(Object.keys(this.classes));
-    }
-
-    getSortedByCount(): Array<[string, number]> {
-        return Object.entries(this.classes).sort((a, b) => b[1] - a[1]);
-    }
-
-    uniqueTo(other: CssInstance): string[] {
-        const otherClasses = other.getClassNames();
-        return Object.keys(this.classes).filter(cls => !otherClasses.has(cls));
-    }
-
-    commonWith(other: CssInstance): string[] {
-        const otherClasses = other.getClassNames();
-        return Object.keys(this.classes).filter(cls => otherClasses.has(cls));
-    }
-
-    missingIn(other: CssInstance): string[] {
-        const otherClasses = other.getClassNames();
-        return Object.keys(this.classes).filter(cls => !otherClasses.has(cls));
-    }
-
-    unused(): CssInstance {
-        const unused = new CssInstance();
-        for (const [className] of Object.entries(this.classes)) {
-            if (this.classes[className] === 0) {
-                unused.classes[className] = 0;
-            }
-        }
-        return unused;
+        return this.classes.length;
     }
 }
 
@@ -95,17 +89,41 @@ export class CssFile implements ICssFile {
     }
 
     parseClassNames(): void {
-        const classRegex = /\.([a-zA-Z_-][a-zA-Z0-9_-]*)/g;
-        const matches = this.source.matchAll(classRegex);
-        const uniqueClasses = new Set<string>();
+        const ruleRegex = /([^{}]+)\{([^{}]*)\}/g;
+        const rules = this.source.matchAll(ruleRegex);
 
-        for (const match of matches) {
-            if (match[1]) {
-                uniqueClasses.add(match[1]);
-                this.classes.add(match[1]);
+        for (const rule of rules) {
+            const selector = rule[1]?.trim();
+
+            if (!selector) continue;
+
+            const classRegex = /\.([a-zA-Z_-][a-zA-Z0-9_-]*)/g;
+            const matches = selector.matchAll(classRegex);
+
+            for (const match of matches) {
+                if (match[1]) {
+                    this.classes.add(match[1], selector);
+                }
             }
         }
     }
+
+    getUnusedClasses(instances: CssInstance[]): CssInstance {
+        const compare = new CssInstance();
+        const merged = CssInstance.merge(instances);
+
+        for (const cls of this.classes.classes) {
+            const exists = merged.classes.find(c => c.name === cls.name);
+            if (!exists) {
+                const combinedClass = new CssInfo(cls.name);
+                combinedClass.instances = cls.instances;
+                combinedClass.selectors = [...cls.selectors];
+                compare.classes.push(combinedClass);
+            }
+        }
+        return compare;
+    }
+
 }
 
 export interface IHtmlCss {
@@ -142,12 +160,29 @@ export class HtmlCss implements IHtmlCss {
 
         for (const match of actualHtml.matchAll(classRegex)) {
             const classes = match[1]?.split(/\s+/);
+            const elementContext = this.extractElementContext(match.index!, actualHtml);
+
             classes?.forEach(cls => {
                 const trimmed = cls.trim();
                 if (trimmed) {
-                    this.classes.add(trimmed);
+                    this.classes.add(trimmed, elementContext);
                 }
             });
         }
+        console.log(this.classes);
+    }
+
+    private extractElementContext(classAttrIndex: number, html: string): string {
+        const beforeClass = html.substring(0, classAttrIndex);
+        const tagStart = beforeClass.lastIndexOf('<');
+        const afterClass = html.substring(classAttrIndex);
+        const tagEnd = afterClass.indexOf('>');
+
+        if (tagStart !== -1 && tagEnd !== -1) {
+            const fullTag = html.substring(tagStart, classAttrIndex + tagEnd + 1);
+            return fullTag.trim();
+        }
+
+        return '';
     }
 }
