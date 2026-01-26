@@ -1,5 +1,5 @@
 import { useCssAudit } from "@/hooks/useCssAudit";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { Trash2, Upload } from "lucide-react";
 import { Input } from "../ui";
@@ -9,31 +9,24 @@ import CSSFileSource from "./css-file-source";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
 import CssTableResult from "./css-table-result";
 import { Table, TableBody, TableCell, TableRow } from "../ui/table";
+import { Badge } from "../ui/badge";
 
 
 export default function CSSAuditUpload() {
     const {
         cssContent,
         htmlFiles,
+        htmlCssClasses,
+        compareCss,
+        unusedCssClasses,
         handleCSSUpload,
         handleHTMLUpload,
         removeHtmlFile,
-        getAllHtmlClasses,
-        getUnusedCssClasses,
-        getMissingCssClasses,
-        getClassUsageByFile,
     } = useCssAudit();
-
-    const [selectedClass, setSelectedClass] = useState<string | null>(null);
-
-    const allHtmlClasses = getAllHtmlClasses();
-    const unusedCssClasses = getUnusedCssClasses() ?? [];
-    const missingCssClasses = getMissingCssClasses() ?? [];
 
     const cssInputUpload = useRef<HTMLInputElement>(null);
     const htmlInputUpload = useRef<HTMLInputElement>(null);
-
-    const htmlFileNames = htmlFiles.length > 1 ? `${htmlFiles.length} files` : htmlFiles[0]?.url || "Upload HTML Files...";
+    const htmlFileNames = useMemo(() => htmlFiles.length > 1 ? `${htmlFiles.length} files` : htmlFiles[0]?.url || "Upload HTML Files...", [htmlFiles]);
 
     const onCssUploadClick = () => {
         cssInputUpload.current?.click();
@@ -59,9 +52,9 @@ export default function CSSAuditUpload() {
                                 <InputGroupInput value={cssContent?.name} onClick={onCssUploadClick} className="cursor-pointer" placeholder="Upload CSS File..." />
                                 <InputGroupAddon align="inline-end">
                                     <>
-                                        {(cssContent?.classes?.length ?? 0) > 0 && (
+                                        {cssContent.classes.isNotEmpty() && (
                                             <p className="text-sm text-gray-600">
-                                                {cssContent?.classes?.length} found
+                                                {cssContent.classes.count()} found
                                             </p>
                                         )}
                                     </>
@@ -71,7 +64,24 @@ export default function CSSAuditUpload() {
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="h-[30vh]">
-                        <CssTableResult css={cssContent?.classes ?? []} />
+                        <CssTableResult css={compareCss ?? []}
+                            badgeContent={(_className, count) => {
+                                return (
+                                    <>
+                                        {(() => {
+                                            if (count === 0) {
+                                                return (
+                                                    <Badge variant="destructive">Unused</Badge>
+                                                )
+                                            } else {
+                                                return (
+                                                    <Badge variant="default">{count}</Badge>
+                                                )
+                                            }
+                                        })()}
+                                    </>
+                                )
+                            }} />
                     </CardContent>
                 </Card>
 
@@ -112,7 +122,7 @@ export default function CSSAuditUpload() {
                                 </Table>
                             </div>
                             <div className="col-span-3 h-full overflow-y-auto">
-                                <CssTableResult css={getAllHtmlClasses()} />
+                                <CssTableResult css={htmlCssClasses} />
                             </div>
                         </div>
                     </CardContent>
@@ -121,9 +131,9 @@ export default function CSSAuditUpload() {
             </div>
 
             <Card className="@container/card h-[45vh]">
-                <CardHeader>Unused CSS Classes ({unusedCssClasses.length})</CardHeader>
+                <CardHeader>Unused CSS Classes ({unusedCssClasses?.count()})</CardHeader>
                 <CardContent className="h-[38vh] overflow-y-auto">
-                    <CssTableResult css={unusedCssClasses} />
+                    <CssTableResult css={unusedCssClasses ?? []} />
                 </CardContent>
             </Card>
         </>

@@ -1,9 +1,21 @@
-import { CssFile, HtmlCss } from "@/types/cssAudits.type";
-import { useRef, useState } from "react";
+import { CssFile, CssInstance, HtmlCss } from "@/types/cssAudits.type";
+import { useMemo, useRef, useState, type SetStateAction } from "react";
 
 export const useCssAudit = () => {
-    const [cssContent, setCssContent] = useState<CssFile>();
+    const [cssContent, setCssContent] = useState<CssFile>(new CssFile("", ""));
     const [htmlFiles, setHtmlFiles] = useState<HtmlCss[]>([]);
+
+    const htmlCssClasses = useMemo(() => CssInstance.merge(htmlFiles.flatMap(file => file.classes)), [htmlFiles]);
+
+    const compareCss = useMemo(() => {
+        if (!cssContent?.classes) return new CssInstance();
+        return cssContent.classes.compare([htmlCssClasses]);
+    }, [cssContent, htmlCssClasses]);
+
+    const unusedCssClasses = useMemo(() => {
+        if (!compareCss) return new CssInstance();
+        return compareCss.unused();
+    }, [compareCss]);
 
     const handleCSSUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -43,38 +55,15 @@ export const useCssAudit = () => {
         setHtmlFiles(prev => prev.filter((_, i) => i !== index));
     };
 
-    const getAllHtmlClasses = () => {
-        const allClasses = new Set<string>();
-        htmlFiles.forEach(file => {
-            file.classes.forEach(cls => allClasses.add(cls));
-        });
-        return Array.from(allClasses).sort();
-    };
-
-    const getUnusedCssClasses = () => {
-        const htmlClasses = getAllHtmlClasses();
-        return cssContent?.classes.filter(cssClass => !htmlClasses.includes(cssClass));
-    };
-
-    const getMissingCssClasses = () => {
-        const htmlClasses = getAllHtmlClasses();
-        return htmlClasses.filter(htmlClass => !cssContent?.classes.includes(htmlClass));
-    };
-
-    const getClassUsageByFile = (className: string) => {
-        return htmlFiles.filter(file => file.classes.includes(className));
-    };
-
     return {
         cssContent,
         htmlFiles,
+        htmlCssClasses,
+        compareCss,
+        unusedCssClasses,
         handleCSSUpload,
         handleHTMLUpload,
-        removeHtmlFile,
-        getAllHtmlClasses,
-        getUnusedCssClasses,
-        getMissingCssClasses,
-        getClassUsageByFile,
+        removeHtmlFile
     };
 
 }
