@@ -46,7 +46,8 @@ export const useLocalizationEntry = (): LocalizationEntryHooks => {
                     key: translationKey,
                     en: valueEn,
                     id: valueId,
-                    vn: valueVn
+                    vn: valueVn,
+                    state: "uploaded"
                 });
             }
         }
@@ -63,6 +64,7 @@ export const useLocalizationEntry = (): LocalizationEntryHooks => {
             throw new Error("Please upload a valid SQL file");
         }
 
+        setData([]);
         const fileContent = await file.text();
         const parsedData = parseSqlFile(fileContent);
 
@@ -117,7 +119,15 @@ export const useLocalizationEntry = (): LocalizationEntryHooks => {
         return new Promise((resolve, reject) => {
             try {
                 const script = generateSqlScript();
-                const blob = new Blob([script], { type: 'text/plain' });
+                const bom = new Uint8Array([0xFF, 0xFE]);
+                const encoder = new TextEncoder();
+                const utf16le = new Uint16Array(script.length);
+                for (let i = 0; i < script.length; i++) {
+                    utf16le[i] = script.charCodeAt(i);
+                }
+
+                const blob = new Blob([bom, utf16le], { type: 'text/plain;charset=UTF-16LE' });
+
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
                 link.href = url;
@@ -133,10 +143,32 @@ export const useLocalizationEntry = (): LocalizationEntryHooks => {
         });
     };
 
+    const update = (entry: LocalizationEntry) => {
+        const updatedData = data.map((item) => {
+            if (item.key === entry.key) {
+                return { ...entry, state: "updated" as const };
+            }
+            return item;
+        });
+        console.log(updatedData);
+        setData(updatedData);
+    };
+
+    const add = (entry: LocalizationEntry) => {
+        const updatedData = [...data, { ...entry, state: "new" as const }];
+        setData(updatedData);
+    };
+
+    const remove = (entry: LocalizationEntry) => {
+        setData(data.filter((item) => item.key !== entry.key));
+    };
+
     return {
         data,
-        setData,
         upload,
-        download
+        download,
+        update,
+        add,
+        remove
     };
 }

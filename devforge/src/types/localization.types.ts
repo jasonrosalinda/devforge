@@ -3,11 +3,14 @@ export type LocalizationEntry = {
     en: string;
     vn: string;
     id: string;
+    state: "new" | "updated" | "uploaded";
 }
 
 export type LocalizationEntryHooks = {
     data: LocalizationEntry[];
-    setData: React.Dispatch<React.SetStateAction<LocalizationEntry[]>>;
     upload: (file: File | undefined) => Promise<LocalizationEntry[]>;
     download: () => Promise<void>;
+    update: (entry: LocalizationEntry) => void;
+    add: (entry: LocalizationEntry) => void;
+    remove: (entry: LocalizationEntry) => void;
 }

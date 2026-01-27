@@ -34,7 +34,7 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
 ) => {
     const {
         scale = 2,
-        backgroundColor = "#ffffff",
+        backgroundColor = "#020817",
         fileNamePrefix = "image",
     } = options ?? {};
 

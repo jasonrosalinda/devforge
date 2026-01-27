@@ -3,7 +3,7 @@ import { DataTable } from "@/components/ui/data-table"
 import { useState, useRef } from "react";
 import type { ColumnDef } from "@tanstack/react-table"
 import { Button, Input } from "../ui";
-import { Download, Edit2, Plus, Trash2, Upload } from "lucide-react";
+import { Download, Edit2, Plus, Trash2, Upload, Clipboard, Loader2 } from "lucide-react";
 import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
     AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
@@ -18,10 +18,17 @@ import { DataTableColumnHeader } from "../ui/data-table-column-header";
 import { DataTableViewOptions } from "../ui/data-table-view-options";
 import { DataTableSearchBox } from "../ui/data-table-search-box";
 import { useLocalizationEntry } from "@/hooks/useLocalizationEntry";
+import { Badge } from "../ui/badge";
+import { DataTableFilter } from "../ui/data-table-filter";
+import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 
 export default function LocalizationTable() {
-    const { data, setData, upload, download } = useLocalizationEntry();
+    const { data, upload, download, add, update, remove } = useLocalizationEntry();
+    const { elementRef, copyAsImage, isCopying } = useCopyElementAsImage({
+        fileNamePrefix: `translations-${Date.now()}`,
+    });
     const toast = Toast();
+    const [copying, setCopying] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [selectedEntry, setSelectedEntry] = useState<LocalizationEntry>({
@@ -29,6 +36,7 @@ export default function LocalizationTable() {
         en: "",
         vn: "",
         id: "",
+        state: "new" as const,
     });
     const [errors, setErrors] = useState<Record<string, string>>({});
     const hasErrors = Object.keys(errors).length > 0;
@@ -69,15 +77,15 @@ export default function LocalizationTable() {
         }
 
         if (isNew) {
-            setData([...data, entry]);
+            add(entry);
         } else {
-            setData(data.map(row => row.key === entry.key ? entry : row));
+            update(entry);
         }
         setDialogState(false);
     };
 
     const onDeleteClick = (entry: LocalizationEntry) => {
-        setData(data.filter(row => row.key !== entry.key));
+        remove(entry);
     };
 
     const onCancelClick = () => {
@@ -124,20 +132,69 @@ export default function LocalizationTable() {
             en: "",
             vn: "",
             id: "",
+            state: "new" as const,
         });
         setIsDialogOpen(open);
     }
 
+    const onCopyAsImage = async () => {
+        setCopying(true);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        try {
+            await copyAsImage();
+        } catch (error) {
+            console.error("Failed to copy image:", error);
+        } finally {
+            setCopying(false);
+        }
+    };
+
+
     const cellContent = (content: string) => {
         return (<p className="break-words max-w-xs">{content}</p>);
     }
+
+    const cellState = (state: "new" | "updated" | "uploaded") => {
+        let variantState: "destructive" | "default" | "secondary" | "outline" = "default";
+
+        switch (state) {
+            case "new":
+                variantState = "destructive";
+                break;
+            case "updated":
+                variantState = "destructive";
+                break;
+            case "uploaded":
+                variantState = "outline";
+                break;
+            default:
+                variantState = "default";
+                break;
+        }
+
+        return <Badge variant={variantState} className="ml-2">{state}</Badge>;
+    };
 
     const columns: ColumnDef<LocalizationEntry>[] = [
         {
             accessorKey: "key", header: ({ column }) => (
                 <DataTableColumnHeader column={column} title="Translation Key" />
             ),
-            cell: ({ row }) => { return (cellContent(row.original.key)); },
+            cell: ({ row }) => {
+                return (
+                    <p className="break-words max-w-xs">{row.original.key}
+                        {cellState(row.original.state)}
+                    </p>
+                );
+            },
+        },
+        {
+            accessorKey: "state",
+            header: "",
+            cell: () => null,
+            filterFn: (row, id, value) => {
+                return value.includes(row.getValue(id));
+            },
         },
         {
             accessorKey: "en", header: "Value (EN)",
@@ -155,47 +212,51 @@ export default function LocalizationTable() {
             id: "actions",
             cell: ({ row }) => {
                 return (
-                    <div className="flex justify-end items-center gap-2">
-                        <Button
-                            variant="ghost"
-                            size="sm" title={`Edit ${row.original.key}`}
-                            onClick={() => onEditClick(row.original)}
-                        >
-                            <Edit2 />
-                        </Button>
-                        <AlertDialog>
-                            <AlertDialogTrigger asChild>
+                    <>
+                        {!copying && (
+                            <div className="flex justify-end items-center gap-2">
                                 <Button
-                                    title={`Delete ${row.original.key}`}
                                     variant="ghost"
-                                    size="sm"
+                                    size="sm" title={`Edit ${row.original.key}`}
+                                    onClick={() => onEditClick(row.original)}
                                 >
-                                    <Trash2 />
+                                    <Edit2 />
                                 </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                                <AlertDialogHeader>
-                                    <AlertDialogTitle>Delete {row.original.key}?</AlertDialogTitle>
-                                </AlertDialogHeader>
-                                <AlertDialogFooter>
-                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                    <AlertDialogAction
-                                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                        onClick={() => onDeleteClick(row.original)}
-                                    >
-                                        Delete
-                                    </AlertDialogAction>
-                                </AlertDialogFooter>
-                            </AlertDialogContent>
-                        </AlertDialog>
-                    </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button
+                                            title={`Delete ${row.original.key}`}
+                                            variant="ghost"
+                                            size="sm"
+                                        >
+                                            <Trash2 />
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Delete {row.original.key}?</AlertDialogTitle>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                                onClick={() => onDeleteClick(row.original)}
+                                            >
+                                                Delete
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+                        )}
+                    </>
                 );
             },
         },
     ]
 
     return (
-        <>
+        <div className="h-[85vh]">
             <input
                 ref={fileInputRef}
                 type="file"
@@ -204,7 +265,7 @@ export default function LocalizationTable() {
                 style={{ display: 'none' }}
             />
 
-            <DataTable header={
+            <DataTable tableRef={elementRef} header={
                 (table) => (
                     <div className="flex w-full items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -220,9 +281,30 @@ export default function LocalizationTable() {
                                 <Download />
                                 Download
                             </Button>
+                            <Button variant="outline" size="sm" onClick={onCopyAsImage} title="Copy table as image">
+                                {copying && (
+                                    <>
+                                        <Loader2 size={18} className="animate-spin mx-auto text-white" /> Copying...
+                                    </>
+                                )}
+                                {!copying && (
+                                    <>
+                                        <Clipboard size={18} className="mx-auto" /> Copy as image
+                                    </>
+                                )}
+                            </Button>
                         </div>
                         <div className="flex gap-2 items-center">
                             <DataTableSearchBox table={table} placeholder="Search" />
+                            <DataTableFilter
+                                column={table.getColumn("state")}
+                                title="State"
+                                options={[
+                                    { label: `New (${data.filter((item) => item.state === "new").length})`, value: "new" },
+                                    { label: `Updated (${data.filter((item) => item.state === "updated").length})`, value: "updated" },
+                                    { label: `Uploaded (${data.filter((item) => item.state === "uploaded").length})`, value: "uploaded" },
+                                ]}
+                            />
                             <DataTableViewOptions table={table} />
                         </div>
                     </div>
@@ -273,6 +355,6 @@ export default function LocalizationTable() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
-        </>
+        </div>
     )
 }

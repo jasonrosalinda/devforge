@@ -14,12 +14,13 @@ interface DataTableProps<TData, TValue> {
     header?: (table: ReturnType<typeof useReactTable<TData>>) => React.ReactNode,
     columns: ColumnDef<TData, TValue>[]
     data: TData[],
+    tableRef?: React.RefObject<HTMLDivElement>,
 }
-
 export function DataTable<TData, TValue>({
     header,
     columns,
     data,
+    tableRef,
 }: DataTableProps<TData, TValue>) {
     const [globalFilter, setGlobalFilter] = useState("");
     const [sorting, setSorting] = React.useState<SortingState>([])
@@ -47,16 +48,15 @@ export function DataTable<TData, TValue>({
             </div>
 
             {/* Table Container with Fixed Layout */}
-            <div className="flex flex-col overflow-hidden rounded-md border flex-1">
-                {/* Fixed Header */}
-                <div className="overflow-hidden">
+            <div ref={tableRef} className="flex flex-col overflow-hidden rounded-md border flex-1">
+                <div className="relative flex-1 overflow-auto table-scroll-area">
                     <Table>
-                        <TableHeader>
+                        <TableHeader className="sticky top-0 z-10 bg-background">
                             {table.getHeaderGroups().map((headerGroup) => (
                                 <TableRow key={headerGroup.id}>
                                     {headerGroup.headers.map((header) => {
                                         return (
-                                            <TableHead key={header.id}>
+                                            <TableHead key={header.id} className="bg-background">
                                                 {header.isPlaceholder
                                                     ? null
                                                     : flexRender(
@@ -69,35 +69,30 @@ export function DataTable<TData, TValue>({
                                 </TableRow>
                             ))}
                         </TableHeader>
+                        <TableBody>
+                            {table.getRowModel().rows?.length ? (
+                                table.getRowModel().rows.map((row) => (
+                                    <TableRow
+                                        key={row.id}
+                                        data-state={row.getIsSelected() && "selected"}
+                                    >
+                                        {row.getVisibleCells().map((cell) => (
+                                            <TableCell key={cell.id}>
+                                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                            </TableCell>
+                                        ))}
+                                    </TableRow>
+                                ))
+                            ) : (
+                                <TableRow className="hover:bg-transparent">
+                                    <TableCell colSpan={columns.length} className="h-24 text-center">
+                                        No results.
+                                    </TableCell>
+                                </TableRow>
+                            )}
+                        </TableBody>
                     </Table>
                 </div>
-
-                {/* Scrollable Body */}
-                <ScrollArea className="flex-1">
-                    <TableBody>
-                        {table.getRowModel().rows?.length ? (
-                            table.getRowModel().rows.map((row) => (
-                                <TableRow
-                                    key={row.id}
-                                    data-state={row.getIsSelected() && "selected"}
-                                >
-                                    {row.getVisibleCells().map((cell) => (
-                                        <TableCell key={cell.id}>
-                                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                                        </TableCell>
-                                    ))}
-                                </TableRow>
-                            ))
-                        ) : (
-                            <TableRow className="hover:bg-transparent">
-                                <TableCell colSpan={columns.length} className="h-24 text-center">
-                                    No results.
-                                </TableCell>
-                            </TableRow>
-                        )}
-                    </TableBody>
-                </ScrollArea>
-
                 {/* Pagination Section */}
                 <div className="border-t">
                     <div className="px-2 py-5">
