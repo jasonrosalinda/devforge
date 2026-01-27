@@ -17,7 +17,7 @@ const ReactCheatsheet = () => {
     const CodeBlock = ({ code, id, title }: { code: string; id: string; title?: string }) => (
         <div className="relative group">
             {title && <div className="text-sm font-semibold text-slate-700 mb-2">{title}</div>}
-            <pre className="border p-4 rounded-lg overflow-x-auto text-sm table-scroll-area">
+            <pre className="border p-4 rounded-lg overflow-x-auto text-sm scrollable-content">
                 <code>{code}</code>
             </pre>
             <button
@@ -1195,11 +1195,6 @@ const Component = () => {
                     </TabsContent>
                 </Tabs>
 
-                {/* Footer */}
-                <div className="mt-12 text-center text-slate-600 text-sm">
-                    <p>💙 Built with React, TypeScript, Tailwind CSS, and shadcn/ui</p>
-                    <p className="mt-2">Keep this cheatsheet handy for your next React project!</p>
-                </div>
             </div>
         </div>
     );
