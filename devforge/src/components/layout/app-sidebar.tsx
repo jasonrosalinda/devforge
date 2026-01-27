@@ -1,4 +1,4 @@
-import { DatabaseZap, BarChart, Languages, Anvil, Eclipse } from "lucide-react"
+import { Anvil } from "lucide-react"
 
 import {
     Sidebar,
@@ -11,30 +11,9 @@ import {
     SidebarMenuButton,
     SidebarMenuItem,
 } from "@/components/ui/sidebar"
+import type { Page } from "@/types/pages.types"
 
-// Menu items.
-const items = [
-    {
-        title: "Translation",
-        url: "#",
-        icon: Languages,
-    },
-    {
-        title: "PageSpeed",
-        url: "#",
-        icon: BarChart,
-    },
-    {
-        title: "MEDU Cache",
-        icon: DatabaseZap,
-    },
-    {
-        title: "CSS Audit",
-        icon: Eclipse,
-    }
-]
-
-export function AppSidebar({ activePage, setActivePage }: { activePage: string, setActivePage: (page: string) => void }) {
+export function AppSidebar({ pages, activePage, setActivePage }: { pages: Page[], activePage: string, setActivePage: (page: string) => void }) {
     return (
         <Sidebar collapsible="offcanvas" variant="inset">
             <SidebarHeader>
@@ -53,7 +32,7 @@ export function AppSidebar({ activePage, setActivePage }: { activePage: string, 
                 <SidebarGroup>
                     <SidebarGroupContent>
                         <SidebarMenu>
-                            {items.map((item) => (
+                            {pages.map((item) => (
                                 <SidebarMenuItem key={item.title}>
                                     <SidebarMenuButton isActive={item.title === activePage} tooltip={item.title} onClick={() => setActivePage(item.title)}>
                                         {item.icon &&
