@@ -81,15 +81,15 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
         }
 
         try {
-            toast.info(`Running 'Pre-release' pagespeed for ${url}...`);
+            toast.info(`Running pagespeed for ${url}...`);
             updateResult(url, 'before', true);
 
             const metrics = await getPageSpeedMetrics(url);
             updateResult(url, 'before', false, metrics);
-            toast.success(`Pre-release pagespeed run completed for ${url}!`);
+            toast.success(`Pagespeed run completed for ${url}!`);
         } catch (err) {
             const error = err as PageSpeedErrorResponse;
-            console.error("Error during Pre-release pagespeed run:", err);
+            console.error("Error during pagespeed run:", err);
             updateResult(url, 'before', false);
             toast.error(`Failed: ${error.message || "Unknown error"}`);
         }
@@ -113,15 +113,15 @@ export const usePageSpeedInsight = (): UsePageSpeedInsightHooks => {
         }
 
         try {
-            toast.info(`Running 'Post-release' pagespeed run for ${url}...`);
+            toast.info(`Running pagespeed run for ${url}...`);
             updateResult(url, 'after', true);
 
             const metrics = await getPageSpeedMetrics(url);
             updateResult(url, 'after', false, metrics);
-            toast.success(`Post-release pagespeed run completed for ${url}!`);
+            toast.success(`Pagespeed run completed for ${url}!`);
         } catch (err) {
             const error = err as PageSpeedErrorResponse;
-            console.error("Error during Post-release pagespeed run:", err);
+            console.error("Error during pagespeed run:", err);
             updateResult(url, 'after', false);
             toast.error(`Failed: ${error.message || "Unknown error"}`);
         }

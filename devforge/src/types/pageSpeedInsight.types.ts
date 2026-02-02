@@ -9,13 +9,19 @@ export interface PageSpeedInsightConfig {
 }
 
 export interface PageSpeedMetrics {
-    speedIndex: number;
-    largestContentfulPaint: number;
-    cumulativeLayoutShift: number;
-    totalBlockingTime: number;
-    firstContentfulPaint: number;
+    speedIndex: PageSpeedMetricDetails;
+    largestContentfulPaint: PageSpeedMetricDetails;
+    cumulativeLayoutShift: PageSpeedMetricDetails;
+    totalBlockingTime: PageSpeedMetricDetails;
+    firstContentfulPaint: PageSpeedMetricDetails;
     runWarnings?: string;
     errorResponse?: PageSpeedErrorResponse;
+}
+
+export interface PageSpeedMetricDetails {
+    displayValue: string;
+    numericValue: number;
+    numericUnit: string;
 }
 
 export interface PageSpeedInsightResult {

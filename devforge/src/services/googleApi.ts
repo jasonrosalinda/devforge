@@ -8,7 +8,9 @@ interface PageSpeedApiResponse {
     audits?: Record<
       string,
       {
+        displayValue?: string;
         numericValue?: number;
+        numericUnit?: string;
       }
     >;
     runWarnings?: string;
@@ -56,23 +58,61 @@ class GoogleApiService {
       const warnings = data.lighthouseResult?.runWarnings;
 
       return {
-        totalBlockingTime: audits?.["total-blocking-time"]?.numericValue ?? 0,
-        firstContentfulPaint: audits?.["first-contentful-paint"]?.numericValue ?? 0,
-        speedIndex: audits?.["speed-index"]?.numericValue ?? 0,
-        largestContentfulPaint:
-          audits?.["largest-contentful-paint"]?.numericValue ?? 0,
-        cumulativeLayoutShift:
-          audits?.["cumulative-layout-shift"]?.numericValue ?? 0,
+        totalBlockingTime: {
+          displayValue: audits?.["total-blocking-time"]?.displayValue ?? "",
+          numericValue: audits?.["total-blocking-time"]?.numericValue ?? 0,
+          numericUnit: audits?.["total-blocking-time"]?.numericUnit ?? "",
+        },
+        firstContentfulPaint: {
+          displayValue: audits?.["first-contentful-paint"]?.displayValue ?? "",
+          numericValue: audits?.["first-contentful-paint"]?.numericValue ?? 0,
+          numericUnit: audits?.["first-contentful-paint"]?.numericUnit ?? "",
+        },
+        speedIndex: {
+          displayValue: audits?.["speed-index"]?.displayValue ?? "",
+          numericValue: audits?.["speed-index"]?.numericValue ?? 0,
+          numericUnit: audits?.["speed-index"]?.numericUnit ?? "",
+        },
+        largestContentfulPaint: {
+          displayValue: audits?.["largest-contentful-paint"]?.displayValue ?? "",
+          numericValue: audits?.["largest-contentful-paint"]?.numericValue ?? 0,
+          numericUnit: audits?.["largest-contentful-paint"]?.numericUnit ?? "",
+        },
+        cumulativeLayoutShift: {
+          displayValue: audits?.["cumulative-layout-shift"]?.displayValue ?? "",
+          numericValue: audits?.["cumulative-layout-shift"]?.numericValue ?? 0,
+          numericUnit: audits?.["cumulative-layout-shift"]?.numericUnit ?? "",
+        },
         runWarnings: warnings ?? "",
       };
     }
     catch (error) {
       return {
-        totalBlockingTime: 0,
-        firstContentfulPaint: 0,
-        speedIndex: 0,
-        largestContentfulPaint: 0,
-        cumulativeLayoutShift: 0,
+        totalBlockingTime: {
+          displayValue: "",
+          numericValue: 0,
+          numericUnit: "",
+        },
+        firstContentfulPaint: {
+          displayValue: "",
+          numericValue: 0,
+          numericUnit: "",
+        },
+        speedIndex: {
+          displayValue: "",
+          numericValue: 0,
+          numericUnit: "",
+        },
+        largestContentfulPaint: {
+          displayValue: "",
+          numericValue: 0,
+          numericUnit: "",
+        },
+        cumulativeLayoutShift: {
+          displayValue: "",
+          numericValue: 0,
+          numericUnit: "",
+        },
         runWarnings: "",
         errorResponse: error as PageSpeedErrorResponse,
       };

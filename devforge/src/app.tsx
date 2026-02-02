@@ -17,7 +17,7 @@ export default function App() {
                 <SidebarInset>
                     <AppHeader pageName={activePage} />
                     <div className="flex flex-1 flex-col">
-                        <div className="@container/main flex flex-1 flex-col gap-2 px-5 container mx-auto py-5">
+                        <div className="w-full flex flex-1 flex-col gap-2 px-5 container-fluid mx-auto py-5">
                             {renderPage(activePage)}
                         </div>
                     </div>

@@ -4,7 +4,7 @@ import { Trash2, Loader2, Plus, X, RotateCcw, Clipboard, Play, Settings2 } from 
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Button, Input } from '../ui';
-import type { PageSpeedInsightResult } from '@/types/pageSpeedInsight.types';
+import type { PageSpeedInsightResult, PageSpeedMetricDetails } from '@/types/pageSpeedInsight.types';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '../ui/dropdown-menu';
 
@@ -27,11 +27,19 @@ export const PageSpeedResults: React.FC = () => {
     });
     const [selected, setSelected] = useState<string[]>(['SI', 'LCP', 'CLS', 'TBT', 'FCP']);
     const [showIMP, setShowIMP] = useState(true);
+    const [showBefore, setShowBefore] = useState(true);
+    const [showAfter, setShowAfter] = useState(true);
     const [copying, setCopying] = useState(false);
     const [beforeLabel, setBeforeLabel] = useState('');
     const [afterLabel, setAfterLabel] = useState('');
     const [generation, setGeneration] = useState(1);
     const isAfterGeneration = (generation & 1) === 0;
+    const beforeGenerationLabel = beforeLabel || 'Before';
+    const afterGenerationLabel = afterLabel || 'After';
+
+    const runLabel = !isAfterGeneration ?
+        `Run ${beforeGenerationLabel}` :
+        `Run ${afterGenerationLabel}`;
 
     const addUrlField = () => {
         setUrls([...urls, '']);
@@ -51,6 +59,10 @@ export const PageSpeedResults: React.FC = () => {
         const removedUrl = urls[index];
         if (removedUrl) {
             removeResult(removedUrl);
+        }
+
+        if (urls.length === 0) {
+            setGeneration(1);
         }
     };
 
@@ -75,8 +87,8 @@ export const PageSpeedResults: React.FC = () => {
         return improvement > 0 ? `+${formatted}%` : `${formatted}%`;
     };
 
-    const formatMetricValue = (value: number | null | undefined): string => {
-        return value !== null && value !== undefined ? value.toFixed(3) : '-';
+    const getCellValue = (metric: PageSpeedMetricDetails | undefined): string => {
+        return metric?.displayValue ?? '-';
     };
 
     const getResultForUrl = (url: string) => {
@@ -93,6 +105,7 @@ export const PageSpeedResults: React.FC = () => {
 
     const onClearUrls = () => {
         setUrls(['']);
+        setGeneration(1);
     };
 
     const onCopyAsImage = async () => {
@@ -122,22 +135,30 @@ export const PageSpeedResults: React.FC = () => {
     const showCLS = selected.includes('CLS');
     const showTBT = selected.includes('TBT');
     const showFCP = selected.includes('FCP');
-    const thSpan = showIMP ? 3 : 2;
+    const thSpan = (!showBefore || !showAfter) ? 1 : (showIMP ? 3 : 2);
 
-    const cellMetrics = (result: PageSpeedInsightResult | undefined, show: boolean, before: number | undefined, after: number | undefined) => {
+    const cellMetrics = (result: PageSpeedInsightResult | undefined, show: boolean, before: PageSpeedMetricDetails | undefined, after: PageSpeedMetricDetails | undefined) => {
         return (
             <>
                 {show && (
                     <>
-                        <TableCell className="text-center border">
-                            {result?.generatingBefore ? <Loader2 className="animate-spin mx-auto" size={20} /> : formatMetricValue(before)}
-                        </TableCell>
-                        <TableCell className="text-center border">
-                            {result?.generatingAfter ? <Loader2 className="animate-spin mx-auto" size={20} /> : formatMetricValue(after)}
-                        </TableCell>
-                        {showIMP && (
+                        {showBefore && (
                             <TableCell className="text-center border">
-                                {before && after ? calculateImprovement(before, after) : '-'}
+                                {result?.generatingBefore ?
+                                    <Loader2 className="animate-spin mx-auto" size={20} /> :
+                                    getCellValue(before)}
+                            </TableCell>
+                        )}
+                        {showAfter && (
+                            <TableCell className="text-center border">
+                                {result?.generatingAfter ?
+                                    <Loader2 className="animate-spin mx-auto" size={20} /> :
+                                    getCellValue(after)}
+                            </TableCell>
+                        )}
+                        {showBefore && showAfter && showIMP && (
+                            <TableCell className="text-center border">
+                                {before && after ? calculateImprovement(before.numericValue, after.numericValue) : '-'}
                             </TableCell>
                         )}
                     </>
@@ -168,7 +189,7 @@ export const PageSpeedResults: React.FC = () => {
                     <Button variant="outline" size="sm" title="Run page speed insight"
                         onClick={run}
                         disabled={!config.apiKey || urls.every(url => !url.trim())}>
-                        <Play size={18} /> Run
+                        <Play size={18} /> {runLabel}
                     </Button>
                     <div className="h-6 w-px bg-gray-600 mx-2"></div>
                     <Button variant="outline" size="sm" title="Reset page speed results"
@@ -230,9 +251,18 @@ export const PageSpeedResults: React.FC = () => {
                             </DropdownMenuCheckboxItem>
 
                             <DropdownMenuSeparator />
+                            <DropdownMenuCheckboxItem key="Before" className="capitalize" checked={showBefore}
+                                onCheckedChange={(value) => setShowBefore(value)}>
+                                {beforeGenerationLabel}
+                            </DropdownMenuCheckboxItem>
+                            <DropdownMenuCheckboxItem key="After" className="capitalize" checked={showAfter}
+                                onCheckedChange={(value) => setShowAfter(value)}>
+                                {afterGenerationLabel}
+                            </DropdownMenuCheckboxItem>
                             <DropdownMenuCheckboxItem key="IMP" className="capitalize" checked={showIMP} onCheckedChange={(value) => setShowIMP(value)}>
                                 Improvement
                             </DropdownMenuCheckboxItem>
+
                         </DropdownMenuContent>
                     </DropdownMenu>
 
@@ -275,17 +305,19 @@ export const PageSpeedResults: React.FC = () => {
                                 <TableHead colSpan={thSpan} className="text-center border">FCP</TableHead>
                             )}
                         </TableRow>
-                        <TableRow>
-                            {[...Array(selected.length)].map((_, i) => (
-                                <React.Fragment key={i}>
-                                    <TableHead className="text-center text-sm border">{beforeLabel || 'Before'}</TableHead>
-                                    <TableHead className="text-center text-sm border">{afterLabel || 'After'}</TableHead>
-                                    {showIMP && (
-                                        <TableHead className="text-center text-sm border">Improvement</TableHead>
-                                    )}
-                                </React.Fragment>
-                            ))}
-                        </TableRow>
+                        {(showBefore && showAfter) && (
+                            <TableRow>
+                                {[...Array(selected.length)].map((_, i) => (
+                                    <React.Fragment key={i}>
+                                        <TableHead className="text-center text-sm border">{beforeGenerationLabel}</TableHead>
+                                        <TableHead className="text-center text-sm border">{afterGenerationLabel}</TableHead>
+                                        {showIMP && (
+                                            <TableHead className="text-center text-sm border">Improvement</TableHead>
+                                        )}
+                                    </React.Fragment>
+                                ))}
+                            </TableRow>
+                        )}
                     </TableHeader>
                     <TableBody>
                         {urls.map((url, index) => {
@@ -321,11 +353,27 @@ export const PageSpeedResults: React.FC = () => {
                                             )}
 
                                         </div>
-                                        {(urlResult?.before?.errorResponse || urlResult?.before?.runWarnings) && (
-                                            <p className="text-xs text-red-500 mt-1">
-                                                * {urlResult?.before?.errorResponse?.message || urlResult?.before?.runWarnings}
-                                            </p>
-                                        )}
+                                        {(() => {
+                                            const errorMsg = urlResult?.before?.errorResponse?.message?.trim() ||
+                                                urlResult?.before?.runWarnings?.trim();
+
+                                            return errorMsg && (
+                                                <p className="text-xs text-red-500 mt-1">
+                                                    * {errorMsg}
+                                                </p>
+                                            );
+                                        })()}
+
+                                        {(() => {
+                                            const errorMsg = urlResult?.after?.errorResponse?.message?.trim() ||
+                                                urlResult?.after?.runWarnings?.trim();
+
+                                            return errorMsg && (
+                                                <p className="text-xs text-red-500 mt-1">
+                                                    * {errorMsg}
+                                                </p>
+                                            );
+                                        })()}
                                     </TableCell>
 
                                     {cellMetrics(urlResult, showSI, urlResult?.before?.speedIndex, urlResult?.after?.speedIndex)}

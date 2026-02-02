@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/sidebar"
 import type { Page } from "@/types/pages.types"
 
-export function AppSidebar({ pages, activePage, setActivePage }: { pages: Page[], activePage: string, setActivePage: (page: string) => void }) {
+export function AppSidebar({ pages, activePage, setActivePage }:
+    { pages: Page[], activePage: string, setActivePage: (page: string) => void }) {
     return (
         <Sidebar collapsible="offcanvas" variant="inset">
             <SidebarHeader>
