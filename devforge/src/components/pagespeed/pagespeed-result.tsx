@@ -4,7 +4,7 @@ import { Trash2, Loader2, Plus, X, RotateCcw, Clipboard, Play, Settings2 } from 
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Button, Input } from '../ui';
-import type { PageSpeedInsightResult, PageSpeedMetricDetails } from '@/types/pageSpeedInsight.types';
+import type { PageSpeedInsightResult, PageSpeedMetricDetails, PageSpeedMetrics } from '@/types/pageSpeedInsight.types';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '../ui/dropdown-menu';
 
@@ -128,6 +128,28 @@ export const PageSpeedResults: React.FC = () => {
             await runAllAfter();
         }
         setGeneration(generation + 1);
+    }
+
+    const getMessages = (metrics?: PageSpeedMetrics | null): string | null => {
+        const messages: string[] = [];
+
+        if (metrics?.errorResponse?.message?.trim()) {
+            messages.push(metrics.errorResponse.message.trim());
+        }
+
+        if (metrics?.runWarnings) {
+            if (Array.isArray(metrics.runWarnings)) {
+                // If it's an array, join them
+                const warnings = metrics.runWarnings.filter(w => w?.trim()).join(', ');
+                if (warnings) messages.push(warnings);
+            } else if (typeof metrics.runWarnings === 'string') {
+                // If it's a string
+                const warning = metrics.runWarnings.trim();
+                if (warning) messages.push(warning);
+            }
+        }
+
+        return messages.length > 0 ? messages.join(' | ') : null;
     }
 
     const showSI = selected.includes('SI');
@@ -322,6 +344,8 @@ export const PageSpeedResults: React.FC = () => {
                     <TableBody>
                         {urls.map((url, index) => {
                             const urlResult = getResultForUrl(url);
+                            const beforeMsg = getMessages(urlResult?.before);
+                            const afterMsg = getMessages(urlResult?.after);
                             return (
                                 <TableRow key={index} className="border">
                                     <TableCell className="border sticky left-0 bg-background z-10">
@@ -354,23 +378,17 @@ export const PageSpeedResults: React.FC = () => {
 
                                         </div>
                                         {(() => {
-                                            const errorMsg = urlResult?.before?.errorResponse?.message?.trim() ||
-                                                urlResult?.before?.runWarnings?.trim();
-
-                                            return errorMsg && (
+                                            return beforeMsg && (
                                                 <p className="text-xs text-red-500 mt-1">
-                                                    * {errorMsg}
+                                                    * {beforeMsg}
                                                 </p>
                                             );
                                         })()}
 
                                         {(() => {
-                                            const errorMsg = urlResult?.after?.errorResponse?.message?.trim() ||
-                                                urlResult?.after?.runWarnings?.trim();
-
-                                            return errorMsg && (
+                                            return afterMsg && (
                                                 <p className="text-xs text-red-500 mt-1">
-                                                    * {errorMsg}
+                                                    * {afterMsg}
                                                 </p>
                                             );
                                         })()}
