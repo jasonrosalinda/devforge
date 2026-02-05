@@ -244,12 +244,6 @@ export const PageSpeedResults: React.FC = () => {
 
                 </div>
                 <div className="flex justify-end items-center gap-2">
-                    <Input type="number" value={improvementThreshold} className='scrollable-content'
-                        onChange={(e) => setImprovementThreshold(Number(e.target.value))}
-                        placeholder="Improvement threshold"
-                    />
-
-                    <div className="h-6 w-px bg-gray-600 mx-2"></div>
 
                     <Input type="text" value={beforeLabel}
                         onChange={(e) => setBeforeLabel(e.target.value)}
@@ -314,6 +308,10 @@ export const PageSpeedResults: React.FC = () => {
                     </DropdownMenu>
 
                     <div className="h-6 w-px bg-gray-600 mx-2"></div>
+                    <Input type="number" value={improvementThreshold} className='w-24'
+                        onChange={(e) => setImprovementThreshold(Number(e.target.value))}
+                        placeholder="Improvement threshold"
+                    />
                     <Button variant="outline" size="sm" onClick={onCopyAsImage}
                         disabled={copying} title="Copy results as image">
                         {copying && (
