@@ -36,7 +36,6 @@ export const PageSpeedResults: React.FC = () => {
     const isAfterGeneration = (generation & 1) === 0;
     const beforeGenerationLabel = beforeLabel || 'Before';
     const afterGenerationLabel = afterLabel || 'After';
-
     const runLabel = !isAfterGeneration ?
         `Run ${beforeGenerationLabel}` :
         `Run ${afterGenerationLabel}`;
@@ -238,10 +237,18 @@ export const PageSpeedResults: React.FC = () => {
                         onChange={(e) => setBeforeLabel(e.target.value)}
                         placeholder="Enter before label"
                     />
+                    <Button variant="outline" size="sm" title={`Run ${beforeLabel}`}
+                        disabled={!config.apiKey || urls.every(url => !url.trim())} onClick={() => runAllBefore()}>
+                        <Play size={18} />
+                    </Button>
                     <Input type="text" value={afterLabel}
                         onChange={(e) => setAfterLabel(e.target.value)}
                         placeholder="Enter after label"
                     />
+                    <Button variant="outline" size="sm" title={`Run ${afterLabel}`}
+                        disabled={!config.apiKey || urls.every(url => !url.trim())} onClick={() => runAllAfter()}>
+                        <Play size={18} />
+                    </Button>
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                             <Button
@@ -406,6 +413,7 @@ export const PageSpeedResults: React.FC = () => {
                     </TableBody>
                 </Table>
             </div>
+
         </>
     );
 };
