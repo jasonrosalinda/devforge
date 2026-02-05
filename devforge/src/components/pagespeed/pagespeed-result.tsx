@@ -355,7 +355,7 @@ export const PageSpeedResults: React.FC = () => {
                                             )}
 
                                             {!copying && (
-                                                <div className="relative max-w-sm">
+                                                <div className="relative w-full">
 
                                                     <Input
                                                         type="text"
