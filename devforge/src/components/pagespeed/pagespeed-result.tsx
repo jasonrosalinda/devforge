@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { Trash2, Loader2, Plus, X, RotateCcw, Clipboard, Play, Settings2 } from 'lucide-react';
+import { Trash2, Loader2, Plus, X, RotateCcw, Clipboard, Play, Settings2, ArrowUp, ArrowDown } from 'lucide-react';
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Button, Input } from '../ui';
@@ -39,6 +39,8 @@ export const PageSpeedResults: React.FC = () => {
     const runLabel = !isAfterGeneration ?
         `Run ${beforeGenerationLabel}` :
         `Run ${afterGenerationLabel}`;
+
+    const [improvementThreshold, setImprovementThreshold] = useState(20);
 
     const addUrlField = () => {
         setUrls([...urls, '']);
@@ -79,11 +81,20 @@ export const PageSpeedResults: React.FC = () => {
         }
     };
 
-    const calculateImprovement = (before: number, after: number): string => {
-        if (!before || !after) return '-';
+    const calculateImprovement = (before: number, after: number): React.ReactNode => {
+        if (!before || !after) return (
+            <div>
+                -
+            </div>
+        );
         const improvement = ((before - after) / before) * 100;
         const formatted = improvement.toFixed(2);
-        return improvement > 0 ? `+${formatted}%` : `${formatted}%`;
+        const color = improvement >= 0 ? 'text-green-500' : (Math.abs(improvement) > improvementThreshold) ? 'text-red-500' : 'text-orange-500';
+        return (
+            <div className={color}>
+                {improvement > 0 ? `+${formatted}%` : `${formatted}%`}
+            </div>
+        )
     };
 
     const getCellValue = (metric: PageSpeedMetricDetails | undefined): string => {
@@ -233,6 +244,13 @@ export const PageSpeedResults: React.FC = () => {
 
                 </div>
                 <div className="flex justify-end items-center gap-2">
+                    <Input type="number" value={improvementThreshold} className='scrollable-content'
+                        onChange={(e) => setImprovementThreshold(Number(e.target.value))}
+                        placeholder="Improvement threshold"
+                    />
+
+                    <div className="h-6 w-px bg-gray-600 mx-2"></div>
+
                     <Input type="text" value={beforeLabel}
                         onChange={(e) => setBeforeLabel(e.target.value)}
                         placeholder="Enter before label"
@@ -316,7 +334,7 @@ export const PageSpeedResults: React.FC = () => {
                     <TableHeader>
                         <TableRow>
                             <TableHead rowSpan={2} className="border text-center sticky left-0 bg-background">
-                                URL
+                                URL ({config.strategy})
                             </TableHead>
                             {showSI && (
                                 <TableHead colSpan={thSpan} className="text-center border">Speed Index</TableHead>
