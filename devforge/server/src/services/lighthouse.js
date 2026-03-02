@@ -1,48 +1,32 @@
 import lighthouse from "lighthouse";
-import * as chromeLauncher from "chrome-launcher";
-import os from "node:os";
-import path from "node:path";
-import fs from "node:fs";
+import puppeteer from "puppeteer"; // Switched from chrome-launcher
 
 /**
- * Run a Lighthouse audit against a single URL using a locally-launched
- * headless Chrome instance.
- *
- * Returns a result object that is compatible with the DevForge
- * PageSpeedMetrics shape *plus* extra data (scores, categories, HTML report).
- *
- * @param {string} url – The URL to audit
- * @param {object} options
- * @param {"mobile"|"desktop"} options.strategy
- * @param {string[]} options.categories
- * @returns {Promise<object>}
+ * Run a Lighthouse audit using Puppeteer as the browser launcher.
  */
 export async function runLighthouseAudit(url, options = {}) {
     const { strategy = "mobile", categories = ["performance"] } = options;
 
-    // ── Create a temp user-data dir for Chrome ─────────────────────────
-    const userDataDir = path.join(os.tmpdir(), `lh-chrome-${Date.now()}`);
-    fs.mkdirSync(userDataDir, { recursive: true });
-
-    // ── Launch headless Chrome ─────────────────────────────────────────
-    // Use CHROME_PATH env var if set (e.g. on Render/Docker), otherwise auto-detect
-    const launchOptions = {
-        chromeFlags: [
+    // ── Launch Puppeteer ───────────────────────────────────────────────
+    const browser = await puppeteer.launch({
+        headless: true, // or "new" for the latest puppeteer versions
+        args: [
             "--headless",
             "--disable-gpu",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--remote-debugging-port=9222", // Critical for Lighthouse connection
         ],
-        userDataDir,
-    };
-
-    if (process.env.CHROME_PATH) {
-        launchOptions.chromePath = process.env.CHROME_PATH;
-    }
-
-    const chrome = await chromeLauncher.launch(launchOptions);
+        // If on Render/Docker, use the environment path for chrome
+        executablePath: process.env.CHROME_PATH || undefined,
+    });
 
     try {
+        // Get the port that Puppeteer is using for remote debugging
+        const endpoint = browser.wsEndpoint();
+        const endpointURL = new URL(endpoint);
+        const port = parseInt(endpointURL.port);
+
         // ── Lighthouse config ──────────────────────────────────────────
         const lhConfig = {
             extends: "lighthouse:default",
@@ -61,7 +45,7 @@ export async function runLighthouseAudit(url, options = {}) {
         };
 
         const lhFlags = {
-            port: chrome.port,
+            port: port, // Connect Lighthouse to the Puppeteer port
             output: ["json", "html"],
             logLevel: "error",
         };
@@ -76,20 +60,16 @@ export async function runLighthouseAudit(url, options = {}) {
         const { lhr } = runnerResult;
         const audits = lhr.audits || {};
 
-        // ── Extract metrics matching DevForge PageSpeedMetrics shape ──
+        // ── Extract metrics (Keep your existing extract logic) ──────────
         const metrics = {
             speedIndex: extractMetric(audits, "speed-index"),
             largestContentfulPaint: extractMetric(audits, "largest-contentful-paint"),
             cumulativeLayoutShift: extractMetric(audits, "cumulative-layout-shift"),
             totalBlockingTime: extractMetric(audits, "total-blocking-time"),
             firstContentfulPaint: extractMetric(audits, "first-contentful-paint"),
-            runWarnings:
-                lhr.runWarnings && lhr.runWarnings.length > 0
-                    ? lhr.runWarnings.join(" | ")
-                    : "",
+            runWarnings: lhr.runWarnings?.length > 0 ? lhr.runWarnings.join(" | ") : "",
         };
 
-        // ── Category scores ────────────────────────────────────────────
         const scores = {};
         for (const [key, cat] of Object.entries(lhr.categories || {})) {
             scores[key] = {
@@ -98,7 +78,6 @@ export async function runLighthouseAudit(url, options = {}) {
             };
         }
 
-        // ── Additional useful audits ───────────────────────────────────
         const additionalAudits = {
             interactive: extractMetric(audits, "interactive"),
             serverResponseTime: extractMetric(audits, "server-response-time"),
@@ -107,11 +86,7 @@ export async function runLighthouseAudit(url, options = {}) {
             maxPotentialFid: extractMetric(audits, "max-potential-fid"),
         };
 
-        // ── HTML Report ────────────────────────────────────────────────
-        const htmlReport =
-            Array.isArray(runnerResult.report)
-                ? runnerResult.report[1] // index 1 is HTML when output: ["json", "html"]
-                : null;
+        const htmlReport = Array.isArray(runnerResult.report) ? runnerResult.report[1] : null;
 
         return {
             url,
@@ -127,19 +102,14 @@ export async function runLighthouseAudit(url, options = {}) {
             htmlReport,
         };
     } finally {
-        await chrome.kill();
+        // Ensure browser is closed even if audit fails
+        await browser.close();
     }
 }
 
-/**
- * Extract a metric from Lighthouse audits into the DevForge
- * PageSpeedMetricDetails shape.
- */
 function extractMetric(audits, auditId) {
     const audit = audits[auditId];
-    if (!audit) {
-        return { displayValue: "", numericValue: 0, numericUnit: "" };
-    }
+    if (!audit) return { displayValue: "", numericValue: 0, numericUnit: "" };
     return {
         displayValue: audit.displayValue || "",
         numericValue: audit.numericValue ?? 0,
