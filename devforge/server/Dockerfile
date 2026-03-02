@@ -1,10 +1,13 @@
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg ca-certificates libcups2 libnss3 \
-    libatk-bridge2.0-0 libxcomposite1 libxdamage1 \
-    libxrandr2 libgbm1 libasound2 libpangocairo-1.0-0 \
-    libxss1 libdbus-1-3 \
+    wget gnupg ca-certificates \
+    libcups2 libnss3 libatk-bridge2.0-0 \
+    libxcomposite1 libxdamage1 libxrandr2 \
+    libgbm1 libasound2 libpangocairo-1.0-0 \
+    libxss1 libdbus-1-3 libxkbcommon0 \
+    libatspi2.0-0 libgtk-3-0 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
