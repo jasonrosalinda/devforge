@@ -9,17 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ✅ No server/ prefix — context is already inside server/
-COPY package.json ./
-COPY package-lock.json ./
-RUN ls -la /app
+COPY server/package.json ./
+COPY server/package-lock.json ./
 RUN npm install
 
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
 RUN npx puppeteer browsers install chrome
 
-# ✅ Copy everything from server/ root
-COPY . .
+COPY server/src ./src
 
 RUN chown -R node:node /app
 USER node
