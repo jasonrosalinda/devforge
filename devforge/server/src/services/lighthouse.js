@@ -9,8 +9,15 @@ export async function runLighthouseAudit(url, options = {}) {
 
     // ── Launch Puppeteer ───────────────────────────────────────────────
     const browser = await puppeteer.launch({
+        // This looks at the ENV variable we set in Docker
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         headless: true,
-        args: ['--no-sandbox']
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--remote-debugging-port=9222'
+        ]
     });
 
     try {
