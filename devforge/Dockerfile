@@ -9,17 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ✅ Debug — list what Railway actually sees
-RUN find / -name "package.json" 2>/dev/null | grep -v node_modules
+# Copy everything from server/ in one shot
+COPY server/ ./
 
-COPY server/package.json ./
-COPY server/package-lock.json ./
 RUN npm install
 
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
 RUN npx puppeteer browsers install chrome
-
-COPY server/ ./
 
 RUN chown -R node:node /app
 USER node
