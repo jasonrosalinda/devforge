@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # ✅ No server/ prefix — context is already inside server/
-COPY package*.json ./
+COPY package.json ./
+COPY package-lock.json ./
+RUN ls -la /app
 RUN npm install
 
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
