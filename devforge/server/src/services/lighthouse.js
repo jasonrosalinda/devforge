@@ -7,17 +7,29 @@ import puppeteer, { executablePath } from 'puppeteer';  // ← add puppeteer def
 export async function runLighthouseAudit(url, options = {}) {
     const { strategy = "mobile", categories = ["performance"] } = options;
 
+    try {
+        const response = await fetch(url, { method: 'HEAD' });
+        console.log("Network Check:", response.status);
+    } catch (e) {
+        return {
+            url,
+            strategy,
+            timestamp: new Date().toISOString(),
+            error: "The server cannot reach this URL at all!",
+        };
+    }
+
     // ── Launch Puppeteer ───────────────────────────────────────────────
     const browser = await puppeteer.launch({
-        // This tells Puppeteer to find the browser it installed 
-        // based on the PUPPETEER_CACHE_DIR we set in the Dockerfile
         executablePath: executablePath(),
-        headless: true,
+        headless: true, // or 'new'
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--remote-debugging-port=9222'
+            '--disable-gpu', // Critical for Docker stability
+            '--disable-software-rasterizer',
+            '--remote-debugging-port=9222',
         ]
     });
 
@@ -30,6 +42,9 @@ export async function runLighthouseAudit(url, options = {}) {
         // ── Lighthouse config ──────────────────────────────────────────
         const lhConfig = {
             extends: "lighthouse:default",
+            port: (new URL(browser.wsEndpoint())).port,
+            output: 'json',
+            logLevel: 'info',
             settings: {
                 formFactor: strategy === "desktop" ? "desktop" : "mobile",
                 screenEmulation:
@@ -41,6 +56,8 @@ export async function runLighthouseAudit(url, options = {}) {
                         ? { cpuSlowdownMultiplier: 1, downloadThroughputKbps: 0, uploadThroughputKbps: 0, rttMs: 0, throughputKbps: 0, requestLatencyMs: 0 }
                         : undefined,
                 onlyCategories: categories,
+                maxWaitForFcp: 30000,
+                maxWaitForLoad: 45000,
             },
         };
 
