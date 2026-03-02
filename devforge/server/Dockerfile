@@ -24,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # 2. Copy package files and install
-COPY package*.json ./
+COPY server/package*.json ./
 RUN npm install
+COPY server/src ./src
 
 # 3. Configure Puppeteer to store Chrome in your app folder for easy access
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
