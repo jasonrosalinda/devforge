@@ -16,7 +16,8 @@ RUN npm install
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
 RUN npx puppeteer browsers install chrome
 
-COPY server/src ./src
+# ✅ Copy entire server folder contents
+COPY server/ .
 
 RUN chown -R node:node /app
 USER node
