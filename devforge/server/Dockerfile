@@ -9,14 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY package.json ./
-COPY package-lock.json ./
+# Copy everything at once — no separate package.json step
+COPY . .
+
 RUN npm install
 
 ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
 RUN npx puppeteer browsers install chrome
-
-COPY . .
 
 RUN chown -R node:node /app
 USER node
@@ -25,4 +24,4 @@ ENV PORT=3100
 ENV PUPPETEER_EXECUTABLE_PATH=/app/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome
 
 EXPOSE 3100
-CMD ["node", "src/index.js"] 
+CMD ["node", "src/index.js"]
