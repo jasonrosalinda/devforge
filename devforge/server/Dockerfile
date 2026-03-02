@@ -25,4 +25,4 @@ ENV PORT=3100
 ENV PUPPETEER_EXECUTABLE_PATH=/app/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome
 
 EXPOSE 3100
-CMD ["node", "src/index.js"]
+CMD ["node", "src/index.js"] 
