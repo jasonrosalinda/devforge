@@ -9,8 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy everything at once — no separate package.json step
 COPY . .
+
+# ✅ Show what actually got copied
+RUN ls -la /app
 
 RUN npm install
 
