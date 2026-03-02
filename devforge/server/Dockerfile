@@ -11,19 +11,19 @@ WORKDIR /app
 
 COPY . .
 
-# ✅ Show what actually got copied
-RUN ls -la /app
+# Navigate into the actual server folder
+WORKDIR /app/devforge/server
 
 RUN npm install
 
-ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
+ENV PUPPETEER_CACHE_DIR=/app/devforge/server/.cache/puppeteer
 RUN npx puppeteer browsers install chrome
 
 RUN chown -R node:node /app
 USER node
 
 ENV PORT=3100
-ENV PUPPETEER_EXECUTABLE_PATH=/app/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome
+ENV PUPPETEER_EXECUTABLE_PATH=/app/devforge/server/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome
 
 EXPOSE 3100
 CMD ["node", "src/index.js"]
