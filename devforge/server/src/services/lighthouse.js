@@ -1,5 +1,5 @@
 import lighthouse from "lighthouse";
-import { executablePath } from 'puppeteer';
+import puppeteer, { executablePath } from 'puppeteer';  // ← add puppeteer default import
 
 /**
  * Run a Lighthouse audit using Puppeteer as the browser launcher.
