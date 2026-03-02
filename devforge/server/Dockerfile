@@ -3,51 +3,50 @@ FROM node:22-slim AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+# We need devDeps for Puppeteer to run its install scripts correctly
+RUN npm install
 
 # ── Stage 2: Production image with Chrome ────────────────────────────
 FROM node:22-slim
 
-# Install Chromium and its dependencies
+# 1. Install necessary OS libraries for Chrome
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    fonts-liberation \
-    libappindicator3-1 \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libgdk-pixbuf2.0-0 \
-    libnspr4 \
+    wget \
+    gnupg \
+    ca-certificates \
     libnss3 \
-    libx11-xcb1 \
+    libatk-bridge2.0-0 \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
-    xdg-utils \
+    libgbm1 \
+    libasound2 \
+    libpangocairo-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-# Tell chrome-launcher where to find Chromium
-ENV CHROME_PATH=/usr/bin/chromium
-
-# Create a non-root user for security
-RUN groupadd -r lighthouse && useradd -r -g lighthouse -G audio,video lighthouse \
-    && mkdir -p /home/lighthouse && chown -R lighthouse:lighthouse /home/lighthouse
 
 WORKDIR /app
 
-# Copy dependencies from stage 1
+# 2. Copy dependencies from stage 1
 COPY --from=deps /app/node_modules ./node_modules
 
-# Copy application code
+# 3. Copy application code
 COPY . .
 
-# Switch to non-root user
-USER lighthouse
+# 4. Tell Puppeteer to download its own Chrome and where to find it
+# This ensures the browser version matches the Puppeteer version
+RUN npx puppeteer browsers install chrome
 
-# Render sets PORT automatically; fallback to 3100 for local Docker usage
+# 5. Environment Variables
+# Render sets PORT, but we keep your 3100 as fallback
 ENV PORT=3100
+# Important: Point this to the location Puppeteer installs its browser
+# Or, if using the manual Puppeteer install, we often let Puppeteer find it
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false 
+
+# 6. Permissions setup for the 'node' user (included in node:22-slim)
+# Using the built-in 'node' user is simpler than creating 'lighthouse'
+RUN chown -R node:node /app
+USER node
 
 EXPOSE 3100
 
