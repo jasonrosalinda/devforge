@@ -9,16 +9,8 @@ export async function runLighthouseAudit(url, options = {}) {
 
     // ── Launch Puppeteer ───────────────────────────────────────────────
     const browser = await puppeteer.launch({
-        headless: true, // or "new" for the latest puppeteer versions
-        args: [
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--remote-debugging-port=9222", // Critical for Lighthouse connection
-        ],
-        // If on Render/Docker, use the environment path for chrome
-        executablePath: process.env.CHROME_PATH || undefined,
+        headless: true,
+        args: ['--no-sandbox']
     });
 
     try {
