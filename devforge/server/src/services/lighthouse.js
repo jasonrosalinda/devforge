@@ -1,5 +1,5 @@
 import lighthouse from "lighthouse";
-import puppeteer from "puppeteer"; // Switched from chrome-launcher
+import { executablePath } from 'puppeteer';
 
 /**
  * Run a Lighthouse audit using Puppeteer as the browser launcher.
@@ -9,8 +9,9 @@ export async function runLighthouseAudit(url, options = {}) {
 
     // ── Launch Puppeteer ───────────────────────────────────────────────
     const browser = await puppeteer.launch({
-        // This looks at the ENV variable we set in Docker
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+        // This tells Puppeteer to find the browser it installed 
+        // based on the PUPPETEER_CACHE_DIR we set in the Dockerfile
+        executablePath: executablePath(),
         headless: true,
         args: [
             '--no-sandbox',
