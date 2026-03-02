@@ -47,10 +47,14 @@
     "globals": "^16.5.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
-    "typescript": "^5.9.3",
     "vite": "npm:rolldown-vite@7.2.5"
   },
   "overrides": {
     "vite": "npm:rolldown-vite@7.2.5"
-  }
+  },
+  "description": "This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.",
+  "main": "eslint.config.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

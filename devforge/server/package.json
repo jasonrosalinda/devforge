@@ -1,0 +1,16 @@
+{
+    "name": "devforge-lighthouse-server",
+    "version": "1.0.0",
+    "description": "Server-side Lighthouse audit runner for DevForge",
+    "type": "module",
+    "scripts": {
+        "dev": "node --watch src/index.js",
+        "start": "node src/index.js"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "express": "^5.1.0",
+        "lighthouse": "^12.6.0",
+        "chrome-launcher": "^1.1.2"
+    }
+}
