@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# ✅ Debug — list what Railway actually sees
+RUN find / -name "package.json" 2>/dev/null | grep -v node_modules
+
 COPY server/package.json ./
 COPY server/package-lock.json ./
 RUN npm install
