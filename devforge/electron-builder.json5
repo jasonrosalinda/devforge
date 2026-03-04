@@ -1,5 +1,3 @@
-// electron-builder configuration
-// https://www.electron.build/configuration
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.devforge.app",
@@ -14,11 +12,8 @@
     "public/**/*"
   ],
   "win": {
-    "target": [
-      "nsis",
-      "portable"
-    ],
-    "icon": "public/forge.svg"
+    "target": ["nsis", "portable"],
+    "icon": "public/icon.ico"
   },
   "nsis": {
     "oneClick": false,
@@ -27,17 +22,11 @@
     "shortcutName": "devForge"
   },
   "mac": {
-    "target": [
-      "dmg",
-      "zip"
-    ],
-    "icon": "public/forge.svg"
+    "target": ["dmg", "zip"],
+    "icon": "public/icon.icns"
   },
   "linux": {
-    "target": [
-      "AppImage",
-      "deb"
-    ],
-    "icon": "public/forge.svg"
+    "target": ["AppImage", "deb"],
+    "icon": "public/icon.png"
   }
 }
