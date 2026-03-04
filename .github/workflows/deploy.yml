@@ -53,33 +53,19 @@ jobs:
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
 
-  release:
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+  auto-tag:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: deploy
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
+      - name: Get version from package.json
+        id: version
         working-directory: devforge
-        run: npm install
+        run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      - name: Build Electron app
-        working-directory: devforge
-        run: npm run electron:build
-
-      - name: Upload to GitHub Releases
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            devforge/release/*.exe
-            devforge/release/*.dmg
-            devforge/release/*.AppImage
-            devforge/release/*.deb
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create tag if not exists
+        run: |
+          git config user.name "github-actions"
+          git c
