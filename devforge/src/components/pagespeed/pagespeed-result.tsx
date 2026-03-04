@@ -1,85 +1,54 @@
 import React, { useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { Trash2, Loader2, Plus, X, RotateCcw, Clipboard, Play, Settings2, ArrowUp, ArrowDown } from 'lucide-react';
+import { Loader2, Monitor, Smartphone } from 'lucide-react';
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
-import { Button, Input } from '../ui';
-import type { PageSpeedInsightResult, PageSpeedMetricDetails, PageSpeedMetrics } from '@/types/pageSpeedInsight.types';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '../ui/dropdown-menu';
+import { Button, Toast } from '../ui';
+import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage } from '@shared/types/pageSpeedInsight.types';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages } from '@/lib/pageSpeedUtils';
 
-export const PageSpeedResults: React.FC = () => {
-    const [urls, setUrls] = useState<string[]>(['']);
-
-    const {
-        config,
-        result,
-        generateBefore,
-        generateAfter,
-        setApiKey,
-        setStrategy,
-        removeResult,
-        reset
-    } = usePageSpeedInsight();
-
-    const { elementRef, copyAsImage, isCopying } = useCopyElementAsImage({
-        fileNamePrefix: `pagespeed-result-${Date.now()}`,
+export const PageSpeedResults: React.FC<{ config: PageSpeedConfiguration }> = ({ config }) => {
+    const { audit } = usePageSpeedInsight(config);
+    const { elementRef, copyAsImage } = useCopyElementAsImage({
+        fileNamePrefix: `pagespeed-result-${config.strategy}-${Date.now()}`,
     });
-    const [selected, setSelected] = useState<string[]>(['SI', 'LCP', 'CLS', 'TBT', 'FCP']);
-    const [showIMP, setShowIMP] = useState(true);
-    const [showBefore, setShowBefore] = useState(true);
-    const [showAfter, setShowAfter] = useState(true);
     const [copying, setCopying] = useState(false);
-    const [beforeLabel, setBeforeLabel] = useState('');
-    const [afterLabel, setAfterLabel] = useState('');
-    const [generation, setGeneration] = useState(1);
-    const isAfterGeneration = (generation & 1) === 0;
-    const beforeGenerationLabel = beforeLabel || 'Before';
-    const afterGenerationLabel = afterLabel || 'After';
-    const runLabel = !isAfterGeneration ?
-        `Run ${beforeGenerationLabel}` :
-        `Run ${afterGenerationLabel}`;
+    const displayAudit = displayPageSpeedAudit(config);
+    const [results1, setResults1] = useState<PageSpeedInsightResult[]>([]);
+    const [results2, setResults2] = useState<PageSpeedInsightResult[]>([]);
+    const [auditing1, setAuditing1] = useState<boolean>(false);
+    const [auditing2, setAuditing2] = useState<boolean>(false);
+    const showAnalyzeButton = config.urls.length > 0;
+    const toast = Toast();
+    const isAuditing = auditing1 || auditing2;
 
-    const [improvementThreshold, setImprovementThreshold] = useState(20);
+    const audit1 = async () => {
+        setAuditing1(true);
+        setResults1([]);
+        const results = await runAudit();
+        setResults1(results);
+        setAuditing1(false);
+    }
 
-    const addUrlField = () => {
-        setUrls([...urls, '']);
-    };
+    const audit2 = async () => {
+        setAuditing2(true);
+        setResults2([]);
+        const results = await runAudit();
+        setResults2(results);
+        setAuditing2(false);
+    }
 
-    const updateUrl = (index: number, value: string) => {
-        const newUrls = [...urls];
-        newUrls[index] = value;
-        setUrls(newUrls);
-    };
-
-    const removeUrlField = (index: number) => {
-        const newUrls = urls.filter((_, i) => i !== index);
-        setUrls(newUrls);
-
-        // Also remove from results if exists
-        const removedUrl = urls[index];
-        if (removedUrl) {
-            removeResult(removedUrl);
-        }
-
-        if (urls.length === 0) {
-            setGeneration(1);
-        }
-    };
-
-    const runAllBefore = async () => {
-        const validUrls = urls.filter(url => url.trim() !== '');
-        for (const url of validUrls) {
-            await generateBefore(url);
-        }
-    };
-
-    const runAllAfter = async () => {
-        const validUrls = urls.filter(url => url.trim() !== '');
-        for (const url of validUrls) {
-            await generateAfter(url);
-        }
-    };
+    const runAudit = async (): Promise<PageSpeedInsightResult[]> => {
+        const results: PageSpeedInsightResult[] = [];
+        await Promise.all(
+            config.urls.map(async url => {
+                const result = await audit(url);
+                results.push(result);
+            })
+        );
+        return results;
+    }
 
     const calculateImprovement = (before: number, after: number): React.ReactNode => {
         if (!before || !after) return (
@@ -89,7 +58,8 @@ export const PageSpeedResults: React.FC = () => {
         );
         const improvement = ((before - after) / before) * 100;
         const formatted = improvement.toFixed(2);
-        const color = improvement >= 0 ? 'text-green-500' : (Math.abs(improvement) > improvementThreshold) ? 'text-red-500' : 'text-orange-500';
+        const color = improvement >= 0 ? 'text-green-500' :
+            (Math.abs(improvement) > config.improvementThreshold) ? 'text-red-500' : 'text-orange-500';
         return (
             <div className={color}>
                 {improvement > 0 ? `+${formatted}%` : `${formatted}%`}
@@ -97,100 +67,90 @@ export const PageSpeedResults: React.FC = () => {
         )
     };
 
-    const getCellValue = (metric: PageSpeedMetricDetails | undefined): string => {
-        return metric?.displayValue ?? '-';
-    };
-
-    const getResultForUrl = (url: string) => {
-        return result.find(r => r.url === url);
-    };
-
-    const onCheckedChange = (checked: boolean, id: string) => {
-        if (checked) {
-            setSelected([...selected, id]);
-        } else {
-            setSelected(selected.filter(item => item !== id));
-        }
-    };
-
-    const onClearUrls = () => {
-        setUrls(['']);
-        setGeneration(1);
-    };
-
     const onCopyAsImage = async () => {
         setCopying(true);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        try {
-            await copyAsImage();
-        } catch (error) {
-            console.error("Failed to copy image:", error);
-        } finally {
-            setCopying(false);
-        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        toast.promise(copyAsImage(), {
+            loading: "Copying...",
+            success: "Copied successfully",
+            error: "Copy failed",
+        });
+        setCopying(false);
     };
 
-    const run = async () => {
-        if (!isAfterGeneration) {
-            await runAllBefore();
-        }
-        else {
-            await runAllAfter();
-        }
-        setGeneration(generation + 1);
+    const thSpan = (!displayAudit.before || !displayAudit.after) ? 1 : (displayAudit.improvement ? 3 : 2);
+
+    const tableHead = (label: string): React.ReactNode => {
+        return (
+            <TableHead colSpan={thSpan} className="text-center border">{label}</TableHead>
+        );
+    }
+    const tableSubHead = (): React.ReactNode => {
+        const { SI, LCP, CLS, TBT, FCP } = displayAudit;
+        const showMetrics = [SI, LCP, CLS, TBT, FCP].filter(Boolean).length;
+
+        return (
+            <>
+                {[...Array(showMetrics)].map((_, i) => (
+                    <React.Fragment key={i}>
+                        {displayAudit.singleResult ? (
+                            <TableHead className="text-center text-sm border">Value</TableHead>
+                        ) : (
+                            <>
+                                <TableHead className="text-center text-sm border">{config.beforeLabel}</TableHead>
+                                <TableHead className="text-center text-sm border">{config.afterLabel}</TableHead>
+                                {displayAudit.improvement && (
+                                    <TableHead className="text-center text-sm border">Improvement</TableHead>
+                                )}
+                            </>
+                        )}
+                    </React.Fragment>
+                ))}
+            </>
+        );
     }
 
-    const getMessages = (metrics?: PageSpeedMetrics | null): string | null => {
-        const messages: string[] = [];
-
-        if (metrics?.errorResponse?.message?.trim()) {
-            messages.push(metrics.errorResponse.message.trim());
-        }
-
-        if (metrics?.runWarnings) {
-            if (Array.isArray(metrics.runWarnings)) {
-                // If it's an array, join them
-                const warnings = metrics.runWarnings.filter(w => w?.trim()).join(', ');
-                if (warnings) messages.push(warnings);
-            } else if (typeof metrics.runWarnings === 'string') {
-                // If it's a string
-                const warning = metrics.runWarnings.trim();
-                if (warning) messages.push(warning);
-            }
-        }
-
-        return messages.length > 0 ? messages.join(' | ') : null;
+    const getResult1ForUrl = (url: string): PageSpeedInsightResult | undefined => {
+        return results1.find(r => r.url === url);
     }
 
-    const showSI = selected.includes('SI');
-    const showLCP = selected.includes('LCP');
-    const showCLS = selected.includes('CLS');
-    const showTBT = selected.includes('TBT');
-    const showFCP = selected.includes('FCP');
-    const thSpan = (!showBefore || !showAfter) ? 1 : (showIMP ? 3 : 2);
+    const getResult2ForUrl = (url: string): PageSpeedInsightResult | undefined => {
+        return results2.find(r => r.url === url);
+    }
 
-    const cellMetrics = (result: PageSpeedInsightResult | undefined, show: boolean, before: PageSpeedMetricDetails | undefined, after: PageSpeedMetricDetails | undefined) => {
+    const getResultMessageForUrl = (result1: PageSpeedInsightResult | undefined, result2: PageSpeedInsightResult | undefined): React.ReactNode => {
+        let messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(result1, result2);
+        return (
+            messages.map((message, index) => (
+                <p key={index} className={`text-xs ${message.isError ? 'text-red-500' : 'text-orange-500'} mt-1`}>
+                    * {message.message}
+                </p>
+            ))
+        );
+    }
+
+    const cellMetrics = (show: boolean, metrics1: PageSpeedMetrics | undefined, metrics2: PageSpeedMetrics | undefined) => {
         return (
             <>
                 {show && (
                     <>
-                        {showBefore && (
+                        <TableCell className="text-center border">
+                            {auditing1 ?
+                                <Loader2 className="animate-spin mx-auto" size={20} /> :
+                                cellValue(metrics1)}
+                        </TableCell>
+                        {!displayAudit.singleResult && (
                             <TableCell className="text-center border">
-                                {result?.generatingBefore ?
+                                {auditing2 ?
                                     <Loader2 className="animate-spin mx-auto" size={20} /> :
-                                    getCellValue(before)}
+                                    cellValue(metrics2)}
                             </TableCell>
                         )}
-                        {showAfter && (
+                        {!displayAudit.singleResult && displayAudit.improvement && (
                             <TableCell className="text-center border">
-                                {result?.generatingAfter ?
+                                {isAuditing ?
                                     <Loader2 className="animate-spin mx-auto" size={20} /> :
-                                    getCellValue(after)}
-                            </TableCell>
-                        )}
-                        {showBefore && showAfter && showIMP && (
-                            <TableCell className="text-center border">
-                                {before && after ? calculateImprovement(before.numericValue, after.numericValue) : '-'}
+                                    metrics1 && metrics2 ? calculateImprovement(metrics1.numericValue, metrics2.numericValue) : '-'}
                             </TableCell>
                         )}
                     </>
@@ -199,238 +159,84 @@ export const PageSpeedResults: React.FC = () => {
         );
     }
 
+    const cellValue = (metric: PageSpeedMetrics | undefined): string => {
+        return metric?.displayValue ?? '-';
+    };
+
     return (
-        <>
-            <div className="flex w-full justify-end mb-5">
-                <div className="flex gap-2 items-center">
-                    <Input type="text" value={config.apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                        size={50} placeholder="Enter your PageSpeed API key"
-                    />
-                    <Select defaultValue={config.strategy} onValueChange={setStrategy} >
-                        <SelectTrigger>
-                            <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent position="popper">
-                            <SelectGroup>
-                                <SelectItem value="mobile">Mobile</SelectItem>
-                                <SelectItem value="desktop">Desktop</SelectItem>
-                            </SelectGroup>
-                        </SelectContent>
-                    </Select>
-                    <Button variant="outline" size="sm" title="Run page speed insight"
-                        onClick={run}
-                        disabled={!config.apiKey || urls.every(url => !url.trim())}>
-                        <Play size={18} /> {runLabel}
-                    </Button>
-                    <div className="h-6 w-px bg-gray-600 mx-2"></div>
-                    <Button variant="outline" size="sm" title="Reset page speed results"
-                        onClick={reset}>
-                        <RotateCcw size={18} /> Reset
-                    </Button>
-                </div>
-            </div>
-
-            <div className="flex w-full items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" title="Add Url"
-                        onClick={addUrlField}>
-                        <Plus size={18} /> Add
-                    </Button>
-                    <Button variant="outline" size="sm" title="Remove all urls"
-                        onClick={onClearUrls}>
-                        <Trash2 size={18} /> Clear
-                    </Button>
-
-                </div>
-                <div className="flex justify-end items-center gap-2">
-
-                    <Input type="text" value={beforeLabel}
-                        onChange={(e) => setBeforeLabel(e.target.value)}
-                        placeholder="Enter before label"
-                    />
-                    <Button variant="outline" size="sm" title={`Run ${beforeLabel}`}
-                        disabled={!config.apiKey || urls.every(url => !url.trim())} onClick={() => runAllBefore()}>
-                        <Play size={18} />
-                    </Button>
-                    <Input type="text" value={afterLabel}
-                        onChange={(e) => setAfterLabel(e.target.value)}
-                        placeholder="Enter after label"
-                    />
-                    <Button variant="outline" size="sm" title={`Run ${afterLabel}`}
-                        disabled={!config.apiKey || urls.every(url => !url.trim())} onClick={() => runAllAfter()}>
-                        <Play size={18} />
-                    </Button>
-                    <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="ml-auto hidden h-8 lg:flex"
-                            >
-                                <Settings2 />
-                                View
-                            </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-[150px]">
-                            <DropdownMenuLabel>Metrics</DropdownMenuLabel>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuCheckboxItem key="SI" className="capitalize" checked={selected.includes('SI')} onCheckedChange={(value) => onCheckedChange(value, 'SI')}>
-                                SI
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="LCP" className="capitalize" checked={selected.includes('LCP')} onCheckedChange={(value) => onCheckedChange(value, 'LCP')}>
-                                LCP
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="CLS" className="capitalize" checked={selected.includes('CLS')} onCheckedChange={(value) => onCheckedChange(value, 'CLS')}>
-                                CLS
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="TBT" className="capitalize" checked={selected.includes('TBT')} onCheckedChange={(value) => onCheckedChange(value, 'TBT')}>
-                                TBT
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="FCP" className="capitalize" checked={selected.includes('FCP')} onCheckedChange={(value) => onCheckedChange(value, 'FCP')}>
-                                FCP
-                            </DropdownMenuCheckboxItem>
-
-                            <DropdownMenuSeparator />
-                            <DropdownMenuCheckboxItem key="Before" className="capitalize" checked={showBefore}
-                                onCheckedChange={(value) => setShowBefore(value)}>
-                                {beforeGenerationLabel}
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="After" className="capitalize" checked={showAfter}
-                                onCheckedChange={(value) => setShowAfter(value)}>
-                                {afterGenerationLabel}
-                            </DropdownMenuCheckboxItem>
-                            <DropdownMenuCheckboxItem key="IMP" className="capitalize" checked={showIMP} onCheckedChange={(value) => setShowIMP(value)}>
-                                Improvement
-                            </DropdownMenuCheckboxItem>
-
-                        </DropdownMenuContent>
-                    </DropdownMenu>
-
-                    <div className="h-6 w-px bg-gray-600 mx-2"></div>
-                    <Input type="number" value={improvementThreshold} className='w-24'
-                        onChange={(e) => setImprovementThreshold(Number(e.target.value))}
-                        placeholder="Improvement threshold"
-                    />
-                    <Button variant="outline" size="sm" onClick={onCopyAsImage}
-                        disabled={copying} title="Copy results as image">
-                        {copying && (
-                            <>
-                                <Loader2 size={18} className="animate-spin mx-auto text-white" /> Copying...
-                            </>
-                        )}
-                        {!copying && (
-                            <>
-                                <Clipboard size={18} className="mx-auto" /> Copy as image
-                            </>
-                        )}
-                    </Button>
-                </div>
-            </div>
-            <div className="overflow-hidden rounded-md border">
-                <Table ref={elementRef}>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead rowSpan={2} className="border text-center sticky left-0 bg-background">
-                                URL ({config.strategy})
-                            </TableHead>
-                            {showSI && (
-                                <TableHead colSpan={thSpan} className="text-center border">Speed Index</TableHead>
+        <Card className="my-4" ref={elementRef}>
+            <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        {config.strategy == 'mobile' ? <Smartphone size={20} /> : <Monitor size={20} />}
+                        {config.strategy.toUpperCase()}
+                    </div>
+                    {!copying && showAnalyzeButton && (
+                        <div className="flex items-center gap-2">
+                            {config.comparisonMode && (
+                                <>
+                                    <Button variant="outline" onClick={audit1} disabled={isAuditing}>Analyze {config.beforeLabel}</Button>
+                                    <Button variant="outline" onClick={audit2} disabled={isAuditing}>Analyze {config.afterLabel}</Button>
+                                </>
                             )}
-                            {showLCP && (
-                                <TableHead colSpan={thSpan} className="text-center border">LCP</TableHead>
+                            {!config.comparisonMode && (
+                                <Button variant="outline" onClick={audit1} disabled={isAuditing}>Analyze</Button>
                             )}
-                            {showCLS && (
-                                <TableHead colSpan={thSpan} className="text-center border">CLS</TableHead>
-                            )}
-                            {showTBT && (
-                                <TableHead colSpan={thSpan} className="text-center border">TBT</TableHead>
-                            )}
-                            {showFCP && (
-                                <TableHead colSpan={thSpan} className="text-center border">FCP</TableHead>
-                            )}
-                        </TableRow>
-                        {(showBefore && showAfter) && (
+                            <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>Copy as Image</Button>
+                        </div>
+                    )}
+
+                </CardTitle>
+            </CardHeader>
+            <CardContent>
+
+                <div className="overflow-auto rounded-md border scrollable-content">
+                    <Table>
+                        <TableHeader>
                             <TableRow>
-                                {[...Array(selected.length)].map((_, i) => (
-                                    <React.Fragment key={i}>
-                                        <TableHead className="text-center text-sm border">{beforeGenerationLabel}</TableHead>
-                                        <TableHead className="text-center text-sm border">{afterGenerationLabel}</TableHead>
-                                        {showIMP && (
-                                            <TableHead className="text-center text-sm border">Improvement</TableHead>
-                                        )}
-                                    </React.Fragment>
-                                ))}
+                                <TableHead rowSpan={2} className="border text-center sticky left-0 bg-background mr-2">
+                                    URL
+                                </TableHead>
+                                {displayAudit.SI && tableHead('SI')}
+                                {displayAudit.LCP && tableHead('LCP')}
+                                {displayAudit.CLS && tableHead('CLS')}
+                                {displayAudit.TBT && tableHead('TBT')}
+                                {displayAudit.FCP && tableHead('FCP')}
                             </TableRow>
-                        )}
-                    </TableHeader>
-                    <TableBody>
-                        {urls.map((url, index) => {
-                            const urlResult = getResultForUrl(url);
-                            const beforeMsg = getMessages(urlResult?.before);
-                            const afterMsg = getMessages(urlResult?.after);
-                            return (
-                                <TableRow key={index} className="border">
-                                    <TableCell className="border sticky left-0 bg-background z-10">
-                                        <div className="flex items-center gap-2">
-                                            {copying && (
-                                                <label>{url}</label>
-                                            )}
-
-                                            {!copying && (
-                                                <div className="relative w-full">
-
-                                                    <Input
-                                                        type="text"
-                                                        placeholder="https://example.com"
-                                                        value={url}
-                                                        onChange={(e) => updateUrl(index, e.target.value)}
-                                                        className="w-full min-w-[250px]"
-                                                    />
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        className="absolute right-1 top-1/2 transform -translate-y-1/2 h-7 w-7 p-0"
-                                                        onClick={() => removeUrlField(index)}
-                                                    >
-                                                        <X className="h-4 w-4" />
-                                                    </Button>
-
-                                                </div>
-                                            )}
-
-                                        </div>
-                                        {(() => {
-                                            return beforeMsg && (
-                                                <p className="text-xs text-red-500 mt-1">
-                                                    * {beforeMsg}
-                                                </p>
-                                            );
-                                        })()}
-
-                                        {(() => {
-                                            return afterMsg && (
-                                                <p className="text-xs text-red-500 mt-1">
-                                                    * {afterMsg}
-                                                </p>
-                                            );
-                                        })()}
-                                    </TableCell>
-
-                                    {cellMetrics(urlResult, showSI, urlResult?.before?.speedIndex, urlResult?.after?.speedIndex)}
-                                    {cellMetrics(urlResult, showLCP, urlResult?.before?.largestContentfulPaint, urlResult?.after?.largestContentfulPaint)}
-                                    {cellMetrics(urlResult, showCLS, urlResult?.before?.cumulativeLayoutShift, urlResult?.after?.cumulativeLayoutShift)}
-                                    {cellMetrics(urlResult, showTBT, urlResult?.before?.totalBlockingTime, urlResult?.after?.totalBlockingTime)}
-                                    {cellMetrics(urlResult, showFCP, urlResult?.before?.firstContentfulPaint, urlResult?.after?.firstContentfulPaint)}
-
+                            {(displayAudit.before && displayAudit.after) && (
+                                <TableRow>
+                                    {tableSubHead()}
                                 </TableRow>
-                            );
-                        })}
-                    </TableBody>
-                </Table>
-            </div>
+                            )}
+                        </TableHeader>
+                        <TableBody>
+                            {config.urls.map((url, index) => {
+                                const result1 = getResult1ForUrl(url);
+                                const result2 = getResult2ForUrl(url);
 
-        </>
+                                return (
+                                    <TableRow key={index} className="border">
+                                        <TableCell className="border sticky left-0 bg-background z-10 w-1/3">
+                                            <a href={url} target="_blank" rel="noopener noreferrer" className='break-all'>{url}</a>
+                                            {getResultMessageForUrl(result1, result2)}
+                                        </TableCell>
+
+                                        {cellMetrics(displayAudit.SI, result1?.speedIndex, result2?.speedIndex)}
+                                        {cellMetrics(displayAudit.LCP, result1?.largestContentfulPaint, result2?.largestContentfulPaint)}
+                                        {cellMetrics(displayAudit.CLS, result1?.cumulativeLayoutShift, result2?.cumulativeLayoutShift)}
+                                        {cellMetrics(displayAudit.TBT, result1?.totalBlockingTime, result2?.totalBlockingTime)}
+                                        {cellMetrics(displayAudit.FCP, result1?.firstContentfulPaint, result2?.firstContentfulPaint)}
+
+                                    </TableRow>
+                                );
+                            })}
+                        </TableBody>
+                    </Table>
+                </div>
+
+            </CardContent>
+
+        </Card>
     );
 };
 

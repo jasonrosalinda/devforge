@@ -20,6 +20,9 @@
     "paths": {
       "@/*": [
         "src/*"
+      ],
+      "@shared/*": [
+        "shared/*"
       ]
     },
     // Other Outputs
@@ -47,6 +50,7 @@
     "allowJs": true
   },
   "include": [
-    "src"
+    "src",
+    "shared"
   ]
 }
