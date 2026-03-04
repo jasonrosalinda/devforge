@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/devforge/',
+  base: process.env.ELECTRON === 'true' ? './' : '/devforge/',
   plugins: [react(), VitePWA({
     registerType: 'autoUpdate',
     includeAssets: ['forge.svg'],
