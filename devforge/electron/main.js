@@ -1,11 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
-
-const preloadPath = path.join(__dirname, 'preload.cjs');
-console.log('Preload path:', preloadPath);
-console.log('Preload exists:', fs.existsSync(preloadPath));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,7 +15,7 @@ function createWindow() {
         minWidth: 900,
         minHeight: 600,
         title: 'devForge',
-        icon: path.join(__dirname, '../public/forge.svg'),
+        icon: path.join(__dirname, '../public/icon.ico'),
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
