@@ -41,5 +41,6 @@ export default defineConfig({
   define: {
     __BUILD_NUMBER__: JSON.stringify(process.env.GITHUB_RUN_NUMBER || 'local'),
     __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+    __APP_VERSION__: JSON.stringify(process.env.npm_package_version),
   },
 })
