@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 // https://vite.dev/config/
 export default defineConfig({
   base: process.env.ELECTRON === 'true' ? './' : '/devforge/',
-  plugins: [react(), VitePWA({
+  plugins: [react(), !isElectron && VitePWA({
     registerType: 'autoUpdate',
     includeAssets: ['forge.svg'],
     workbox: {
