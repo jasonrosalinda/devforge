@@ -57,17 +57,61 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     needs: deploy
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      tag_created: ${{ steps.tag.outputs.created }}
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Get version from package.json
-        id: version
+    - name: Get version from package.json
+      id: version
+      working-directory: devforge
+      run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+    - name: Create tag if not exists
+      id: tag
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        if git tag "v${{ steps.version.outputs.VERSION }}"; then
+          git push origin "v${{ steps.version.outputs.VERSION }}"
+          echo "created=true" >> $GITHUB_OUTPUT
+        else
+          echo "Tag already exists, skipping"
+          echo "created=false" >> $GITHUB_OUTPUT
+        fi
+
+  release:
+    runs-on: windows-latest
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (needs.auto-tag.outputs.tag_created == 'true')
+    needs: [auto-tag]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
         working-directory: devforge
-        run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+        run: npm install
 
-      - name: Create tag if not exists
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git tag "v${{ steps.version.outputs.VERSION }}" || echo "Tag already exists, skipping"
-          git push origin "v${{ steps.version.outputs.VERSION }}" || echo "Tag already pushed, skipping"
+      - name: Build Electron app
+        working-directory: devforge
+        run: npm run electron:build
+
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.auto-tag.outputs.version }}
+          files: |
+            devforge/release/*.exe
+            devforge/release/*.dmg
+            devforge/release/*.AppImage
+            devforge/release/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
