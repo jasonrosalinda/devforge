@@ -6,6 +6,8 @@ import { ThemeProvider } from "@/components/provider/theme-provider"
 import { Toaster } from "@/components/ui/sonner"
 
 import { pages, renderPage } from "./routes/page-routes";
+import { BuildLabel } from "./components/ui/buildLabel";
+import { AccessMode } from "./components/ui/accessMode";
 
 export default function App() {
     const [activePage, setActivePage] = useState("");
@@ -22,6 +24,12 @@ export default function App() {
                         </div>
                     </div>
                     <Toaster />
+                    <div className="absolute bottom-0 left-0 right-0 p-2 text-center text-xs text-muted-foreground">
+                        <div className="flex items-center justify-center gap-2">
+                            <AccessMode />
+                            <BuildLabel />
+                        </div>
+                    </div>
                 </SidebarInset>
             </SidebarProvider>
         </ThemeProvider>

@@ -38,4 +38,8 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  define: {
+    __BUILD_NUMBER__: JSON.stringify(process.env.GITHUB_RUN_NUMBER || 'local'),
+    __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+  },
 })
