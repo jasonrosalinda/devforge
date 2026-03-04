@@ -67,5 +67,7 @@ jobs:
 
       - name: Create tag if not exists
         run: |
-          git config user.name "github-actions"
-          git c
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag "v${{ steps.version.outputs.VERSION }}" || echo "Tag already exists, skipping"
+          git push origin "v${{ steps.version.outputs.VERSION }}" || echo "Tag already pushed, skipping"
