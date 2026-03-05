@@ -103,6 +103,8 @@ jobs:
       - name: Build Electron app
         working-directory: devforge
         run: npm run electron:build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@v1

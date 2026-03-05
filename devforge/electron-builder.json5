@@ -12,6 +12,11 @@
     "public/**/*",
     "package.json"
   ],
+  "publish": {
+    "provider": "github",
+    "owner": "jasonrosalinda",
+    "repo": "devforge"
+  },
   "extraResources": [],
   "asar": true,
   "win": {

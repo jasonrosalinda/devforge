@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { autoUpdater } from 'electron-updater';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,6 +54,10 @@ function createWindow() {
 app.whenReady().then(() => {
     createWindow();
 
+    if (!isDev) {
+        autoUpdater.checkForUpdatesAndNotify();
+    }
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
             createWindow();
@@ -64,6 +69,16 @@ app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit();
     }
+});
+
+// Auto updater events
+autoUpdater.on('update-available', () => {
+    console.log('Update available');
+});
+
+autoUpdater.on('update-downloaded', () => {
+    // Install update on next restart
+    autoUpdater.quitAndInstall();
 });
 
 import lighthouse from 'lighthouse';
