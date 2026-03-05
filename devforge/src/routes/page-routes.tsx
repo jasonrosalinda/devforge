@@ -1,8 +1,9 @@
 import type { Page } from "@/types/pages.types";
-import { BarChart, Clock, DatabaseZap, Eclipse, Image, Languages } from "lucide-react";
+import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages } from "lucide-react";
 import { SiAmazonelasticache, SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
 import { AiOutlineTranslation, AiOutlineFileImage } from "react-icons/ai";
 
+import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
 import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import MEDUCachePage from "@/pages/meduCachePage";
@@ -13,6 +14,12 @@ import BlazorCheatsheetPage from "@/pages/blazorCheatsheetPage";
 import TimeConverterPage from "@/pages/timeConverterPage";
 
 export const pages: Page[] = [
+    {
+        title: "Home",
+        url: "#",
+        icon: Home,
+        component: HomePage
+    },
     {
         title: "Translation",
         url: "#",
