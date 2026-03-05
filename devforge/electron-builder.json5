@@ -9,8 +9,11 @@
   "files": [
     "dist/**/*",
     "electron/**/*",
-    "public/**/*"
+    "public/**/*",
+    "package.json"
   ],
+  "extraResources": [],
+  "asar": true,
   "win": {
     "target": ["nsis", "portable"],
     "icon": "public/icon.ico"

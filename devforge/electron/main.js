@@ -21,41 +21,39 @@ function createWindow() {
             contextIsolation: true,
             nodeIntegration: false,
         },
-        // Frameless with custom title bar look
         titleBarStyle: 'default',
-        backgroundColor: '#09090b', // matches dark theme background
-        show: false, // prevent white flash
+        backgroundColor: '#09090b',
+        show: false,
     });
 
-    // Show window when ready to prevent white flash
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
     });
 
-    // Open external links in the default browser
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
         shell.openExternal(url);
         return { action: 'deny' };
     });
 
     if (isDev) {
-        // In development, load from Vite dev server
         const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
         mainWindow.loadURL(VITE_DEV_SERVER_URL);
-        // Open DevTools in development
         mainWindow.webContents.openDevTools();
     } else {
-        // In production, load the built files
-        mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+        // Use app.getAppPath() for installed apps, falls back to __dirname for portable
+        const appPath = app.getAppPath();
+        const indexPath = path.join(appPath, 'dist', 'index.html');
+        console.log('App path:', appPath);
+        console.log('Loading:', indexPath);
+        mainWindow.loadFile(indexPath);
+        mainWindow.webContents.openDevTools(); // temporary - remove after debugging
     }
 }
 
-// App lifecycle
 app.whenReady().then(() => {
     createWindow();
 
     app.on('activate', () => {
-        // On macOS, re-create a window when dock icon is clicked
         if (BrowserWindow.getAllWindows().length === 0) {
             createWindow();
         }
@@ -63,7 +61,6 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-    // On macOS, apps stay active until Cmd+Q
     if (process.platform !== 'darwin') {
         app.quit();
     }
@@ -75,7 +72,6 @@ import { parseToPageSpeedInsightResult, buildErrorPageSpeedInsightResult } from 
 ipcMain.handle("run-lighthouse", async (event, { url, strategy }) => {
     let chrome;
     try {
-        // ✅ Standardizing the dynamic import for ESM compatibility
         const { launch } = await import("chrome-launcher");
 
         chrome = await launch({
@@ -83,14 +79,13 @@ ipcMain.handle("run-lighthouse", async (event, { url, strategy }) => {
                 "--headless",
                 "--no-sandbox",
                 "--disable-gpu",
-                "--disable-dev-shm-usage",  // ✅ prevents memory issues
-                "--disable-extensions",      // ✅ faster startup
-                "--no-first-run",            // ✅ skip chrome setup
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--no-first-run",
                 "--no-default-browser-check",
             ]
         });
 
-        // Lighthouse often prefers being called as a function in ESM
         const result = await lighthouse(url, {
             port: chrome.port,
             output: "json",
@@ -101,12 +96,8 @@ ipcMain.handle("run-lighthouse", async (event, { url, strategy }) => {
                 height: strategy === 'mobile' ? 640 : 940,
             },
             onlyCategories: ["performance"],
-
-            // ✅ increase timeout
-            maxWaitForLoad: 60000,        // 60s (default is 45s)
-            maxWaitForFcp: 30000,         // wait longer for First Contentful Paint
-
-            // ✅ skip slow extras
+            maxWaitForLoad: 60000,
+            maxWaitForFcp: 30000,
             skipAudits: [
                 'screenshot-thumbnails',
                 'final-screenshot',
@@ -115,7 +106,6 @@ ipcMain.handle("run-lighthouse", async (event, { url, strategy }) => {
         });
 
         if (!result) throw new Error("Lighthouse failed to produce a result.");
-
         if (result.lhr.runtimeError) throw new Error(result.lhr.runtimeError.message);
 
         return parseToPageSpeedInsightResult(url, result.lhr.audits, result.lhr.runWarnings?.[0]);
