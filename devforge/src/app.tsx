@@ -2,8 +2,9 @@ import { useState, useRef, useCallback } from "react";
 import { ThemeProvider } from "@/components/provider/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
+import { Home } from "lucide-react";
 
-import { renderPage } from "./routes/page-routes";
+import { pages, renderPage } from "./routes/page-routes";
 import { BuildLabel } from "./components/ui/buildLabel";
 import { AccessMode } from "./components/ui/accessMode";
 import { AppHeader } from "./components/layout/app-header";
@@ -23,14 +24,9 @@ const LAUNCH_STYLES = `
     pointer-events: none;
     user-select: none;
   }
-
-  /* Sheet only covers the content area below the header */
   .app-sheet {
     position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    top: 0; left: 0; right: 0; bottom: 0;
     z-index: 50;
     background: white;
     will-change: transform, opacity, border-radius;
@@ -71,9 +67,11 @@ export default function App() {
     const isAppVisible = phase === "launching" || phase === "open" || phase === "closing";
     const contentBlurred = isAppVisible;
 
+    const activePageDef = pages.find((p) => p.title === activePage);
+    const activeIcon = isAppVisible ? activePageDef?.icon : Home;
+
     const handleNavigate = useCallback((pageTitle: string, rect: DOMRect) => {
         const vw = window.innerWidth;
-        // origin relative to the content area, not the full window
         const contentEl = document.getElementById("home-content");
         const offsetTop = contentEl?.getBoundingClientRect().top ?? 0;
         const cx = rect.left + rect.width / 2;
@@ -103,6 +101,7 @@ export default function App() {
 
                     <AppHeader
                         pageName={isAppVisible ? activePage : "Home"}
+                        pageIcon={activeIcon}
                         search={!isAppVisible ? search : undefined}
                         onSearchChange={!isAppVisible ? setSearch : undefined}
                         onBack={isAppVisible ? handleClose : undefined}
@@ -132,13 +131,14 @@ export default function App() {
                         )}
                     </div>
 
-                    <Toaster />
-                    <div className="fixed bottom-0 left-0 right-0 p-2 text-center text-xs text-muted-foreground pointer-events-none">
+                    <div className="p-2 text-center text-xs text-muted-foreground border-t">
                         <div className="flex items-center justify-center gap-2">
                             <AccessMode />
                             <BuildLabel />
                         </div>
                     </div>
+
+                    <Toaster />
                 </div>
             </SidebarProvider>
         </ThemeProvider>

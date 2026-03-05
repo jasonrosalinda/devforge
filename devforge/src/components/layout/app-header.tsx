@@ -5,15 +5,20 @@ import { ChevronLeft, Search, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useState, useEffect } from "react"
+import type { LucideIcon } from "lucide-react"
+import type { IconType } from "react-icons"
+
+type PageIcon = LucideIcon | IconType;
 
 interface AppHeaderProps {
     pageName: string;
+    pageIcon?: PageIcon | undefined;
     onBack?: (() => void) | undefined;
     search?: string | undefined;
     onSearchChange?: ((val: string) => void) | undefined;
 }
 
-export function AppHeader({ pageName, onBack, search, onSearchChange }: AppHeaderProps) {
+export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange }: AppHeaderProps) {
     const [time, setTime] = useState<string>("");
     const [date, setDate] = useState<string>("");
 
@@ -33,7 +38,8 @@ export function AppHeader({ pageName, onBack, search, onSearchChange }: AppHeade
     return (
         <header className="flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-(--header-height)">
             <div className="flex w-full items-center gap-2 px-4 lg:px-6 py-2">
-                {onBack ? (
+
+                {onBack && (
                     <Button
                         variant="ghost"
                         size="sm"
@@ -41,17 +47,18 @@ export function AppHeader({ pageName, onBack, search, onSearchChange }: AppHeade
                         className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground"
                     >
                         <ChevronLeft className="w-4 h-4" />
-                        <span className="text-sm">Home</span>
+                        <span className="text-sm">Back</span>
                     </Button>
-                ) : (
-                    <SidebarTrigger className="-ml-1" />
                 )}
 
-                <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-4" />
-                <h1 className="text-base font-medium">{pageName}</h1>
+                {onBack && <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-4" />}
+
+                <div className="flex items-center gap-1.5">
+                    {Icon && <Icon className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
+                    <h1 className="text-base font-medium">{pageName}</h1>
+                </div>
 
                 <div className="ml-auto flex items-center gap-3">
-
                     {isHome && (
                         <div className="hidden sm:flex flex-col items-end leading-none">
                             <span className="text-sm font-semibold tabular-nums">{time}</span>
