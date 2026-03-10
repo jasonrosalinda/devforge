@@ -1,11 +1,15 @@
+import type { IAzureAPI } from './azureCapture.types';
+
 export interface IElectronAPI {
-    // Define the function signature to match your main.js/preload.js
+    // PageSpeed / Lighthouse  (existing)
     runAudit: (url: string, strategy: string) => Promise<PageSpeedInsightResult>;
+
+    // Azure Chart Capture  (new)
+    azure: IAzureAPI;
 }
 
 declare global {
     interface Window {
-        // This adds the property to the existing Window interface
         electronAPI: IElectronAPI;
     }
 }

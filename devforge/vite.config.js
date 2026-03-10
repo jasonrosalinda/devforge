@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { VitePWA } from 'vite-plugin-pwa'
 import { isElectron } from "./src/lib/environment";
+import { version } from './package.json'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +43,6 @@ export default defineConfig({
   define: {
     __BUILD_NUMBER__: JSON.stringify(process.env.GITHUB_RUN_NUMBER || 'local'),
     __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
-    __APP_VERSION__: JSON.stringify(process.env.npm_package_version),
+    __APP_VERSION__: JSON.stringify(version),
   },
 })

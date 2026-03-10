@@ -1,12 +1,13 @@
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { ThemeModeToggle } from "../ui/theme-mode-toggle"
-import { ChevronLeft, Search, X } from "lucide-react"
+import { ChevronLeft, Download, Search, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useState, useEffect } from "react"
 import type { LucideIcon } from "lucide-react"
 import type { IconType } from "react-icons"
+import { isElectron } from "@/lib/environment";
 
 type PageIcon = LucideIcon | IconType;
 
@@ -21,6 +22,8 @@ interface AppHeaderProps {
 export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange }: AppHeaderProps) {
     const [time, setTime] = useState<string>("");
     const [date, setDate] = useState<string>("");
+    const isDesktop = isElectron();
+    const downloadUrl = `https://github.com/jasonrosalinda/devforge/releases/download/v${__APP_VERSION__}/devForge.Setup.${__APP_VERSION__}.exe`;
 
     useEffect(() => {
         const update = () => {
@@ -85,7 +88,13 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                             )}
                         </div>
                     )}
-
+                    {!isDesktop &&
+                        <Button variant="ghost" size="sm" asChild className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground">
+                            <a href={downloadUrl} target="_blank" rel="noreferrer">
+                                <Download className="w-4 h-4" />
+                            </a>
+                        </Button>
+                    }
                     <ThemeModeToggle />
                 </div>
             </div>

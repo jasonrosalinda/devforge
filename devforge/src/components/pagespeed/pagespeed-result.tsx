@@ -41,14 +41,20 @@ export const PageSpeedResults: React.FC<{ config: PageSpeedConfiguration }> = ({
 
     const runAudit = async (): Promise<PageSpeedInsightResult[]> => {
         const results: PageSpeedInsightResult[] = [];
-        await Promise.all(
-            config.urls.map(async url => {
+
+        // This loop waits for each 'audit' to resolve before moving to the next URL
+        for (const url of config.urls) {
+            try {
                 const result = await audit(url);
                 results.push(result);
-            })
-        );
+            } catch (error) {
+                console.error(`Audit failed for ${url}:`, error);
+                // Optionally push a failure result so the array length matches
+            }
+        }
+
         return results;
-    }
+    };
 
     const calculateImprovement = (before: number, after: number): React.ReactNode => {
         if (!before || !after) return (

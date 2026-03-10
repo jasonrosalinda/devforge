@@ -1,7 +1,7 @@
 {
   "name": "devforge",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-avatar": "^1.1.11",
+    "@radix-ui/react-checkbox": "^1.3.3",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-label": "^2.1.8",
@@ -33,7 +34,9 @@
     "chrome-launcher": "^1.2.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
+    "html2canvas": "^1.4.1",
     "lighthouse": "^13.0.3",
     "lucide-react": "^0.562.0",
     "next-themes": "^0.4.6",
@@ -49,6 +52,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@types/html2canvas": "^0.5.35",
     "@types/react": "^19.2.9",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
