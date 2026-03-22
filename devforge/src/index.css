@@ -132,4 +132,13 @@
   .scrollable-content::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--muted-foreground) / 0.5);
   }
+
+  .scrollable-content table {
+    border-collapse: collapse;
+  }
+
+  .scrollable-content table th,
+  .scrollable-content table td {
+    border: 1px solid hsl(var(--border)) !important;
+  }
 }

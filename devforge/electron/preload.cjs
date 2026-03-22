@@ -2,8 +2,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
 
-    runAudit: (url, strategy) =>
-        ipcRenderer.invoke('run-lighthouse', { url, strategy }),
+    runAudit: (url, strategy, visitMode = 'cold', runMode = 'single' || 'average') =>
+        ipcRenderer.invoke('run-lighthouse', { url, strategy, visitMode, runMode }),
+
+    clearLighthouseCache: () =>
+        ipcRenderer.invoke('clear-lighthouse-cache'),
 
     azure: {
         saveAuth: (cfg) => ipcRenderer.invoke('azure:save-auth', cfg),

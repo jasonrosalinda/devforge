@@ -25,6 +25,9 @@ export type PageSpeedStrategy = "mobile" | "desktop";
 export interface PageSpeedConfiguration {
     apiKey: string;
     strategy: PageSpeedStrategy;
+    browserMode: boolean;
+    visitMode: "cold" | "warm";
+    runMode: "single" | "average";
     urls: string[];
     comparisonMode: boolean;
     beforeLabel: string;
@@ -40,12 +43,16 @@ export interface PageSpeedConfiguration {
 
 export interface UsePageSpeedInsightHooks {
     audit: (url: string) => Promise<PageSpeedInsightResult>;
+    clearCache: () => Promise<{ success: boolean }>;
 }
 
 export interface PageSpeedApiResponse {
     lighthouseResult?: {
         audits?: Record<string, Partial<PageSpeedMetrics>>;
         runWarnings?: string;
+        timing?: {
+            total: number;
+        }
     };
 }
 

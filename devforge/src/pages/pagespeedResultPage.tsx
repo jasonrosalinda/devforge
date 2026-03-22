@@ -11,12 +11,12 @@ export default function PageSpeedResultPage() {
         setDesktopConfig({ ...config, strategy: 'desktop' });
         setMobileConfig({ ...config, strategy: 'mobile' });
     };
-
+    const [isAuditing, setIsAuditing] = useState(false);
     return (
         <>
-            <PageSpeedConfig configHasChanged={onConfigChanged} />
-            <PageSpeedResults config={desktopConfig} />
-            <PageSpeedResults config={mobileConfig} />
+            <PageSpeedConfig configHasChanged={onConfigChanged} isAuditing={isAuditing} />
+            <PageSpeedResults config={desktopConfig} onAuditingChange={setIsAuditing} />
+            <PageSpeedResults config={mobileConfig} onAuditingChange={setIsAuditing} />
         </>
     );
 }

@@ -7,94 +7,118 @@ import { Button, Toast } from '../ui';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages } from '@/lib/pageSpeedUtils';
+import { isNullOrEmpty } from '@shared/utils/stringHelper';
 
-export const PageSpeedResults: React.FC<{ config: PageSpeedConfiguration }> = ({ config }) => {
-    const { audit } = usePageSpeedInsight(config);
+type AuditSlot = PageSpeedInsightResult | null | false | undefined;
+
+interface PageSpeedResultsProps {
+    config: PageSpeedConfiguration;
+    onAuditingChange?: (isAuditing: boolean) => void;
+}
+
+// Inset box-shadow fakes borders on sticky cells — real borders get painted
+// under the sticky background, but box-shadow renders above it.
+// right + bottom edges only (left edge is the table boundary)
+const stickyBorder = 'shadow-[inset_-1px_-1px_0_hsl(var(--border))]';
+
+export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAuditingChange }) => {
+    const { audit, clearCache } = usePageSpeedInsight(config);
     const { elementRef, copyAsImage } = useCopyElementAsImage({
         fileNamePrefix: `pagespeed-result-${config.strategy}-${Date.now()}`,
     });
+
     const [copying, setCopying] = useState(false);
+    const [results1, setResults1] = useState<AuditSlot[]>([]);
+    const [results2, setResults2] = useState<AuditSlot[]>([]);
+    const [auditing1, setAuditing1] = useState(false);
+    const [auditing2, setAuditing2] = useState(false);
+
     const displayAudit = displayPageSpeedAudit(config);
-    const [results1, setResults1] = useState<PageSpeedInsightResult[]>([]);
-    const [results2, setResults2] = useState<PageSpeedInsightResult[]>([]);
-    const [auditing1, setAuditing1] = useState<boolean>(false);
-    const [auditing2, setAuditing2] = useState<boolean>(false);
-    const showAnalyzeButton = config.urls.length > 0;
+    const showAnalyzeButton = config.urls.length > 0 && (!config.browserMode ? !isNullOrEmpty(config.apiKey) : true);
     const toast = Toast();
     const isAuditing = auditing1 || auditing2;
+    const hasSubHead = !!(displayAudit.before && displayAudit.after);
 
-    const audit1 = async () => {
-        setAuditing1(true);
-        setResults1([]);
-        const results = await runAudit();
-        setResults1(results);
-        setAuditing1(false);
-    }
+    const setAuditingWithCallback = (
+        setter: React.Dispatch<React.SetStateAction<boolean>>,
+        value: boolean,
+        otherAuditing: boolean,
+    ) => {
+        setter(value);
+        onAuditingChange?.(value || otherAuditing);
+    };
 
-    const audit2 = async () => {
-        setAuditing2(true);
-        setResults2([]);
-        const results = await runAudit();
-        setResults2(results);
-        setAuditing2(false);
-    }
+    const runAudit = async (
+        setResults: React.Dispatch<React.SetStateAction<AuditSlot[]>>,
+        setAuditing: React.Dispatch<React.SetStateAction<boolean>>,
+        otherAuditing: boolean,
+    ): Promise<void> => {
+        setAuditingWithCallback(setAuditing, true, otherAuditing);
+        setResults(new Array(config.urls.length).fill(null));
+        await clearCache();
 
-    const runAudit = async (): Promise<PageSpeedInsightResult[]> => {
-        const results: PageSpeedInsightResult[] = [];
-
-        // This loop waits for each 'audit' to resolve before moving to the next URL
-        for (const url of config.urls) {
+        for (const [index, url] of config.urls.entries()) {
             try {
                 const result = await audit(url);
-                results.push(result);
+                setResults(prev => {
+                    const next = [...prev];
+                    next[index] = result;
+                    return next;
+                });
             } catch (error) {
                 console.error(`Audit failed for ${url}:`, error);
-                // Optionally push a failure result so the array length matches
+                setResults(prev => {
+                    const next = [...prev];
+                    next[index] = false;
+                    return next;
+                });
             }
         }
 
-        return results;
+        setAuditingWithCallback(setAuditing, false, otherAuditing);
     };
 
+    const audit1 = () => runAudit(setResults1, setAuditing1, auditing2);
+    const audit2 = () => runAudit(setResults2, setAuditing2, auditing1);
+
     const calculateImprovement = (before: number, after: number): React.ReactNode => {
-        if (!before || !after) return (
-            <div>
-                -
-            </div>
-        );
+        if (!before || !after) return <div>-</div>;
         const improvement = ((before - after) / before) * 100;
         const formatted = improvement.toFixed(2);
-        const color = improvement >= 0 ? 'text-green-500' :
-            (Math.abs(improvement) > config.improvementThreshold) ? 'text-red-500' : 'text-orange-500';
+        const color = improvement >= 0
+            ? 'text-green-500'
+            : Math.abs(improvement) > config.improvementThreshold
+                ? 'text-red-500'
+                : 'text-orange-500';
         return (
             <div className={color}>
                 {improvement > 0 ? `+${formatted}%` : `${formatted}%`}
             </div>
-        )
+        );
     };
 
     const onCopyAsImage = async () => {
         setCopying(true);
         await new Promise(resolve => setTimeout(resolve, 1000));
         toast.promise(copyAsImage(), {
-            loading: "Copying...",
-            success: "Copied successfully",
-            error: "Copy failed",
+            loading: 'Copying...',
+            success: 'Copied successfully',
+            error: 'Copy failed',
         });
         setCopying(false);
     };
 
-    const thSpan = (!displayAudit.before || !displayAudit.after) ? 1 : (displayAudit.improvement ? 3 : 2);
+    const thSpan = (!displayAudit.before || !displayAudit.after)
+        ? 1
+        : (displayAudit.improvement ? 3 : 2);
 
-    const tableHead = (label: string): React.ReactNode => {
-        return (
-            <TableHead colSpan={thSpan} className="text-center border">{label}</TableHead>
-        );
-    }
+    const tableHead = (label: string): React.ReactNode => (
+        <TableHead colSpan={thSpan} className="text-center border">{label}</TableHead>
+    );
+
     const tableSubHead = (): React.ReactNode => {
         const { SI, LCP, CLS, TBT, FCP } = displayAudit;
         const showMetrics = [SI, LCP, CLS, TBT, FCP].filter(Boolean).length;
-
         return (
             <>
                 {[...Array(showMetrics)].map((_, i) => (
@@ -114,93 +138,129 @@ export const PageSpeedResults: React.FC<{ config: PageSpeedConfiguration }> = ({
                 ))}
             </>
         );
-    }
+    };
 
-    const getResult1ForUrl = (url: string): PageSpeedInsightResult | undefined => {
-        return results1.find(r => r.url === url);
-    }
+    const getSlot1 = (index: number): AuditSlot =>
+        results1.length > index ? results1[index] : undefined;
 
-    const getResult2ForUrl = (url: string): PageSpeedInsightResult | undefined => {
-        return results2.find(r => r.url === url);
-    }
+    const getSlot2 = (index: number): AuditSlot =>
+        results2.length > index ? results2[index] : undefined;
 
-    const getResultMessageForUrl = (result1: PageSpeedInsightResult | undefined, result2: PageSpeedInsightResult | undefined): React.ReactNode => {
-        let messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(result1, result2);
-        return (
-            messages.map((message, index) => (
-                <p key={index} className={`text-xs ${message.isError ? 'text-red-500' : 'text-orange-500'} mt-1`}>
-                    * {message.message}
-                </p>
-            ))
-        );
-    }
+    const getResultMessageForUrl = (slot1: AuditSlot, slot2: AuditSlot): React.ReactNode => {
+        if (slot1 === null || slot2 === null) return null;
+        const r1 = slot1 || undefined;
+        const r2 = slot2 || undefined;
+        const messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(r1, r2);
+        return messages.map((message, index) => (
+            <p key={index} className={`text-xs ${message.isError ? 'text-red-500' : 'text-orange-500'} mt-1`}>
+                * {message.message}
+            </p>
+        ));
+    };
 
-    const cellMetrics = (show: boolean, metrics1: PageSpeedMetrics | undefined, metrics2: PageSpeedMetrics | undefined) => {
-        return (
-            <>
-                {show && (
-                    <>
-                        <TableCell className="text-center border">
-                            {auditing1 ?
-                                <Loader2 className="animate-spin mx-auto" size={20} /> :
-                                cellValue(metrics1)}
-                        </TableCell>
-                        {!displayAudit.singleResult && (
-                            <TableCell className="text-center border">
-                                {auditing2 ?
-                                    <Loader2 className="animate-spin mx-auto" size={20} /> :
-                                    cellValue(metrics2)}
-                            </TableCell>
-                        )}
-                        {!displayAudit.singleResult && displayAudit.improvement && (
-                            <TableCell className="text-center border">
-                                {isAuditing ?
-                                    <Loader2 className="animate-spin mx-auto" size={20} /> :
-                                    metrics1 && metrics2 ? calculateImprovement(metrics1.numericValue, metrics2.numericValue) : '-'}
-                            </TableCell>
-                        )}
-                    </>
-                )}
-            </>
-        );
-    }
-
-    const cellValue = (metric: PageSpeedMetrics | undefined): string => {
+    const cellValue = (slot: AuditSlot, metric: PageSpeedMetrics | undefined): React.ReactNode => {
+        if (slot === null) return <Loader2 className="animate-spin mx-auto" size={20} />;
+        if (slot === false) return <span className="text-red-500 text-xs">Error</span>;
+        if (slot === undefined) return <span>-</span>;
         return metric?.displayValue ?? '-';
     };
+
+    const cellMetrics = (
+        show: boolean,
+        slot1: AuditSlot,
+        slot2: AuditSlot,
+        metrics1: PageSpeedMetrics | undefined,
+        metrics2: PageSpeedMetrics | undefined,
+    ): React.ReactNode => (
+        <>
+            {show && (
+                <>
+                    <TableCell className="text-center border">
+                        {cellValue(slot1, metrics1)}
+                    </TableCell>
+                    {!displayAudit.singleResult && (
+                        <TableCell className="text-center border">
+                            {cellValue(slot2, metrics2)}
+                        </TableCell>
+                    )}
+                    {!displayAudit.singleResult && displayAudit.improvement && (
+                        <TableCell className="text-center border">
+                            {isAuditing
+                                ? <Loader2 className="animate-spin mx-auto" size={20} />
+                                : metrics1 && metrics2
+                                    ? calculateImprovement(metrics1.numericValue, metrics2.numericValue)
+                                    : '-'}
+                        </TableCell>
+                    )}
+                </>
+            )}
+        </>
+    );
 
     return (
         <Card className="my-4" ref={elementRef}>
             <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        {config.strategy == 'mobile' ? <Smartphone size={20} /> : <Monitor size={20} />}
+                        {config.strategy === 'mobile' ? <Smartphone size={20} /> : <Monitor size={20} />}
                         {config.strategy.toUpperCase()}
                     </div>
                     {!copying && showAnalyzeButton && (
                         <div className="flex items-center gap-2">
                             {config.comparisonMode && (
                                 <>
-                                    <Button variant="outline" onClick={audit1} disabled={isAuditing}>Analyze {config.beforeLabel}</Button>
-                                    <Button variant="outline" onClick={audit2} disabled={isAuditing}>Analyze {config.afterLabel}</Button>
+                                    <Button variant="outline" onClick={audit1} disabled={isAuditing}>
+                                        {auditing1 ? (
+                                            <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                                                <Loader2 className="animate-spin" size={14} />
+                                                Analyzing {config.beforeLabel}
+                                            </span>
+                                        ) : (
+                                            <>Analyze {config.beforeLabel}</>
+                                        )}
+                                    </Button>
+                                    <Button variant="outline" onClick={audit2} disabled={isAuditing}>
+                                        {auditing2 ? (
+                                            <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                                                <Loader2 className="animate-spin" size={14} />
+                                                Analyzing {config.afterLabel}
+                                            </span>
+                                        ) : (
+                                            <>Analyze {config.afterLabel}</>
+                                        )}
+                                    </Button>
                                 </>
                             )}
                             {!config.comparisonMode && (
-                                <Button variant="outline" onClick={audit1} disabled={isAuditing}>Analyze</Button>
+                                <Button variant="outline" onClick={audit1} disabled={isAuditing}>
+                                    {auditing1 ? (
+                                        <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                                            <Loader2 className="animate-spin" size={14} />
+                                            Analyzing...
+                                        </span>
+                                    ) : (
+                                        <>Analyze</>
+                                    )}
+                                </Button>
                             )}
-                            <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>Copy as Image</Button>
+                            <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
+                                Copy as Image
+                            </Button>
                         </div>
                     )}
-
                 </CardTitle>
             </CardHeader>
             <CardContent>
-
-                <div className="overflow-auto rounded-md border scrollable-content">
+                <div className="overflow-auto rounded-md border scrollable-content [&_table]:border-collapse [&_th]:border [&_th]:border-border [&_td]:border [&_td]:border-border">
                     <Table>
                         <TableHeader>
                             <TableRow>
-                                <TableHead rowSpan={2} className="border text-center sticky left-0 bg-background mr-2">
+                                {/* sticky URL header — uses inset box-shadow instead of border
+                                    because the sticky bg-background paints over real borders  */}
+                                <TableHead
+                                    rowSpan={hasSubHead ? 2 : 1}
+                                    className={`text-center sticky left-0 bg-background align-middle ${stickyBorder}`}
+                                >
                                     URL
                                 </TableHead>
                                 {displayAudit.SI && tableHead('SI')}
@@ -209,39 +269,39 @@ export const PageSpeedResults: React.FC<{ config: PageSpeedConfiguration }> = ({
                                 {displayAudit.TBT && tableHead('TBT')}
                                 {displayAudit.FCP && tableHead('FCP')}
                             </TableRow>
-                            {(displayAudit.before && displayAudit.after) && (
-                                <TableRow>
-                                    {tableSubHead()}
-                                </TableRow>
+                            {hasSubHead && (
+                                <TableRow>{tableSubHead()}</TableRow>
                             )}
                         </TableHeader>
                         <TableBody>
                             {config.urls.map((url, index) => {
-                                const result1 = getResult1ForUrl(url);
-                                const result2 = getResult2ForUrl(url);
+                                const slot1 = getSlot1(index);
+                                const slot2 = getSlot2(index);
+                                const result1 = slot1 || undefined;
+                                const result2 = slot2 || undefined;
 
                                 return (
-                                    <TableRow key={index} className="border">
-                                        <TableCell className="border sticky left-0 bg-background z-10 w-1/3">
-                                            <a href={url} target="_blank" rel="noopener noreferrer" className='break-all'>{url}</a>
-                                            {getResultMessageForUrl(result1, result2)}
+                                    <TableRow key={index}>
+                                        {/* sticky URL cell — same inset box-shadow trick */}
+                                        <TableCell className={`sticky left-0 bg-background z-10 w-1/3 ${stickyBorder}`}>
+                                            <a href={url} target="_blank" rel="noopener noreferrer" className="break-all">
+                                                {url}
+                                            </a>
+                                            {getResultMessageForUrl(slot1, slot2)}
                                         </TableCell>
 
-                                        {cellMetrics(displayAudit.SI, result1?.speedIndex, result2?.speedIndex)}
-                                        {cellMetrics(displayAudit.LCP, result1?.largestContentfulPaint, result2?.largestContentfulPaint)}
-                                        {cellMetrics(displayAudit.CLS, result1?.cumulativeLayoutShift, result2?.cumulativeLayoutShift)}
-                                        {cellMetrics(displayAudit.TBT, result1?.totalBlockingTime, result2?.totalBlockingTime)}
-                                        {cellMetrics(displayAudit.FCP, result1?.firstContentfulPaint, result2?.firstContentfulPaint)}
-
+                                        {cellMetrics(displayAudit.SI, slot1, slot2, result1?.speedIndex, result2?.speedIndex)}
+                                        {cellMetrics(displayAudit.LCP, slot1, slot2, result1?.largestContentfulPaint, result2?.largestContentfulPaint)}
+                                        {cellMetrics(displayAudit.CLS, slot1, slot2, result1?.cumulativeLayoutShift, result2?.cumulativeLayoutShift)}
+                                        {cellMetrics(displayAudit.TBT, slot1, slot2, result1?.totalBlockingTime, result2?.totalBlockingTime)}
+                                        {cellMetrics(displayAudit.FCP, slot1, slot2, result1?.firstContentfulPaint, result2?.firstContentfulPaint)}
                                     </TableRow>
                                 );
                             })}
                         </TableBody>
                     </Table>
                 </div>
-
             </CardContent>
-
         </Card>
     );
 };

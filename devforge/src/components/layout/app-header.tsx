@@ -19,22 +19,41 @@ interface AppHeaderProps {
     onSearchChange?: ((val: string) => void) | undefined;
 }
 
-export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange }: AppHeaderProps) {
-    const [time, setTime] = useState<string>("");
-    const [date, setDate] = useState<string>("");
-    const isDesktop = isElectron();
-    const downloadUrl = `https://github.com/jasonrosalinda/devforge/releases/download/v${__APP_VERSION__}/devForge.Setup.${__APP_VERSION__}.exe`;
+interface ClockDisplay {
+    time: string;
+    date: string;
+}
+
+function useClockForZone(timeZone: string): ClockDisplay {
+    const [display, setDisplay] = useState<ClockDisplay>({ time: "", date: "" });
 
     useEffect(() => {
         const update = () => {
             const now = new Date();
-            setTime(now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-            setDate(now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }));
+            setDisplay({
+                time: now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone }),
+                date: now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", timeZone }),
+            });
         };
         update();
         const id = setInterval(update, 1000);
         return () => clearInterval(id);
-    }, []);
+    }, [timeZone]);
+
+    return display;
+}
+
+export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange }: AppHeaderProps) {
+    const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localLabel = new Intl.DateTimeFormat([], { timeZoneName: "short", timeZone: localTimeZone })
+        .formatToParts(new Date())
+        .find(p => p.type === "timeZoneName")?.value ?? localTimeZone;
+
+    const local = useClockForZone(localTimeZone);
+    const utc = useClockForZone("UTC");
+
+    const isDesktop = isElectron();
+    const downloadUrl = `https://github.com/jasonrosalinda/devforge/releases/download/v${__APP_VERSION__}/devForge.Setup.${__APP_VERSION__}.exe`;
 
     const isHome = !onBack;
 
@@ -62,12 +81,6 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                 </div>
 
                 <div className="ml-auto flex items-center gap-3">
-                    {isHome && (
-                        <div className="hidden sm:flex flex-col items-end leading-none">
-                            <span className="text-sm font-semibold tabular-nums">{time}</span>
-                            <span className="text-xs text-muted-foreground">{date}</span>
-                        </div>
-                    )}
 
                     {isHome && onSearchChange !== undefined && (
                         <div className="relative hidden md:block">
@@ -88,6 +101,27 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                             )}
                         </div>
                     )}
+
+                    {/* Local Timezone Clock */}
+                    <div className="hidden sm:flex flex-col items-end leading-none">
+                        <div className="flex items-baseline gap-1">
+                            <span className="text-sm font-semibold tabular-nums">{local.time}</span>
+                            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">{localLabel}</span>
+                        </div>
+                        <span className="text-xs text-muted-foreground">{local.date}</span>
+                    </div>
+
+                    <Separator orientation="vertical" className="hidden sm:block data-[orientation=vertical]:h-6" />
+
+                    {/* UTC Clock */}
+                    <div className="hidden sm:flex flex-col items-end leading-none">
+                        <div className="flex items-baseline gap-1">
+                            <span className="text-sm font-semibold tabular-nums">{utc.time}</span>
+                            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">UTC</span>
+                        </div>
+                        <span className="text-xs text-muted-foreground">{utc.date}</span>
+                    </div>
+
                     {!isDesktop &&
                         <Button variant="ghost" size="sm" asChild className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground">
                             <a href={downloadUrl} target="_blank" rel="noreferrer">

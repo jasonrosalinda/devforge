@@ -8,15 +8,23 @@ export const usePageSpeedInsight = (config: PageSpeedConfiguration): UsePageSpee
 
     const audit = async (url: string): Promise<PageSpeedInsightResult> => {
         let result = defaultPageSpeedResult(url);
-        if (isElectron()) {
-            result = await window.electronAPI.runAudit(url, config.strategy);
+        if (config.browserMode) {
+            result = await window.electronAPI.runAudit(url, config.strategy, config.visitMode, config.runMode);
         } else {
-            result = await googleApi.runPagespeed(url, config.apiKey, config.strategy);
+            result = await googleApi.runPagespeed(url, config.apiKey, config.strategy, config.runMode);
         }
         return result;
     };
 
+    const clearCache = async () => {
+        if (isElectron()) {
+            return await window.electronAPI.clearLighthouseCache();
+        }
+        return { success: false };
+    };
+
     return {
-        audit
+        audit,
+        clearCache
     };
 };

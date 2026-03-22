@@ -5,12 +5,12 @@ import { Button, Input } from "@/components/ui";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from "@/components/ui/drawer";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSet, FieldTitle } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
-import { Activity, Cog, Key, Link, Table2, Trash2 } from "lucide-react";
+import { Activity, Cog, Key, Link, Table2, Trash2, Wrench } from "lucide-react";
 import { Item, ItemActions, ItemContent, ItemTitle, } from "@/components/ui/item"
 import { Switch } from "../ui/switch";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../ui/accordion";
 
-export default function PageSpeedConfig({ configHasChanged }: { configHasChanged: (config: PageSpeedConfiguration) => void }) {
+export default function PageSpeedConfig({ configHasChanged, isAuditing }: { configHasChanged: (config: PageSpeedConfiguration) => void, isAuditing: boolean }) {
     const [config, setConfig] = useState(defaultPageSpeedConfiguration());
     const [url, setUrl] = useState('');
     const [isInvalidUrl, setIsInvalidUrl] = useState(false);
@@ -21,6 +21,27 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
     const onSetConfigState = (state: PageSpeedConfiguration) => {
         setConfig(state);
         configHasChanged(state);
+    };
+
+    const onBrowserModeChange = (e: boolean) => {
+        onSetConfigState({
+            ...config,
+            browserMode: e,
+        });
+    };
+
+    const onVisitModeChange = (e: boolean) => {
+        onSetConfigState({
+            ...config,
+            visitMode: e ? "cold" : "warm",
+        });
+    };
+
+    const onRunModeChange = (e: boolean) => {
+        onSetConfigState({
+            ...config,
+            runMode: e ? "average" : "single",
+        });
     };
 
     const onApiKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -159,7 +180,7 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
             <Drawer direction="right">
                 <DrawerTrigger asChild>
                     <div className="flex justify-end">
-                        <Button className="capitalize" variant="outline">
+                        <Button className="capitalize" variant="outline" disabled={isAuditing}>
                             <Cog className="mr-1 h-4 w-4" />Configuration
                         </Button>
                     </div>
@@ -174,13 +195,59 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
 
                             <AccordionItem key="api-key" value="api-key" className="border-b px-4 last:border-b-0">
                                 <AccordionTrigger>
-                                    <div className="flex items-center gap-2"><Key className="mr-1 h-4 w-4" />Api Key</div>
+                                    <div className="flex items-center gap-2"><Wrench className="mr-1 h-4 w-4" />Mode</div>
                                 </AccordionTrigger>
                                 <AccordionContent>
-                                    <Input value={config.apiKey} onChange={onApiKeyChange} />
-                                    <p className="text-xs text-muted-foreground mt-2">
-                                        Get your API key from <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Google PageSpeed Insights API</a>
-                                    </p>
+                                    <FieldLabel htmlFor="switch-browser-mode" className="my-3">
+                                        <Field orientation="horizontal">
+                                            <FieldContent>
+                                                <FieldTitle>Use Lighthouse</FieldTitle>
+                                            </FieldContent>
+                                            <Switch id="switch-browser-mode" checked={config.browserMode} onCheckedChange={onBrowserModeChange} />
+                                        </Field>
+                                    </FieldLabel>
+                                    {config.browserMode ? (
+                                        <>
+                                            <FieldLabel htmlFor="switch-visitMode-mode" className="my-3">
+                                                <Field orientation="horizontal">
+                                                    <FieldContent>
+                                                        <FieldTitle>Cold Start</FieldTitle>
+                                                        <FieldDescription className="text-xs text-muted-foreground">
+                                                            Cold Start: Browser is launched fresh for each audit. <br />
+                                                            Warm Start: Browser is reused for subsequent audits.
+                                                        </FieldDescription>
+                                                    </FieldContent>
+                                                    <Switch id="switch-visitMode-mode" checked={config.visitMode === "cold"} onCheckedChange={(e) => onVisitModeChange(e)} />
+                                                </Field>
+
+                                            </FieldLabel>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <FieldLabel>
+                                                <Field>
+                                                    <FieldContent>
+                                                        <FieldTitle>API Key</FieldTitle>
+                                                        <FieldDescription className="text-xs text-muted-foreground">
+                                                            Get your API key from <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Google PageSpeed Insights API</a>
+                                                        </FieldDescription>
+                                                    </FieldContent>
+                                                    <Input id="input-api-key" value={config.apiKey} onChange={onApiKeyChange} />
+                                                </Field>
+                                            </FieldLabel>
+                                        </>
+                                    )}
+                                    <FieldLabel htmlFor="switch-runMode-mode" className="my-3">
+                                        <Field orientation="horizontal">
+                                            <FieldContent>
+                                                <FieldTitle>Accuracy mode</FieldTitle>
+                                                <FieldDescription className="text-xs text-muted-foreground">
+                                                    Average mode runs audit 3 times and averages the results.
+                                                </FieldDescription>
+                                            </FieldContent>
+                                            <Switch id="switch-runMode-mode" checked={config.runMode === "average"} onCheckedChange={(e) => onRunModeChange(e)} />
+                                        </Field>
+                                    </FieldLabel>
                                 </AccordionContent>
                             </AccordionItem>
 
@@ -240,7 +307,7 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
                                             <Field orientation="horizontal">
                                                 <FieldContent>
                                                     <FieldTitle>Comparison Mode</FieldTitle>
-                                                    <FieldDescription>
+                                                    <FieldDescription className="text-xs text-muted-foreground">
                                                         Enable comparison mode to compare the before and after results.
                                                     </FieldDescription>
                                                 </FieldContent>
@@ -251,7 +318,7 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
                                                     <Field>
                                                         <FieldContent>
                                                             <FieldTitle>Before Label</FieldTitle>
-                                                            <FieldDescription>
+                                                            <FieldDescription className="text-xs text-muted-foreground">
                                                                 Label for the before results.
                                                             </FieldDescription>
                                                         </FieldContent>
@@ -260,7 +327,7 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
                                                     <Field>
                                                         <FieldContent>
                                                             <FieldTitle>After Label</FieldTitle>
-                                                            <FieldDescription>
+                                                            <FieldDescription className="text-xs text-muted-foreground">
                                                                 Label for the after results.
                                                             </FieldDescription>
                                                         </FieldContent>
@@ -347,6 +414,6 @@ export default function PageSpeedConfig({ configHasChanged }: { configHasChanged
                     </div>
                 </DrawerContent>
             </Drawer>
-        </div>
+        </div >
     );
 }
