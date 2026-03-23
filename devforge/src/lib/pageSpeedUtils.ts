@@ -70,7 +70,7 @@ export function getPageSpeedInsightResultMessages(result1: PageSpeedInsightResul
     else if (result2?.runWarnings) {
         messages.push({ isError: false, message: result2.runWarnings });
     }
-    return messages;
+    return messages.filter(x => x.message.length > 0);
 }
 
 export function getPageSpeedInsightResultAverage(url: string, results: PageSpeedInsightResult[]): PageSpeedInsightResult {
