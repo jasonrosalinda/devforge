@@ -152,9 +152,11 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         const r2 = slot2 || undefined;
         const messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(r1, r2);
         return messages.map((message, index) => (
-            <p key={index} className={`text-xs ${message.isError ? 'text-red-500' : 'text-orange-500'} mt-1`}>
-                * {message.message}
-            </p>
+            isNullOrEmpty(message.message) ? <></> : (
+                <p key={index} className={`text-xs ${message.isError ? 'text-red-500' : 'text-orange-500'} mt-1`}>
+                    * {message.message}
+                </p>
+            )
         ));
     };
 
