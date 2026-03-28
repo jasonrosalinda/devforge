@@ -58,24 +58,43 @@ export function defaultPageSpeedResults(urls: string[]): PageSpeedInsightResult[
 export function getPageSpeedInsightResultMessages(result1: PageSpeedInsightResult | undefined, result2: PageSpeedInsightResult | undefined): PageSpeedInsightResultMessage[] {
     let messages: PageSpeedInsightResultMessage[] = [];
 
+    const pushMessages = (value: string | string[] | undefined, isError: boolean) => {
+        if (!value) return;
+        const items = Array.isArray(value) ? value : [value];
+        for (const msg of items) {
+            if (msg.length > 0) messages.push({ isError, message: msg });
+        }
+    };
+
     if (result1?.errorResponse?.message) {
-        messages.push({ isError: true, message: result1.errorResponse.message });
-    }
-    else if (result1?.runWarnings) {
-        messages.push({ isError: false, message: result1.runWarnings });
+        pushMessages(result1.errorResponse.message, true);
+    } else {
+        pushMessages(result1?.runWarnings, false);
     }
     if (result2?.errorResponse?.message) {
-        messages.push({ isError: true, message: result2.errorResponse.message });
+        pushMessages(result2.errorResponse.message, true);
+    } else {
+        pushMessages(result2?.runWarnings, false);
     }
-    else if (result2?.runWarnings) {
-        messages.push({ isError: false, message: result2.runWarnings });
-    }
-    return messages.filter(x => x.message.length > 0);
+    return messages;
 }
 
 export function getPageSpeedInsightResultAverage(url: string, results: PageSpeedInsightResult[]): PageSpeedInsightResult {
     if (results.length === 0) return defaultPageSpeedResult(url);
     if (results.length === 1) return results[0]!;
+
+    const formatDisplayValue = (value: number, numericUnit: string, referenceDisplay: string): string => {
+        if (numericUnit === 'unitless') {
+            // CLS-style: show as decimal (e.g. "0.617")
+            return value < 0.005 ? value.toFixed(3) : parseFloat(value.toFixed(3)).toString();
+        }
+        // Millisecond-based metric — check reference to determine seconds vs ms format
+        if (referenceDisplay.includes('ms')) {
+            return `${Math.round(value).toLocaleString()} ms`;
+
+        }
+        return `${(value / 1000).toFixed(1)} s`;
+    };
 
     const avgMetric = (
         key: keyof Pick<PageSpeedInsightResult,
@@ -88,10 +107,12 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
         }
 
         const avg = valid.reduce((sum, r) => sum + r[key].numericValue, 0) / valid.length;
+        const ref = valid[0]![key];
 
         return {
-            ...valid[0]![key],
+            ...ref,
             numericValue: avg,
+            displayValue: formatDisplayValue(avg, ref.numericUnit, ref.displayValue),
         };
     };
 
@@ -102,26 +123,31 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
         cumulativeLayoutShift: avgMetric('cumulativeLayoutShift'),
         totalBlockingTime: avgMetric('totalBlockingTime'),
         firstContentfulPaint: avgMetric('firstContentfulPaint'),
+        ...(results.length > 1 ? { runHistory: results } : {}),
     };
 
     const warnings = [...new Set(
         results.flatMap((r, i) => {
-            const w = r.runWarnings != null ? String(r.runWarnings).trim() : '';
-            if (!w) return [];
-            return [results.length === 1 ? w : `Run ${i + 1}: ${w}`];
+            if (!r.runWarnings) return [];
+            const items = Array.isArray(r.runWarnings) ? r.runWarnings : [r.runWarnings];
+            return items
+                .map(w => w.trim())
+                .filter(w => w.length > 0)
+                .map(w => results.length === 1 ? w : `Run ${i + 1}: ${w}`);
         })
     )];
 
-    const errors = results
-        .map((r, i) => {
-            const msg = r.errorResponse?.message != null ? String(r.errorResponse.message).trim() : '';
-            if (!msg) return null;
-            return results.length === 1 ? msg : `Run ${i + 1}: ${msg}`;
-        })
-        .filter((e): e is string => !!e);
+    const errors = results.flatMap((r, i) => {
+        if (!r.errorResponse?.message) return [];
+        const items = Array.isArray(r.errorResponse.message) ? r.errorResponse.message : [r.errorResponse.message];
+        return items
+            .map(msg => msg.trim())
+            .filter(msg => msg.length > 0)
+            .map(msg => results.length === 1 ? msg : `Run ${i + 1}: ${msg}`);
+    });
 
-    if (warnings.length > 0) result.runWarnings = warnings.join(' | ');
-    if (errors.length > 0) result.errorResponse = { code: 0, message: errors.join(' | ') };
+    if (warnings.length > 0) result.runWarnings = warnings;
+    if (errors.length > 0) result.errorResponse = { code: 0, message: errors };
 
     return result;
 }

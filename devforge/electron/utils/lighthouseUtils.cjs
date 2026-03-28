@@ -140,6 +140,16 @@ function buildLighthouseConfig(strategy, visitMode) {
 
 // ─── Audit averaging ──────────────────────────────────────────────────────────
 
+function formatDisplayValue(value, numericUnit, referenceDisplay) {
+    if (numericUnit === 'unitless') {
+        return value < 0.005 ? value.toFixed(3) : parseFloat(value.toFixed(3)).toString();
+    }
+    if (referenceDisplay && referenceDisplay.includes(' s')) {
+        return `${(value / 1000).toFixed(1)} s`;
+    }
+    return `${Math.round(value).toLocaleString()} ms`;
+}
+
 function averageAudits(lhrList) {
     if (lhrList.length === 1) return lhrList[0].audits;
 
@@ -154,7 +164,12 @@ function averageAudits(lhrList) {
         if (values.length === 0) continue;
 
         const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
-        averaged[key] = { ...base[key], numericValue: avg };
+        const ref = base[key];
+        averaged[key] = {
+            ...ref,
+            numericValue: avg,
+            displayValue: formatDisplayValue(avg, ref?.numericUnit, ref?.displayValue),
+        };
     }
 
     return averaged;

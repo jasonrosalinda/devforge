@@ -6,7 +6,7 @@ export interface PageSpeedMetrics {
 
 export interface PageSpeedErrorResponse {
     code: number;
-    message: string;
+    message: string | string[];
 }
 
 export interface PageSpeedInsightResult {
@@ -16,8 +16,9 @@ export interface PageSpeedInsightResult {
     cumulativeLayoutShift: PageSpeedMetrics;
     totalBlockingTime: PageSpeedMetrics;
     firstContentfulPaint: PageSpeedMetrics;
-    runWarnings?: string;
+    runWarnings?: string | string[];
     errorResponse?: PageSpeedErrorResponse;
+    runHistory?: PageSpeedInsightResult[];
 }
 
 export type PageSpeedStrategy = "mobile" | "desktop";

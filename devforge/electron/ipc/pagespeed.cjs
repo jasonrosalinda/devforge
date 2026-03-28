@@ -200,11 +200,24 @@ module.exports = function registerPagespeedHandlers(_win) {
 
             const averagedAudits = averageAudits(lhrList);
 
-            return parseToPageSpeedInsightResult(
+            const result = parseToPageSpeedInsightResult(
                 url,
                 averagedAudits,
                 lhrList[0].runWarnings?.[0],
             );
+
+            // Attach individual run results as history when in accuracy mode
+            if (lhrList.length > 1) {
+                result.runHistory = lhrList.map((lhr, i) =>
+                    parseToPageSpeedInsightResult(
+                        url,
+                        lhr.audits,
+                        lhr.runWarnings?.[0],
+                    )
+                );
+            }
+
+            return result;
 
         } catch (err) {
             console.error(`[Lighthouse][${visitMode}] Error:`, err.message);
