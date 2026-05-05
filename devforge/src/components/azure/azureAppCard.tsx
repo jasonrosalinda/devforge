@@ -30,7 +30,7 @@ interface AzureAppCardProps {
 function StatBadge({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 60 }}>
-      <span style={{ fontSize: 10, color: '#8b9ab3', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
+      <span style={{ fontSize: 10, color: color || '#8b9ab3', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
       <span style={{ fontSize: 14, fontWeight: 600, color: color || '#e6edf3', fontVariantNumeric: 'tabular-nums' }}>{value}</span>
     </div>
   );
