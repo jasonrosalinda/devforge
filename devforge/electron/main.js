@@ -68,6 +68,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load azure-capture.cjs:', err);
     }
 
+    try {
+        require('./ipc/azure-metrics.cjs')(mainWindow);
+        console.log('✅ azure-metrics handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load azure-metrics.cjs:', err);
+    }
+
     if (!isDev) autoUpdater.checkForUpdatesAndNotify();
 
     app.on('activate', () => {
