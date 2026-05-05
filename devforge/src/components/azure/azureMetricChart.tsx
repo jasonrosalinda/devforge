@@ -23,9 +23,9 @@ interface CombinedChartProps {
 
 export const CHART_COLORS = {
   cpuAvg:  '#58a6ff',
-  cpuMax:  '#1f6feb',
-  memAvg:  '#3fb950',
-  memMax:  '#238636',
+  cpuMax:  '#ff7b72',
+  memAvg:  '#79c0ff',
+  memMax:  '#ffa198',
 };
 
 function formatTick(isoStr: string): string {
