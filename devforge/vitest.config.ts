@@ -5,7 +5,7 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: [
-      'electron/**/*.test.cjs',
+      'electron/**/*.test.mjs',
       'src/**/*.test.ts',
       'src/**/*.test.tsx',
     ],
