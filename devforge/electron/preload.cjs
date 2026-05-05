@@ -31,4 +31,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    azureMetrics: {
+        checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
+        fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
+    },
+
 });
