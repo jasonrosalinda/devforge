@@ -6,7 +6,6 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceArea,
-  Legend,
 } from 'recharts';
 import type { MetricSeries } from '@shared/types/azureMetrics.types';
 
@@ -22,7 +21,7 @@ interface CombinedChartProps {
   loading?: boolean;
 }
 
-const COLORS = {
+export const CHART_COLORS = {
   cpuAvg:  '#58a6ff',
   cpuMax:  '#1f6feb',
   memAvg:  '#3fb950',
@@ -60,12 +59,12 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = f
       <AreaChart data={merged} margin={{ top: 4, right: 8, bottom: 0, left: -16 }}>
         <defs>
           <linearGradient id="gCpuAvg" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%"  stopColor={COLORS.cpuAvg} stopOpacity={0.3} />
-            <stop offset="95%" stopColor={COLORS.cpuAvg} stopOpacity={0} />
+            <stop offset="5%"  stopColor={CHART_COLORS.cpuAvg} stopOpacity={0.3} />
+            <stop offset="95%" stopColor={CHART_COLORS.cpuAvg} stopOpacity={0} />
           </linearGradient>
           <linearGradient id="gMemAvg" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%"  stopColor={COLORS.memAvg} stopOpacity={0.3} />
-            <stop offset="95%" stopColor={COLORS.memAvg} stopOpacity={0} />
+            <stop offset="5%"  stopColor={CHART_COLORS.memAvg} stopOpacity={0.3} />
+            <stop offset="95%" stopColor={CHART_COLORS.memAvg} stopOpacity={0} />
           </linearGradient>
         </defs>
 
@@ -77,8 +76,6 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = f
           formatter={(val: number, name: string) => [`${val.toFixed(1)}%`, name]}
           labelFormatter={(label) => new Date(label).toLocaleTimeString()}
         />
-        <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />
-
         {downtimeIntervals.map((iv, i) => (
           <ReferenceArea
             key={i}
@@ -89,10 +86,10 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = f
           />
         ))}
 
-        <Area type="monotone" dataKey="cpuMax"  name="CPU Max"  stroke={COLORS.cpuMax}  fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
-        <Area type="monotone" dataKey="cpuAvg"  name="CPU Avg"  stroke={COLORS.cpuAvg}  fill="url(#gCpuAvg)" strokeWidth={2} dot={false} />
-        <Area type="monotone" dataKey="memMax"  name="Mem Max"  stroke={COLORS.memMax}  fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
-        <Area type="monotone" dataKey="memAvg"  name="Mem Avg"  stroke={COLORS.memAvg}  fill="url(#gMemAvg)" strokeWidth={2} dot={false} />
+        <Area type="monotone" dataKey="cpuMax"  name="CPU Max"  stroke={CHART_COLORS.cpuMax}  fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
+        <Area type="monotone" dataKey="cpuAvg"  name="CPU Avg"  stroke={CHART_COLORS.cpuAvg}  fill="url(#gCpuAvg)" strokeWidth={2} dot={false} />
+        <Area type="monotone" dataKey="memMax"  name="Mem Max"  stroke={CHART_COLORS.memMax}  fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
+        <Area type="monotone" dataKey="memAvg"  name="Mem Avg"  stroke={CHART_COLORS.memAvg}  fill="url(#gMemAvg)" strokeWidth={2} dot={false} />
       </AreaChart>
     </ResponsiveContainer>
   );

@@ -1,5 +1,5 @@
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
-import { CombinedChart } from './azureMetricChart';
+import { CombinedChart, CHART_COLORS } from './azureMetricChart';
 
 type Status = 'healthy' | 'warning' | 'critical';
 
@@ -36,17 +36,6 @@ function StatBadge({ label, value, color }: { label: string; value: string; colo
   );
 }
 
-function cpuColor(val: number): string {
-  if (val > 90) return '#f85149';
-  if (val > 70) return '#d29922';
-  return '#3fb950';
-}
-
-function memColor(val: number): string {
-  if (val > 95) return '#f85149';
-  if (val > 80) return '#d29922';
-  return '#3fb950';
-}
 
 function InstanceDot({ healthStatus }: { healthStatus: string }) {
   const lower = healthStatus.toLowerCase();
@@ -132,10 +121,10 @@ export function AzureAppCard({ appKey: _appKey, metrics, loading }: AzureAppCard
 
       {/* Stats row */}
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <StatBadge label="CPU Avg"  value={`${metrics.cpu.avg}%`}    color={cpuColor(metrics.cpu.avg)} />
-        <StatBadge label="CPU Max"  value={`${metrics.cpu.max}%`}    color={cpuColor(metrics.cpu.max)} />
-        <StatBadge label="Mem Avg"  value={`${metrics.memory.avg}%`} color={memColor(metrics.memory.avg)} />
-        <StatBadge label="Mem Max"  value={`${metrics.memory.max}%`} color={memColor(metrics.memory.max)} />
+        <StatBadge label="CPU Avg"  value={`${metrics.cpu.avg}%`}    color={CHART_COLORS.cpuAvg} />
+        <StatBadge label="CPU Max"  value={`${metrics.cpu.max}%`}    color={CHART_COLORS.cpuMax} />
+        <StatBadge label="Mem Avg"  value={`${metrics.memory.avg}%`} color={CHART_COLORS.memAvg} />
+        <StatBadge label="Mem Max"  value={`${metrics.memory.max}%`} color={CHART_COLORS.memMax} />
       </div>
 
       {/* Secondary row */}
