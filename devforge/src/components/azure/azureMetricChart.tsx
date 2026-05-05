@@ -28,9 +28,15 @@ export const CHART_COLORS = {
   memMax:  '#ffa198',
 };
 
-function formatTick(isoStr: string): string {
+function formatTick(isoStr: string, spanMs: number): string {
   const d = new Date(isoStr);
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  const hh = d.getHours().toString().padStart(2, '0');
+  const mm = d.getMinutes().toString().padStart(2, '0');
+  const mo = (d.getMonth() + 1).toString().padStart(2, '0');
+  const dd = d.getDate().toString().padStart(2, '0');
+  if (spanMs > 3 * 24 * 60 * 60 * 1000) return `${mo}/${dd}`;        // >3d → date only
+  if (spanMs > 12 * 60 * 60 * 1000)     return `${mo}/${dd} ${hh}:00`; // >12h → date+hour
+  return `${hh}:${mm}`;                                                 // ≤12h → HH:MM
 }
 
 export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = false }: CombinedChartProps) {
@@ -54,6 +60,10 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = f
     memMax: memory.series[i]?.m ?? 0,
   }));
 
+  const spanMs = merged.length > 1
+    ? new Date(merged[merged.length - 1].t).getTime() - new Date(merged[0].t).getTime()
+    : 0;
+
   return (
     <ResponsiveContainer width="100%" height={200}>
       <AreaChart data={merged} margin={{ top: 4, right: 8, bottom: 0, left: -16 }}>
@@ -68,7 +78,7 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], loading = f
           </linearGradient>
         </defs>
 
-        <XAxis dataKey="t" tickFormatter={formatTick} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
+        <XAxis dataKey="t" tickFormatter={(v) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
         <YAxis domain={[0, 100]} tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v) => `${v}%`} />
         <Tooltip
           contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
