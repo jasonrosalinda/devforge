@@ -28,8 +28,17 @@ const AZURE_APPS = {
 const GRANULARITY_MAP = {
   '1h':  'PT5M',
   '6h':  'PT15M',
-  '24h': 'PT1H',
-  '7d':  'PT6H',
+  '24h': 'PT15M',
+  '7d':  'PT1H',
+};
+
+// Raw ISO 8601 durations — avoids relying on Durations.* constants
+// which are incomplete in @azure/monitor-query@1.3.3 (e.g. sixHours missing)
+const DURATION_MAP = {
+  '1h':  'PT1H',
+  '6h':  'PT6H',
+  '24h': 'P1D',
+  '7d':  'P7D',
 };
 
 // ─── Pure Helpers (exported for testing) ─────────────────────────────────────
@@ -69,15 +78,8 @@ async function getToken(credential) {
 }
 
 async function queryMetric(client, resId, metricName, range, granularity) {
-  const { Durations } = require('@azure/monitor-query');
-  const RANGE_MAP = {
-    '1h':  Durations.oneHour,
-    '6h':  Durations.sixHours,
-    '24h': Durations.oneDay,
-    '7d':  Durations.sevenDays,
-  };
   const result = await client.queryResource(resId, [metricName], {
-    duration: RANGE_MAP[range] || Durations.oneDay,
+    duration: DURATION_MAP[range] || DURATION_MAP['24h'],
     granularity,
     aggregations: ['Average', 'Maximum'],
   });
@@ -137,15 +139,8 @@ async function getPlanInfo(token, resId) {
 
 async function getResponseTime(client, resId, range, granularity) {
   try {
-    const { Durations } = require('@azure/monitor-query');
-    const RANGE_MAP = {
-      '1h':  Durations.oneHour,
-      '6h':  Durations.sixHours,
-      '24h': Durations.oneDay,
-      '7d':  Durations.sevenDays,
-    };
     const result = await client.queryResource(resId, ['HttpResponseTime'], {
-      duration: RANGE_MAP[range] || Durations.oneDay,
+      duration: DURATION_MAP[range] || DURATION_MAP['24h'],
       granularity,
       aggregations: ['Average', 'Maximum'],
     });
@@ -178,19 +173,12 @@ function extractDowntimeIntervals(series) {
 }
 
 async function getAvailability(client, token, resId, appType, range, granularity) {
-  const { Durations } = require('@azure/monitor-query');
-  const RANGE_MAP = {
-    '1h':  Durations.oneHour,
-    '6h':  Durations.sixHours,
-    '24h': Durations.oneDay,
-    '7d':  Durations.sevenDays,
-  };
   let rawSeries = [];
 
   if (appType === 'appservice') {
     try {
       const hc = await client.queryResource(resId, ['HealthCheckStatus'], {
-        duration: RANGE_MAP[range] || Durations.oneDay,
+        duration: DURATION_MAP[range] || DURATION_MAP['24h'],
         granularity,
         aggregations: ['Average'],
       });
@@ -199,10 +187,10 @@ async function getAvailability(client, token, resId, appType, range, granularity
       try {
         const [reqRes, errRes] = await Promise.all([
           client.queryResource(resId, ['Requests'], {
-            duration: RANGE_MAP[range] || Durations.oneDay, granularity, aggregations: ['Total'],
+            duration: DURATION_MAP[range] || DURATION_MAP['24h'], granularity, aggregations: ['Total'],
           }),
           client.queryResource(resId, ['Http5xx'], {
-            duration: RANGE_MAP[range] || Durations.oneDay, granularity, aggregations: ['Total'],
+            duration: DURATION_MAP[range] || DURATION_MAP['24h'], granularity, aggregations: ['Total'],
           }),
         ]);
         const reqData = reqRes.metrics[0]?.timeseries?.[0]?.data || [];
@@ -222,7 +210,7 @@ async function getAvailability(client, token, resId, appType, range, granularity
   } else {
     try {
       const rr = await client.queryResource(resId, ['RunningReplicas'], {
-        duration: RANGE_MAP[range] || Durations.oneDay,
+        duration: DURATION_MAP[range] || DURATION_MAP['24h'],
         granularity,
         aggregations: ['Average'],
       });
