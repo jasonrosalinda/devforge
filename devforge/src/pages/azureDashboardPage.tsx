@@ -1,233 +1,334 @@
-// pages/azureDashboardPage.tsx
-// Single-page layout:
-//   [Dashboard URL input]  [Authenticate btn]  [Capture btn]
-//   ──────────────────────────────────────────────────────────
-//   Chart tiles gallery
+import { useState, useCallback } from 'react';
+import { useAzureMetrics } from '@/hooks/useAzureMetrics';
+import { AzureAppCard } from '@/components/azure/azureAppCard';
 
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
-import AzureCharts from "@/components/azure/azureCharts";
-import {
-    useAzureAuth,
-    useAzureCapture,
-    type AzureSettings,
-} from "@/hooks/useAzureCapture";
-import { CircleDashed, CircleDot, CircleDotDashed, Dot } from "lucide-react";
-import { useEffect, useRef } from "react";
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-// waitSeconds is hardcoded — not exposed in the UI
-const HARDCODED_WAIT_SECONDS = 120;
+const ALL_APP_KEYS = ['MEDU', 'MSP', 'MSP API'] as const;
+type AppKey = typeof ALL_APP_KEYS[number];
+type Range = '1h' | '6h' | '24h' | '7d';
+const RANGES: Range[] = ['1h', '6h', '24h', '7d'];
 
-// ── Predefined dashboard URLs ─────────────────────────────────────────────────
-export const DASHBOARDS = [
-    {
-        label: 'MEDU',
-        url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/mpfalerts-rg/providers/microsoft.portal/dashboards/c1ab52ee-0554-4d0f-9178-68619af06c08',
-    },
-    {
-        label: 'MSP',
-        url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/prdmsp-rg/providers/microsoft.portal/dashboards/c1a1ebb9-6655-4c55-a952-69e27379a693',
-    },
-] as const;
+// ─── Color tokens (dark theme, matches devforge convention) ──────────────────
 
-const DEFAULTS: AzureSettings = {
-    dashboardUrl: '',
-    timezone: 'Asia/Singapore',
-    waitSeconds: HARDCODED_WAIT_SECONDS,
-    hiDpi: true,
-    headless: false,
+const C = {
+  bg:         '#07090f',
+  surface:    '#0d1117',
+  border:     '#21262d',
+  text:       '#e6edf3',
+  textSub:    '#8b9ab3',
+  textMuted:  '#484f58',
+  accent:     '#58a6ff',
+  green:      '#3fb950',
+  yellow:     '#d29922',
+  red:        '#f85149',
+  btnBg:      '#21262d',
+  btnActive:  '#1f6feb',
 };
 
-// ─── Design tokens ────────────────────────────────────────────────────────────
-const C = {
-    bg: '#07090f',
-    surf: '#0d1520',
-    border: '#1a2535',
-    border2: '#243044',
-    accent: '#3b82f6',
-    green: '#22c55e',
-    red: '#ef4444',
-    yellow: '#f59e0b',
-    cyan: '#06b6d4',
-    purple: '#a78bfa',
-    text: '#e2e8f0',
-    muted: '#4b6280',
-    dim: '#1e2d40',
-} as const;
+// ─── Sub-components ───────────────────────────────────────────────────────────
 
-// ─── LogConsole ───────────────────────────────────────────────────────────────
-function LogConsole({ logs }: { logs: string[] }) {
-    const ref = useRef<HTMLDivElement>(null);
+function CredBadge({ status, error }: { status: 'checking' | 'ok' | 'error'; error: string | null }) {
+  const cfg = status === 'checking'
+    ? { color: C.textSub, dot: '○', label: 'Checking...' }
+    : status === 'ok'
+    ? { color: C.green,   dot: '●', label: 'Authenticated' }
+    : { color: C.red,     dot: '●', label: 'Not authenticated' };
 
-    useEffect(() => {
-        if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-    }, [logs]);
-
-    const col = (m: string): string =>
-        m.startsWith('info:') ? C.green :
-            m.startsWith('error:') ? C.red :
-                m.startsWith('warn:') ? C.yellow :
-                    C.muted;
-
-    return (
-        <div ref={ref} style={{
-            background: C.bg,
-            border: `1px solid ${C.border}`,
-            borderRadius: 8,
-            padding: '10px 14px',
-            height: 140,
-            overflowY: 'auto',
-            fontFamily: 'monospace',
-            fontSize: 11,
-            lineHeight: 1.8,
-        }}>
-            {logs.length === 0
-                ? <span style={{ color: C.dim }}>Waiting to start...</span>
-                : logs.map((l, i) => <div key={i} style={{ color: col(l) }}>{l}</div>)
-            }
-        </div>
-    );
+  return (
+    <div
+      title={error ?? undefined}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '4px 12px',
+        borderRadius: 20,
+        background: `${cfg.color}18`,
+        border: `1px solid ${cfg.color}44`,
+        fontSize: 12,
+        color: cfg.color,
+        fontWeight: 500,
+        cursor: error ? 'help' : 'default',
+      }}
+    >
+      <span style={{ fontSize: 8 }}>{cfg.dot}</span>
+      {cfg.label}
+    </div>
+  );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+function RangeButton({ range, active, onClick }: { range: Range; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '5px 12px',
+        borderRadius: 6,
+        border: `1px solid ${active ? C.btnActive : C.border}`,
+        background: active ? `${C.btnActive}22` : C.btnBg,
+        color: active ? C.accent : C.textSub,
+        fontSize: 12,
+        fontWeight: active ? 600 : 400,
+        cursor: 'pointer',
+      }}
+    >
+      {range}
+    </button>
+  );
+}
+
+function AppDropdown({ selected, onChange }: { selected: AppKey[]; onChange: (keys: AppKey[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const allSelected = selected.length === ALL_APP_KEYS.length;
+  const label = allSelected
+    ? 'All apps'
+    : selected.length === 0
+    ? 'No apps'
+    : `${selected.length} of ${ALL_APP_KEYS.length} apps`;
+
+  function toggle(key: AppKey) {
+    onChange(selected.includes(key) ? selected.filter(k => k !== key) : [...selected, key]);
+  }
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          padding: '5px 14px',
+          borderRadius: 6,
+          border: `1px solid ${C.border}`,
+          background: C.btnBg,
+          color: C.text,
+          fontSize: 13,
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}
+      >
+        {label}
+        <span style={{ fontSize: 10, color: C.textSub }}>▾</span>
+      </button>
+      {open && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 99 }}
+            onClick={() => setOpen(false)}
+          />
+          <div style={{
+            position: 'absolute', top: '110%', left: 0, zIndex: 100,
+            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: '6px 0', minWidth: 160,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 12px 8px', borderBottom: `1px solid ${C.border}` }}>
+              <button
+                onClick={() => onChange([...ALL_APP_KEYS])}
+                style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                Select all
+              </button>
+              <button
+                onClick={() => onChange([])}
+                style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                Deselect all
+              </button>
+            </div>
+            {ALL_APP_KEYS.map(key => (
+              <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer', color: C.text, fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(key)}
+                  onChange={() => toggle(key)}
+                  style={{ accentColor: C.accent }}
+                />
+                {key}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AzureDashboardPage() {
-    const [settings, setSettings] = useState<AzureSettings>(DEFAULTS);
-    const [jumpTo, setJumpTo] = useState<string | null>(null);
+  const { credStatus, credError, metrics, loading, fetchMetrics } = useAzureMetrics();
+  const [selectedApps, setSelectedApps] = useState<AppKey[]>([...ALL_APP_KEYS]);
+  const [range, setRange] = useState<Range>('24h');
 
-    const {
-        status: authStatus,
-        logs: authLogs,
-        authOk,
-        saveAuth,
-    } = useAzureAuth(settings);
+  const handleFetch = useCallback(() => {
+    fetchMetrics([...selectedApps], range);
+  }, [fetchMetrics, selectedApps, range]);
 
-    const {
-        status: captureStatus,
-        logs: captureLogs,
-        tileCount,
-        progress,
-        capture,
-    } = useAzureCapture(settings, (session) => setJumpTo(session));
+  const handleRangeChange = useCallback((r: Range) => {
+    setRange(r);
+    if (metrics) fetchMetrics([...selectedApps], r);
+  }, [fetchMetrics, metrics, selectedApps]);
 
-    const isAuthRunning = authStatus === 'running';
-    const isCaptureRunning = captureStatus === 'running';
-    const isAnyRunning = isAuthRunning || isCaptureRunning;
+  const fetchDisabled = loading || credStatus === 'error' || selectedApps.length === 0;
 
-    // Show capture logs while capturing, auth logs otherwise
-    const activeLogs = isCaptureRunning || captureStatus === 'done' || captureStatus === 'error'
-        ? captureLogs
-        : authLogs;
+  return (
+    <div style={{ background: C.bg, minHeight: '100vh', padding: '24px 28px', fontFamily: 'inherit' }}>
 
-    const showLog = activeLogs.length > 0 || isAnyRunning;
-
-    return (
-        <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 16,
-            height: '100%',
-            minHeight: 0,
-            background: C.bg,
-        }}>
-
-            {/* ── Control bar ──────────────────────────────────────────────── */}
-            <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                background: C.surf,
-                border: `1px solid ${C.border}`,
-                borderRadius: 10,
-                padding: '12px 16px',
-            }}>
-
-                {/* Authenticate button */}
-                <Button
-                    onClick={saveAuth}
-                    variant="outline"
-                    disabled={isAnyRunning || authOk}
-                    className="shrink-0"
-                >
-                    {authOk ? (
-                        <><Dot className="mr-1 h-4 w-4 animate-pulse" color="#2cf239" strokeWidth={12} fill="currentColor" /> Authenticated</>
-                    ) : isAuthRunning ? (
-                        <><CircleDotDashed className="mr-1 h-4 w-4 animate-pulse" color="yellow" /> Authenticating...</>
-                    ) : (
-                        <><CircleDashed className="mr-1 h-4 w-4" color="red" /> Authenticate</>
-                    )}
-                </Button>
-
-                {/* Dashboard URL dropdown */}
-                <div style={{ flex: 1 }}>
-                    <Select
-                        value={settings.dashboardUrl}
-                        onValueChange={(url) => setSettings(p => ({ ...p, dashboardUrl: url }))}
-                        disabled={isAnyRunning}
-                    >
-                        <SelectTrigger>
-                            <SelectValue placeholder="Select a dashboard…" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            {DASHBOARDS.map(d => (
-                                <SelectItem key={d.label} value={d.url}>
-                                    {d.label}
-                                </SelectItem>
-                            ))}
-                        </SelectContent>
-                    </Select>
-                </div>
-
-                {/* Capture button */}
-                <Button
-                    onClick={capture}
-                    variant="outline"
-                    disabled={isAnyRunning || !authOk || !settings.dashboardUrl}
-                    className="shrink-0"
-                >
-                    {isCaptureRunning ? (
-                        <><CircleDotDashed className="mr-1 h-4 w-4 animate-pulse" color="#031cffff" /> Capturing {progress > 0 ? `${progress}%` : ''}...</>
-                    ) : captureStatus === 'done' ? (
-                        <><CircleDot className="mr-1 h-4 w-4" color="#2cf239" /> Capture</>
-                    ) : (
-                        <><CircleDashed className="mr-1 h-4 w-4" /> Capture</>
-                    )}
-                </Button>
-
-                {/* Tile count badge — shows after capture */}
-                {tileCount !== null && (
-                    <span style={{
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                        color: C.cyan,
-                        background: `${C.cyan}18`,
-                        border: `1px solid ${C.cyan}44`,
-                        borderRadius: 5,
-                        padding: '3px 10px',
-                        whiteSpace: 'nowrap',
-                    }}>
-                        {tileCount} tiles
-                    </span>
-                )}
-            </div>
-
-            {/* ── Log console (visible only when active) ────────────────────── */}
-            {showLog && <LogConsole logs={activeLogs} />}
-
-            {/* ── Divider ───────────────────────────────────────────────────── */}
-            <div style={{ height: 1, background: C.border }} />
-
-            {/* ── Chart tiles gallery ───────────────────────────────────────── */}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                <AzureCharts jumpTo={jumpTo} />
-            </div>
+      {/* Page header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>
+            ⚡ Azure Health
+          </h1>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: C.textSub }}>
+            Live metrics from Azure Monitor
+          </p>
         </div>
-    );
+        <CredBadge status={credStatus} error={credError} />
+      </div>
+
+      {/* Credential error banner */}
+      {credStatus === 'error' && (
+        <div style={{
+          margin: '16px 0',
+          padding: '12px 16px',
+          background: '#1c0a0a',
+          border: '1px solid #3d1f1f',
+          borderRadius: 8,
+          display: 'flex', alignItems: 'flex-start', gap: 12,
+        }}>
+          <span style={{ fontSize: 14, color: C.red, marginTop: 1 }}>✖</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, color: C.red, fontWeight: 600 }}>Not authenticated with Azure</div>
+            <div style={{ fontSize: 12, color: C.textSub, marginTop: 3 }}>
+              Run the command below in your terminal, then relaunch DevForge:
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+              <code style={{
+                fontSize: 12, color: '#79c0ff', background: '#0d1117',
+                padding: '3px 8px', borderRadius: 4, border: `1px solid ${C.border}`,
+              }}>
+                az login
+              </code>
+              <button
+                onClick={() => navigator.clipboard.writeText('az login')}
+                style={{
+                  fontSize: 11, color: C.textSub, background: C.btnBg,
+                  border: `1px solid ${C.border}`, borderRadius: 4,
+                  padding: '3px 8px', cursor: 'pointer',
+                }}
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Control bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0', flexWrap: 'wrap' }}>
+        <AppDropdown selected={selectedApps} onChange={setSelectedApps} />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 12, color: C.textSub, marginRight: 4 }}>Range:</span>
+          {RANGES.map(r => (
+            <RangeButton key={r} range={r} active={range === r} onClick={() => handleRangeChange(r)} />
+          ))}
+        </div>
+
+        <button
+          onClick={handleFetch}
+          disabled={fetchDisabled}
+          style={{
+            marginLeft: 'auto',
+            padding: '6px 18px',
+            borderRadius: 6,
+            border: `1px solid ${fetchDisabled ? C.border : C.btnActive}`,
+            background: fetchDisabled ? C.btnBg : `${C.btnActive}22`,
+            color: fetchDisabled ? C.textMuted : C.accent,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: fetchDisabled ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+            opacity: credStatus === 'error' || selectedApps.length === 0 ? 0.5 : 1,
+          }}
+        >
+          {loading ? (
+            <>
+              <span style={{
+                display: 'inline-block', width: 10, height: 10,
+                border: `2px solid ${C.textMuted}`, borderTopColor: C.accent,
+                borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+              }} />
+              Fetching...
+            </>
+          ) : '↻ Fetch Metrics'}
+        </button>
+      </div>
+
+      {/* Empty state */}
+      {!metrics && !loading && (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: C.textSub, fontSize: 14 }}>
+          Select apps and time range, then click Fetch Metrics.
+        </div>
+      )}
+
+      {/* Card grid */}
+      {(metrics || loading) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+          {selectedApps.map(key => {
+            const m = metrics?.[key];
+            if (!m && !loading) return null;
+            return (
+              <AzureAppCard
+                key={key}
+                appKey={key}
+                metrics={m ?? {
+                  label: key,
+                  type: key === 'MEDU' ? 'appservice' : 'containerapp',
+                  cpu: { avg: 0, max: 0, series: [] },
+                  memory: { avg: 0, max: 0, series: [] },
+                  cpuUnit: '%',
+                  memUnit: '%',
+                }}
+                loading={loading && !m}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {/* Status legend */}
+      <div style={{
+        marginTop: 24,
+        padding: '10px 16px',
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        borderRadius: 8,
+        display: 'flex', gap: 20, fontSize: 11, color: C.textSub, flexWrap: 'wrap',
+      }}>
+        <span><span style={{ color: C.green  }}>● Healthy</span>  — CPU ≤70% / Mem ≤80%</span>
+        <span><span style={{ color: C.yellow }}>● Warning</span>  — CPU &gt;70% / Mem &gt;80%</span>
+        <span><span style={{ color: C.red    }}>● Critical</span> — CPU &gt;90% / Mem &gt;95%</span>
+      </div>
+
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+      `}</style>
+    </div>
+  );
 }
+
+// ─── Kept for backward compatibility (azureCharts.tsx imports this) ───────────
+
+export const DASHBOARDS = [
+  {
+    label: 'MEDU',
+    url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/mpfalerts-rg/providers/microsoft.portal/dashboards/c1ab52ee-0554-4d0f-9178-68619af06c08',
+  },
+  {
+    label: 'MSP',
+    url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/prdmsp-rg/providers/microsoft.portal/dashboards/c1a1ebb9-6655-4c55-a952-69e27379a693',
+  },
+] as const;
