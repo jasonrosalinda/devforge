@@ -125,9 +125,10 @@ async function getPlanInfo(token, resId) {
   const planRes = await fetch(`https://management.azure.com${farmId}?api-version=2022-03-01`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!planRes.ok) return null;
+  if (!planRes.ok) return { farmId, sku: '', cores: 1, memoryMB: 0 };
   const plan = await planRes.json();
   return {
+    farmId,
     sku: plan.sku?.name || '',
     cores: plan.sku?.capacity || 1,
     memoryMB: plan.properties?.maximumElasticWorkerCount || 0,
@@ -249,9 +250,18 @@ async function fetchAppMetrics(client, token, appKey, range) {
   const resId = resourceId(app);
   const gran = getGranularity(range);
 
+  // For App Service, CpuPercentage + MemoryPercentage live on the Plan resource
+  // (Microsoft.Web/serverfarms), not the site. Fetch plan ID first.
+  let metricsResId = resId;
+  let plan = null;
+  if (app.type === 'appservice') {
+    plan = await getPlanInfo(token, resId);
+    if (plan?.farmId) metricsResId = plan.farmId;
+  }
+
   const [cpu, memory] = await Promise.all([
-    queryMetric(client, resId, 'CpuPercentage', range, gran),
-    queryMetric(client, resId, 'MemoryPercentage', range, gran),
+    queryMetric(client, metricsResId, 'CpuPercentage', range, gran),
+    queryMetric(client, metricsResId, 'MemoryPercentage', range, gran),
   ]);
 
   const [instances, availability, responseTime] = await Promise.all([
@@ -259,8 +269,6 @@ async function fetchAppMetrics(client, token, appKey, range) {
     getAvailability(client, token, resId, app.type, range, gran),
     app.type === 'appservice' ? getResponseTime(client, resId, range, gran) : Promise.resolve(null),
   ]);
-
-  const plan = app.type === 'appservice' ? await getPlanInfo(token, resId) : null;
 
   return {
     label: app.label,
