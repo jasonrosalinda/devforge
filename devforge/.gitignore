@@ -30,3 +30,4 @@ build/
 .superpowers
 graphify-out
 .graphify_python
+docs/*
