@@ -21,6 +21,7 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         showCLS: true,
         showTBT: true,
         showFCP: true,
+        showWarnings: false,
     };
 }
 

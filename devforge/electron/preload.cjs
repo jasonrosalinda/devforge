@@ -36,4 +36,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
     },
 
+    downtimeReport: {
+        generate: (opts) => ipcRenderer.invoke('downtime-report:generate', opts),
+    },
+
 });

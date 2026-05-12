@@ -3,6 +3,8 @@ import { ThemeProvider } from "@/components/provider/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { Home } from "lucide-react";
+import { SettingsProvider } from "@/context/settings-context";
+import { SettingsModal } from "@/components/settings/settings-modal";
 
 import { pages, renderPage } from "./routes/page-routes";
 import { BuildLabel } from "./components/ui/buildLabel";
@@ -62,6 +64,7 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [originStyle, setOriginStyle] = useState<string>("50% 50%");
   const [search, setSearch] = useState<string>("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const pendingPage = useRef<string>("Home");
 
   const isAppVisible = phase === "launching" || phase === "open" || phase === "closing";
@@ -94,6 +97,7 @@ export default function App() {
 
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
+      <SettingsProvider>
       <SidebarProvider>
         <style>{LAUNCH_STYLES}</style>
 
@@ -105,6 +109,7 @@ export default function App() {
             search={!isAppVisible ? search : undefined}
             onSearchChange={!isAppVisible ? setSearch : undefined}
             onBack={isAppVisible ? handleClose : undefined}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
 
           <div
@@ -139,8 +144,10 @@ export default function App() {
           </div>
 
           <Toaster />
+          <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         </div>
       </SidebarProvider>
+      </SettingsProvider>
     </ThemeProvider>
   );
 }

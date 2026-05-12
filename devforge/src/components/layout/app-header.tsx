@@ -1,7 +1,7 @@
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { ThemeModeToggle } from "../ui/theme-mode-toggle"
-import { ChevronLeft, Download, Search, X } from "lucide-react"
+import { ChevronLeft, Download, Search, Settings, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useState, useEffect } from "react"
@@ -17,6 +17,7 @@ interface AppHeaderProps {
     onBack?: (() => void) | undefined;
     search?: string | undefined;
     onSearchChange?: ((val: string) => void) | undefined;
+    onOpenSettings?: () => void;
 }
 
 interface ClockDisplay {
@@ -43,7 +44,7 @@ function useClockForZone(timeZone: string): ClockDisplay {
     return display;
 }
 
-export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange }: AppHeaderProps) {
+export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange, onOpenSettings }: AppHeaderProps) {
     const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const localLabel = new Intl.DateTimeFormat([], { timeZoneName: "short", timeZone: localTimeZone })
         .formatToParts(new Date())
@@ -129,6 +130,11 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                             </a>
                         </Button>
                     }
+                    {onOpenSettings && (
+                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenSettings} title="Settings">
+                            <Settings className="w-4 h-4" />
+                        </Button>
+                    )}
                     <ThemeModeToggle />
                 </div>
             </div>

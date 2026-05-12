@@ -2,8 +2,10 @@ import { Toast } from "@/components/ui";
 import type { MeduCacheEntry, MeduCacheEnv, MeduCacheHook, MeduCacheResponse } from "@/types/meduCache.types";
 import { COUNTRY_LIST } from "@/utils/constants";
 import { useState } from "react";
+import { useSettings } from "@/context/settings-context";
 
 export const useMeduCache = (): MeduCacheHook => {
+    const { settings } = useSettings();
     const [env, setEnv] = useState<MeduCacheEnv>("SIT");
     const [data] = useState<MeduCacheEntry[]>([
         {
@@ -95,7 +97,8 @@ export const useMeduCache = (): MeduCacheHook => {
 
     const onClearCache = async (key: string): Promise<void> => {
         const domainPrefix = env !== "PRD" ? `${env.toLowerCase()}-` : ``;
-        const url = `https://${domainPrefix}meduapi.mims.com/api/cacheentry/${key}`;
+        const apiDomain = settings.medu.apiDomain || 'meduapi.example.com';
+        const url = `https://${domainPrefix}${apiDomain}/api/cacheentry/${key}`;
 
         try {
             const res = await fetch(url, {

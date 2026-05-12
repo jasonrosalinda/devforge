@@ -26,3 +26,7 @@ build/
 *.njsproj
 *.sln
 *.sw?
+.claude
+.superpowers
+graphify-out
+.graphify_python

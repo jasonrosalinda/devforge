@@ -2,7 +2,7 @@ import type { Page } from "@/types/pages.types";
 import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages } from "lucide-react";
 import { SiAmazonelasticache, SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
 import { AiOutlineTranslation, AiOutlineFileImage } from "react-icons/ai";
-import { TbBrandAzure } from "react-icons/tb";
+import { TbActivity } from "react-icons/tb";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -35,9 +35,9 @@ export const pages: Page[] = [
         component: PageSpeedResultPage
     },
     {
-        title: "Azure Dashboard",
+        title: "App Health Check",
         url: "#",
-        icon: TbBrandAzure,
+        icon: TbActivity,
         component: AzureDashboardPage
     },
     {

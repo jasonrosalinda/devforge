@@ -150,6 +150,13 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing }: { conf
         });
     };
 
+    const onShowWarningsChange = (e: boolean) => {
+        onSetConfigState({
+            ...config,
+            showWarnings: e,
+        });
+    };
+
     const onWebUrlsUploadClick = () => {
         webUrlsInputUpload.current?.click();
     };
@@ -384,6 +391,14 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing }: { conf
                                                 <FieldTitle>First Contentful Paint</FieldTitle>
                                             </FieldContent>
                                             <Switch id="switch-show-first-contentful-paint" checked={config.showFCP} onCheckedChange={onShowFCPChange} />
+                                        </Field>
+                                    </FieldLabel>
+                                    <FieldLabel htmlFor="switch-show-warnings" className="my-3">
+                                        <Field orientation="horizontal">
+                                            <FieldContent>
+                                                <FieldTitle>Show Warnings &amp; Errors</FieldTitle>
+                                            </FieldContent>
+                                            <Switch id="switch-show-warnings" checked={config.showWarnings} onCheckedChange={onShowWarningsChange} />
                                         </Field>
                                     </FieldLabel>
                                     {config.comparisonMode && (

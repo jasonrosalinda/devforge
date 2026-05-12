@@ -75,6 +75,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load azure-metrics.cjs:', err);
     }
 
+    try {
+        require('./ipc/downtime-report.cjs')(mainWindow);
+        console.log('✅ downtime-report handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load downtime-report.cjs:', err);
+    }
+
     if (!isDev) autoUpdater.checkForUpdatesAndNotify();
 
     app.on('activate', () => {

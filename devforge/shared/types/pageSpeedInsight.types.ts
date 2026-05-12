@@ -40,6 +40,7 @@ export interface PageSpeedConfiguration {
     showCLS: boolean;
     showTBT: boolean;
     showFCP: boolean;
+    showWarnings: boolean;
 }
 
 export interface UsePageSpeedInsightHooks {

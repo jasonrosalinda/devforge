@@ -8,7 +8,6 @@ import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, 
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages } from '@/lib/pageSpeedUtils';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
-
 type AuditSlot = PageSpeedInsightResult | null | false | undefined;
 
 interface PageSpeedResultsProps {
@@ -21,8 +20,9 @@ interface PageSpeedResultsProps {
 // right + bottom edges only (left edge is the table boundary)
 const stickyBorder = 'shadow-[inset_-1px_-1px_0_hsl(var(--border))]';
 
-const CollapsibleMessages = ({ messages }: { messages: PageSpeedInsightResultMessage[] }) => {
+const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedInsightResultMessage[]; forceExpanded?: boolean }) => {
     const [isExpanded, setIsExpanded] = useState(false);
+    const expanded = forceExpanded ?? isExpanded;
 
     if (messages.length === 0) return null;
 
@@ -50,12 +50,12 @@ const CollapsibleMessages = ({ messages }: { messages: PageSpeedInsightResultMes
     return (
         <div className="mt-1">
             <button title="Toggle errors and warnings" onClick={() => setIsExpanded(!isExpanded)} className={`flex items-center text-xs hover:opacity-80 transition-opacity ${summaryColor}`}>
-                {isExpanded ? <ChevronDown size={14} className="mr-1 inline" /> : <ChevronRight size={14} className="mr-1 inline" />}
+                {expanded ? <ChevronDown size={14} className="mr-1 inline" /> : <ChevronRight size={14} className="mr-1 inline" />}
                 {warningCount > 0 && `${warningCount} warning(s)`}
                 {warningCount > 0 && errorCount > 0 && ' / '}
                 {errorCount > 0 && `${errorCount} error(s)`}
             </button>
-            {isExpanded && (
+            {expanded && (
                 <div className="ml-4 mt-2 space-y-2">
                     {unparsed.map((p, i) => (
                         <p key={`u-${i}`} className={`text-xs ${p.isError ? 'text-red-500' : 'text-orange-500'}`}>* {p.message}</p>
@@ -97,6 +97,7 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
     const hasSubHead = !!(displayAudit.before && displayAudit.after);
     const isAccuracyMode = config.runMode === 'average';
 
+
     const toggleHistory = (index: number) => {
         setExpandedHistory(prev => {
             const next = new Set(prev);
@@ -115,6 +116,23 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         onAuditingChange?.(value || otherAuditing);
     };
 
+    const MAX_RETRIES = 2;
+
+    const auditWithRetry = useCallback(async (url: string): Promise<PageSpeedInsightResult> => {
+        let lastError: unknown;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return await audit(url);
+            } catch (err) {
+                lastError = err;
+                if (attempt < MAX_RETRIES) {
+                    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+                }
+            }
+        }
+        throw lastError;
+    }, [audit]);
+
     const runAudit = async (
         setResults: React.Dispatch<React.SetStateAction<AuditSlot[]>>,
         setAuditing: React.Dispatch<React.SetStateAction<boolean>>,
@@ -128,14 +146,14 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
 
         for (const [index, url] of config.urls.entries()) {
             try {
-                const result = await audit(url);
+                const result = await auditWithRetry(url);
                 setResults(prev => {
                     const next = [...prev];
                     next[index] = result;
                     return next;
                 });
             } catch (error) {
-                console.error(`Audit failed for ${url}:`, error);
+                console.error(`Audit failed for ${url} after ${MAX_RETRIES} retries:`, error);
                 setResults(prev => {
                     const next = [...prev];
                     next[index] = false;
@@ -162,12 +180,12 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         setRetryingRows(prev => new Set(prev).add(rowKey));
         setResults(prev => {
             const next = [...prev];
-            next[index] = null; // show loading spinner
+            next[index] = null;
             return next;
         });
 
         try {
-            const result = await audit(url);
+            const result = await auditWithRetry(url);
             setResults(prev => {
                 const next = [...prev];
                 next[index] = result;
@@ -187,7 +205,7 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                 return next;
             });
         }
-    }, [audit, config.urls]);
+    }, [auditWithRetry, config.urls]);
 
     const calculateImprovement = (before: number, after: number): React.ReactNode => {
         if (!before || !after) return <div>-</div>;
@@ -260,15 +278,23 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         const r2 = slot2 || undefined;
         const messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(r1, r2);
 
-        if (messages.length === 0) return null;
-        return <CollapsibleMessages messages={messages} />;
+        if (messages.length === 0 || !config.showWarnings) return null;
+        return <CollapsibleMessages messages={messages} forceExpanded={true} />;
     };
 
     const cellValue = (slot: AuditSlot, metric: PageSpeedMetrics | undefined): React.ReactNode => {
         if (slot === null) return <Loader2 className="animate-spin mx-auto" size={20} />;
-        if (slot === false) return <span className="text-red-500 text-xs">Error</span>;
         if (slot === undefined) return <span>-</span>;
+        if (slotHasError(slot)) return <span className="text-destructive/50 text-xs">—</span>;
         return metric?.displayValue ?? '-';
+    };
+
+    const slotHasError = (slot: AuditSlot) => {
+        if (slot === false) return true;
+        if (!slot || slot === null) return false;
+        const r = slot as PageSpeedInsightResult;
+        const err = r.errorResponse;
+        return !!err && (err.code !== 0 || (Array.isArray(err.message) ? err.message.some(m => m.length > 0) : err.message.length > 0));
     };
 
     const retryButton = (
@@ -277,19 +303,19 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         setResults: React.Dispatch<React.SetStateAction<AuditSlot[]>>,
         slotKey: '1' | '2',
     ): React.ReactNode => {
-        if (slot !== false) return null;
+        if (!slotHasError(slot)) return null;
         const rowKey = `${slotKey}-${index}`;
         const isRetrying = retryingRows.has(rowKey);
         return (
             <Button
-                variant="ghost"
+                variant="outline"
                 size="sm"
-                className="h-6 w-6 p-0 ml-1"
+                className="h-6 px-2 text-xs gap-1"
                 disabled={isRetrying || isAuditing}
                 onClick={() => retryRow(index, setResults, slotKey)}
-                title="Retry this URL"
             >
                 <RotateCcw className={`h-3 w-3 ${isRetrying ? 'animate-spin' : ''}`} />
+                {isRetrying ? 'Retrying…' : 'Retry'}
             </Button>
         );
     };
@@ -447,10 +473,13 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                                                             {url}
                                                         </a>
                                                         {getResultMessageForUrl(slot1, slot2)}
-                                                    </div>
-                                                    <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
-                                                        {retryButton(index, slot1, setResults1, '1')}
-                                                        {!displayAudit.singleResult && retryButton(index, slot2, setResults2, '2')}
+                                                        {(slotHasError(slot1) || slotHasError(slot2)) && (
+                                                            <div className="flex items-center gap-1 mt-1">
+                                                                <span className="text-xs text-destructive">Audit failed.</span>
+                                                                {retryButton(index, slot1, setResults1, '1')}
+                                                                {!displayAudit.singleResult && retryButton(index, slot2, setResults2, '2')}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </TableCell>

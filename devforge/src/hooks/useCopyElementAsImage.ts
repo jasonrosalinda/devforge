@@ -56,6 +56,7 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
                     backgroundColor,
                     scale,
                     logging: false,
+                    useForeignObject: false,
                 }
             );
 

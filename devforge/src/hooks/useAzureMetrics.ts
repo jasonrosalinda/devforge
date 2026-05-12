@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
+import type { AzureSettings } from '@/types/settings.types';
 
 type CredStatus = 'checking' | 'ok' | 'error';
 
@@ -9,7 +10,7 @@ interface UseAzureMetrics {
   credError: string | null;
   metrics: Record<string, AppMetrics> | null;
   loading: boolean;
-  fetchMetrics: (appKeys: string[], range: string) => Promise<void>;
+  fetchMetrics: (appKeys: string[], range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => Promise<void>;
 }
 
 export function useAzureMetrics(): UseAzureMetrics {
@@ -29,12 +30,12 @@ export function useAzureMetrics(): UseAzureMetrics {
     });
   }, []);
 
-  const fetchMetrics = useCallback(async (appKeys: string[], range: string) => {
+  const fetchMetrics = useCallback(async (appKeys: string[], range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => {
     if (credStatus === 'error') return;
     if (!appKeys.length) return;
     setLoading(true);
     try {
-      const data = await window.electronAPI.azureMetrics.fetch({ appKeys, range });
+      const data = await window.electronAPI.azureMetrics.fetch({ appKeys, range, config, customStart, customEnd, granularity });
       setMetrics(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

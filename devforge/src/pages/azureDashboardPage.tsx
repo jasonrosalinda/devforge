@@ -1,15 +1,32 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useAzureMetrics } from '@/hooks/useAzureMetrics';
+import { useSettings } from '@/context/settings-context';
 import { AzureAppCard } from '@/components/azure/azureAppCard';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const GRANULARITIES: { label: string; value: string; maxSpanHours: number }[] = [
+  { label: '1m',  value: 'PT1M',  maxSpanHours: 24 },
+  { label: '5m',  value: 'PT5M',  maxSpanHours: 120 },
+  { label: '15m', value: 'PT15M', maxSpanHours: 360 },
+  { label: '1h',  value: 'PT1H',  maxSpanHours: 1440 },
+  { label: '6h',  value: 'PT6H',  maxSpanHours: Infinity },
+];
 
-const ALL_APP_KEYS = ['MEDU', 'MSP', 'MSP API'] as const;
-type AppKey = typeof ALL_APP_KEYS[number];
-type Range = '1h' | '6h' | '24h' | '7d';
-const RANGES: Range[] = ['1h', '6h', '24h', '7d'];
+function todayMidnight() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 
-// ─── Color tokens (dark theme, matches devforge convention) ──────────────────
+const INGESTION_DELAY_MS = 5 * 60 * 1000;
+
+function toDatetimeLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function maxEndDt(): string {
+  return toDatetimeLocal(new Date(Date.now() - INGESTION_DELAY_MS));
+}
 
 const C = {
   bg:         '#07090f',
@@ -25,8 +42,6 @@ const C = {
   btnBg:      '#21262d',
   btnActive:  '#1f6feb',
 };
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
 
 function CredBadge({ status, error }: { status: 'checking' | 'ok' | 'error'; error: string | null }) {
   const cfg = status === 'checking'
@@ -56,36 +71,16 @@ function CredBadge({ status, error }: { status: 'checking' | 'ok' | 'error'; err
   );
 }
 
-function RangeButton({ range, active, onClick }: { range: Range; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: '5px 12px',
-        borderRadius: 6,
-        border: `1px solid ${active ? C.btnActive : C.border}`,
-        background: active ? `${C.btnActive}22` : C.btnBg,
-        color: active ? C.accent : C.textSub,
-        fontSize: 12,
-        fontWeight: active ? 600 : 400,
-        cursor: 'pointer',
-      }}
-    >
-      {range}
-    </button>
-  );
-}
-
-function AppDropdown({ selected, onChange }: { selected: AppKey[]; onChange: (keys: AppKey[]) => void }) {
+function AppDropdown({ selected, allKeys, onChange }: { selected: string[]; allKeys: string[]; onChange: (keys: string[]) => void }) {
   const [open, setOpen] = useState(false);
-  const allSelected = selected.length === ALL_APP_KEYS.length;
+  const allSelected = selected.length === allKeys.length;
   const label = allSelected
     ? 'All apps'
     : selected.length === 0
     ? 'No apps'
-    : `${selected.length} of ${ALL_APP_KEYS.length} apps`;
+    : `${selected.length} of ${allKeys.length} apps`;
 
-  function toggle(key: AppKey) {
+  function toggle(key: string) {
     onChange(selected.includes(key) ? selected.filter(k => k !== key) : [...selected, key]);
   }
 
@@ -109,10 +104,7 @@ function AppDropdown({ selected, onChange }: { selected: AppKey[]; onChange: (ke
       </button>
       {open && (
         <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 99 }}
-            onClick={() => setOpen(false)}
-          />
+          <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setOpen(false)} />
           <div style={{
             position: 'absolute', top: '110%', left: 0, zIndex: 100,
             background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8,
@@ -120,27 +112,12 @@ function AppDropdown({ selected, onChange }: { selected: AppKey[]; onChange: (ke
             boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 12px 8px', borderBottom: `1px solid ${C.border}` }}>
-              <button
-                onClick={() => onChange([...ALL_APP_KEYS])}
-                style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                Select all
-              </button>
-              <button
-                onClick={() => onChange([])}
-                style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                Deselect all
-              </button>
+              <button onClick={() => onChange([...allKeys])} style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Select all</button>
+              <button onClick={() => onChange([])} style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Deselect all</button>
             </div>
-            {ALL_APP_KEYS.map(key => (
+            {allKeys.map(key => (
               <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer', color: C.text, fontSize: 13 }}>
-                <input
-                  type="checkbox"
-                  checked={selected.includes(key)}
-                  onChange={() => toggle(key)}
-                  style={{ accentColor: C.accent }}
-                />
+                <input type="checkbox" checked={selected.includes(key)} onChange={() => toggle(key)} style={{ accentColor: C.accent }} />
                 {key}
               </label>
             ))}
@@ -151,44 +128,76 @@ function AppDropdown({ selected, onChange }: { selected: AppKey[]; onChange: (ke
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+const inputStyle: React.CSSProperties = {
+  padding: '4px 8px',
+  borderRadius: 6,
+  border: `1px solid ${C.border}`,
+  background: C.btnBg,
+  color: C.text,
+  fontSize: 12,
+  colorScheme: 'dark',
+};
 
 export default function AzureDashboardPage() {
+  const { settings, loading: settingsLoading } = useSettings();
   const { credStatus, credError, metrics, loading, fetchMetrics } = useAzureMetrics();
-  const [selectedApps, setSelectedApps] = useState<AppKey[]>([...ALL_APP_KEYS]);
-  const [range, setRange] = useState<Range>('24h');
+  const allAppKeys = settings.azure.apps.map(a => a.name);
+  const [selectedApps, setSelectedApps] = useState<string[]>([]);
+  const [startDt, setStartDt] = useState(() => toDatetimeLocal(todayMidnight()));
+  const [endDt,   setEndDt]   = useState(() => maxEndDt());
+  const [granularity, setGranularity] = useState('PT5M');
+  const [committedStart, setCommittedStart] = useState<string | null>(null);
+  const [committedEnd,   setCommittedEnd]   = useState<string | null>(null);
+
+  const effectiveSelected = selectedApps.length > 0
+    ? selectedApps.filter(k => allAppKeys.includes(k))
+    : allAppKeys;
+
+  const spanHours = useMemo(() => {
+    if (!startDt || !endDt) return 0;
+    return (new Date(endDt).getTime() - new Date(startDt).getTime()) / 3_600_000;
+  }, [startDt, endDt]);
+
+  // Auto-coarsen granularity if span grows past current option's max
+  useEffect(() => {
+    const currentGranOpt = GRANULARITIES.find(g => g.value === granularity);
+    if (currentGranOpt && spanHours > currentGranOpt.maxSpanHours) {
+      const coarser = GRANULARITIES.find(g => spanHours <= g.maxSpanHours);
+      if (coarser) setGranularity(coarser.value);
+    }
+  }, [spanHours, granularity]);
 
   const handleFetch = useCallback(() => {
-    fetchMetrics([...selectedApps], range);
-  }, [fetchMetrics, selectedApps, range]);
+    const isoStart = new Date(startDt).toISOString();
+    const isoEnd   = new Date(endDt).toISOString();
+    setCommittedStart(isoStart);
+    setCommittedEnd(isoEnd);
+    fetchMetrics(effectiveSelected, 'custom', settings.azure, isoStart, isoEnd, granularity);
+  }, [fetchMetrics, effectiveSelected, startDt, endDt, settings.azure, granularity]);
 
-  const handleRangeChange = useCallback((r: Range) => {
-    setRange(r);
-    if (metrics) fetchMetrics([...selectedApps], r);
-  }, [fetchMetrics, metrics, selectedApps]);
-
-  const fetchDisabled = loading || credStatus === 'error' || selectedApps.length === 0;
+  const notConfigured = !settingsLoading && (!settings.azure.subscriptionId || allAppKeys.length === 0);
+  const fetchDisabled = loading || credStatus === 'error' || effectiveSelected.length === 0 || notConfigured || !startDt || !endDt;
 
   return (
-    <div style={{ background: C.bg, minHeight: '100vh', padding: '24px 28px', fontFamily: 'inherit' }}>
+    <div className="flex flex-col gap-4">
 
-      {/* Page header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>
-            ⚡ Azure Health
-          </h1>
-          <p style={{ margin: '4px 0 0', fontSize: 13, color: C.textSub }}>
-            Live metrics from Azure Monitor
-          </p>
+      {/* Not configured banner */}
+      {notConfigured && (
+        <div style={{
+          padding: '12px 16px',
+          background: '#0d1117',
+          border: '1px solid #21262d',
+          borderRadius: 8,
+          fontSize: 13,
+          color: C.textSub,
+        }}>
+          No Azure configuration found. Click the ⚙ Settings icon in the header to add your subscription ID and apps.
         </div>
-        <CredBadge status={credStatus} error={credError} />
-      </div>
+      )}
 
       {/* Credential error banner */}
       {credStatus === 'error' && (
         <div style={{
-          margin: '16px 0',
           padding: '12px 16px',
           background: '#1c0a0a',
           border: '1px solid #3d1f1f',
@@ -197,24 +206,17 @@ export default function AzureDashboardPage() {
         }}>
           <span style={{ fontSize: 14, color: C.red, marginTop: 1 }}>✖</span>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, color: C.red, fontWeight: 600 }}>Not authenticated with Azure</div>
+            <div style={{ fontSize: 13, color: C.red, fontWeight: 600 }}>Azure CLI not authenticated</div>
             <div style={{ fontSize: 12, color: C.textSub, marginTop: 3 }}>
               Run the command below in your terminal, then relaunch DevForge:
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-              <code style={{
-                fontSize: 12, color: '#79c0ff', background: '#0d1117',
-                padding: '3px 8px', borderRadius: 4, border: `1px solid ${C.border}`,
-              }}>
+              <code style={{ fontSize: 12, color: '#79c0ff', background: '#0d1117', padding: '3px 8px', borderRadius: 4, border: `1px solid ${C.border}` }}>
                 az login
               </code>
               <button
                 onClick={() => navigator.clipboard.writeText('az login')}
-                style={{
-                  fontSize: 11, color: C.textSub, background: C.btnBg,
-                  border: `1px solid ${C.border}`, borderRadius: 4,
-                  padding: '3px 8px', cursor: 'pointer',
-                }}
+                style={{ fontSize: 11, color: C.textSub, background: C.btnBg, border: `1px solid ${C.border}`, borderRadius: 4, padding: '3px 8px', cursor: 'pointer' }}
               >
                 Copy
               </button>
@@ -224,72 +226,136 @@ export default function AzureDashboardPage() {
       )}
 
       {/* Control bar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0', flexWrap: 'wrap' }}>
-        <AppDropdown selected={selectedApps} onChange={setSelectedApps} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        {!notConfigured && (
+          <AppDropdown selected={effectiveSelected} allKeys={allAppKeys} onChange={setSelectedApps} />
+        )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 12, color: C.textSub, marginRight: 4 }}>Range:</span>
-          {RANGES.map(r => (
-            <RangeButton key={r} range={r} active={range === r} onClick={() => handleRangeChange(r)} />
-          ))}
-        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, color: C.textSub }}>From:</span>
+          <input
+            type="datetime-local"
+            value={startDt}
+            onChange={e => setStartDt(e.target.value)}
+            style={inputStyle}
+          />
+          <span style={{ fontSize: 12, color: C.textSub }}>To:</span>
+          <input
+            type="datetime-local"
+            value={endDt}
+            max={maxEndDt()}
+            onChange={e => {
+              const max = maxEndDt();
+              setEndDt(e.target.value > max ? max : e.target.value);
+            }}
+            style={inputStyle}
+          />
+          <button
+            onClick={() => setEndDt(maxEndDt())}
+            title="Set end to now (−5 min ingestion delay)"
+            style={{
+              padding: '4px 8px',
+              borderRadius: 6,
+              border: `1px solid ${C.border}`,
+              background: C.btnBg,
+              color: C.textSub,
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            Now
+          </button>
 
-        <button
-          onClick={handleFetch}
-          disabled={fetchDisabled}
-          style={{
-            marginLeft: 'auto',
-            padding: '6px 18px',
-            borderRadius: 6,
-            border: `1px solid ${fetchDisabled ? C.border : C.btnActive}`,
-            background: fetchDisabled ? C.btnBg : `${C.btnActive}22`,
-            color: fetchDisabled ? C.textMuted : C.accent,
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: fetchDisabled ? 'not-allowed' : 'pointer',
-            display: 'flex', alignItems: 'center', gap: 6,
-            opacity: credStatus === 'error' || selectedApps.length === 0 ? 0.5 : 1,
-          }}
-        >
-          {loading ? (
-            <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ fontSize: 11, color: C.textMuted }}>Interval:</span>
+            {GRANULARITIES.map(g => {
+              const disabled = spanHours > g.maxSpanHours;
+              return (
+                <button
+                  key={g.value}
+                  disabled={disabled}
+                  onClick={() => !disabled && setGranularity(g.value)}
+                  title={disabled ? `Max span ${g.maxSpanHours}h` : undefined}
+                  style={{
+                    padding: '3px 8px',
+                    borderRadius: 5,
+                    border: `1px solid ${granularity === g.value && !disabled ? C.btnActive : C.border}`,
+                    background: granularity === g.value && !disabled ? `${C.btnActive}22` : 'none',
+                    color: disabled ? C.textMuted : granularity === g.value ? C.accent : C.textSub,
+                    fontSize: 11,
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.4 : 1,
+                  }}
+                >
+                  {g.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            onClick={handleFetch}
+            disabled={fetchDisabled}
+            title="Fetch Metrics"
+            style={{
+              padding: '5px 8px',
+              borderRadius: 6,
+              border: 'none',
+              background: 'none',
+              color: fetchDisabled ? C.textMuted : C.textSub,
+              fontSize: 16,
+              cursor: fetchDisabled ? 'not-allowed' : 'pointer',
+              display: 'flex', alignItems: 'center',
+              opacity: credStatus === 'error' || effectiveSelected.length === 0 ? 0.4 : 1,
+            }}
+          >
+            {loading ? (
               <span style={{
-                display: 'inline-block', width: 10, height: 10,
+                display: 'inline-block', width: 14, height: 14,
                 border: `2px solid ${C.textMuted}`, borderTopColor: C.accent,
                 borderRadius: '50%', animation: 'spin 0.8s linear infinite',
               }} />
-              Fetching...
-            </>
-          ) : '↻ Fetch Metrics'}
-        </button>
+            ) : '↻'}
+          </button>
+        </div>
+
+        <div style={{ marginLeft: 'auto' }}>
+          <CredBadge status={credStatus} error={credError} />
+        </div>
       </div>
 
       {/* Empty state */}
-      {!metrics && !loading && (
+      {!metrics && !loading && !notConfigured && (
         <div style={{ textAlign: 'center', padding: '60px 0', color: C.textSub, fontSize: 14 }}>
-          Select apps and time range, then click Fetch Metrics.
+          Select apps and time range, then click ↻ to fetch metrics.
         </div>
       )}
 
       {/* Card grid */}
       {(metrics || loading) && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-          {selectedApps.map(key => {
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+          {effectiveSelected.map(key => {
             const m = metrics?.[key];
+            const appDef = settings.azure.apps.find(a => a.name === key);
             if (!m && !loading) return null;
             return (
               <AzureAppCard
                 key={key}
                 appKey={key}
+                azureSettings={settings.azure}
                 metrics={m ?? {
-                  label: key,
-                  type: key === 'MEDU' ? 'appservice' : 'containerapp',
+                  label: appDef?.name ?? key,
+                  type: appDef?.type ?? 'appservice',
                   cpu: { avg: 0, max: 0, series: [] },
                   memory: { avg: 0, max: 0, series: [] },
                   cpuUnit: '%',
                   memUnit: '%',
                 }}
-                loading={loading && !m}
+                loading={loading}
+                uptimeRobotApiKey={settings.apiKeys.uptimeRobotApiKey}
+                uptimeRobotMonitorIds={appDef?.uptimeRobotMonitorIds}
+                rangeStart={committedStart ?? undefined}
+                rangeEnd={committedEnd ?? undefined}
               />
             );
           })}
@@ -315,20 +381,11 @@ export default function AzureDashboardPage() {
           from { transform: rotate(0deg); }
           to   { transform: rotate(360deg); }
         }
+        input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+          filter: invert(0.6);
+          cursor: pointer;
+        }
       `}</style>
     </div>
   );
 }
-
-// ─── Kept for backward compatibility (azureCharts.tsx imports this) ───────────
-
-export const DASHBOARDS = [
-  {
-    label: 'MEDU',
-    url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/mpfalerts-rg/providers/microsoft.portal/dashboards/c1ab52ee-0554-4d0f-9178-68619af06c08',
-  },
-  {
-    label: 'MSP',
-    url: 'https://portal.azure.com/#@mims.com/dashboard/arm/subscriptions/044d478b-62ae-4658-a14b-ac179f55b057/resourcegroups/prdmsp-rg/providers/microsoft.portal/dashboards/c1a1ebb9-6655-4c55-a952-69e27379a693',
-  },
-] as const;

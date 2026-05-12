@@ -11,6 +11,18 @@ export interface IElectronAPI {
 
     // Azure Monitor Metrics  (new)
     azureMetrics: IAzureMetricsAPI;
+
+    // Downtime Report
+    downtimeReport: {
+        generate: (opts: {
+            startMs: number;
+            endMs: number;
+            subscriptionId: string;
+            resourceGroup: string;
+            appName: string;
+            anthropicApiKey?: string;
+        }) => Promise<{ success: boolean; path?: string; aiUsed?: boolean; error?: string }>;
+    };
 }
 
 declare global {
