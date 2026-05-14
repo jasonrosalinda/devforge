@@ -32,6 +32,7 @@ export interface AppMetrics {
     bots?: Array<{ userAgent: string; rpm: number; count: number }>
     highFreq?: Array<{ timestamp: string; lastSeen?: string; ip: string; country: string; userAgent: string; count: number; rpm: number }>
     failedUrls?: Array<{ url: string; rpm: number; count: number }>
+    slowUrls?: Array<{ url: string; avgMs: number; maxMs: number; count: number }>
     error?: string
   } | null
   responseTime?: { avg: number; max: number; series?: Array<{ t: string; avg: number }> } | null
@@ -48,7 +49,26 @@ export interface AppMetrics {
   error?: string
 }
 
+export interface DetectorResult {
+  columns: string[]
+  rows: (string | number | boolean | null)[][]
+  error?: string
+}
+
+export interface DetectorCategory {
+  id: string
+  label: string
+  color: string
+  queries: Array<{ name: string; result: DetectorResult }>
+}
+
+export interface DetectorAnalysisResult {
+  categories: DetectorCategory[]
+  error?: string
+}
+
 export interface IAzureMetricsAPI {
   checkCredential: () => Promise<{ ok: boolean; error?: string }>
   fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string; customEnd?: string; granularity?: string }) => Promise<Record<string, AppMetrics>>
+  fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
 }

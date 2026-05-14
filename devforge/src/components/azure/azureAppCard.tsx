@@ -12,7 +12,7 @@ type Status = 'healthy' | 'warning' | 'critical';
 
 type TimelineEvent = { t: number; label: string; color: string; icon: string; isMarker?: boolean };
 
-type FailedDep = { t: string; name: string; type: string; failCount: number; avgDuration: number };
+type FailedDep = { t: string; name: string; type: string; target: string; failCount: number; avgDuration: number };
 type ProbeSeries = Array<{ name: string; series: Array<{ t: string; v: number }> }>;
 
 function buildTimeline(
@@ -193,7 +193,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
     fileNamePrefix: `azure-${appKey}-${Date.now()}`,
     backgroundColor: '#09090b',
   });
-  const [activeTab, setActiveTab] = useState<'application' | 'uptimerobot'>('application');
+  const [urExpanded, setUrExpanded] = useState(false);
   type IncidentPopup = {
     date: string; timeRange: string; dur: string; reasons: string[]; causeLabel: string | null; causeColor: string;
     cpu: MetricSeries; memory: MetricSeries;
@@ -225,17 +225,20 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
     requestInsights?: AppMetrics['requestInsights'];
   };
   const [popupChartData, setPopupChartData] = useState<PopupChartData | null>(null);
+  const [detectorData, setDetectorData] = useState<import('@shared/types/azureMetrics.types').DetectorAnalysisResult | null>(null);
+  const [detectorLoading, setDetectorLoading] = useState(false);
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
   const [requestsExpanded, setRequestsExpanded] = useState(false);
   const [availExpanded, setAvailExpanded] = useState(false);
-  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'failed'>('requests');
+  const [responseExpanded, setResponseExpanded] = useState(false);
+  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'failed' | 'deps'>('requests');
 
   // PT1M data fetched separately for the incidents panel — avoids dashboard-interval gaps
   const [incidentDetailMetrics, setIncidentDetailMetrics] = useState<AppMetrics | null>(null);
   const [incidentDetailLoading, setIncidentDetailLoading] = useState(false);
 
   useEffect(() => {
-    if (activeTab !== 'uptimerobot') return;
+    if (!urExpanded) return;
     if (!rangeStart || !rangeEnd) return;
     setIncidentDetailLoading(true);
     setIncidentDetailMetrics(null);
@@ -251,7 +254,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
       if (m) setIncidentDetailMetrics(m);
     }).catch(() => {}).finally(() => setIncidentDetailLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, rangeStart, rangeEnd, appKey]);
+  }, [urExpanded, rangeStart, rangeEnd, appKey]);
 
   if (loading) {
     return (
@@ -328,7 +331,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
       <div className="flex items-center justify-between px-4 pt-4 pb-2 gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="relative inline-flex items-center justify-center w-3 h-3 flex-shrink-0">
-            {status === 'healthy' && (
+            {status === 'healthy' && !isCopying && (
               <span className="absolute inline-flex w-full h-full rounded-full animate-ping opacity-60" style={{ backgroundColor: statusColor }} />
             )}
             <span className="relative inline-flex w-2.5 h-2.5 rounded-full" style={{ backgroundColor: statusColor }} />
@@ -354,6 +357,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             onClick={copyAsImage}
             style={{ visibility: isCopying ? 'hidden' : 'visible' }}
             title="Copy as image"
+            data-html2canvas-ignore="true"
           >
             <Copy className="w-3.5 h-3.5" />
           </Button>
@@ -380,42 +384,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
       {/* Metrics + Downtime incidents */}
       <div className="px-4 pt-3 pb-3 text-xs font-medium flex flex-col gap-3">
 
-        {/* Tabs */}
-        {uptimeRobotMonitorIds?.length ? (
-          <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: 4 }}>
-            {(['application', 'uptimerobot'] as const).map(tab => {
-              const isActive = activeTab === tab;
-              const incidentCount = tab === 'uptimerobot'
-                ? (() => {
-                    const MERGE_GAP = 10 * 60 * 1000;
-                    const raw = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1).map(l => ({ s: l.datetime * 1000, e: (l.datetime + l.duration) * 1000 }))).sort((a, b) => a.s - b.s);
-                    let count = 0; let lastEnd = -Infinity;
-                    for (const { s, e } of raw) { if (s > lastEnd + MERGE_GAP) count++; lastEnd = Math.max(lastEnd, e); }
-                    return count;
-                  })()
-                : 0;
-              return (
-                <button key={tab} onClick={() => setActiveTab(tab)} style={{
-                  padding: '4px 12px', fontSize: 10, cursor: 'pointer', background: 'none',
-                  border: 'none', borderBottom: `2px solid ${isActive ? '#58a6ff' : 'transparent'}`,
-                  fontWeight: isActive ? 700 : 400,
-                  color: isActive ? '#58a6ff' : '#8b9ab3',
-                  marginBottom: -1,
-                  display: 'flex', alignItems: 'center', gap: 5,
-                }}>
-                  {tab === 'application' ? 'Application' : 'Incidents'}
-                  {tab === 'uptimerobot' && incidentCount > 0 && (
-                    <span style={{ fontSize: 8, fontWeight: 700, padding: '1px 4px', borderRadius: 8, background: isActive ? '#58a6ff22' : 'rgba(255,255,255,0.08)', color: isActive ? '#58a6ff' : '#8b9ab3', border: `1px solid ${isActive ? '#58a6ff44' : 'rgba(255,255,255,0.12)'}` }}>
-                      {incidentCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-        {/* Application tab */}
-        {(!uptimeRobotMonitorIds?.length || activeTab === 'application') && (
+        {(
         <div className="rounded-md border border-border overflow-hidden">
         <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1">
           <thead>
@@ -428,65 +397,320 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
           <tbody>
             <tr>
               <td className="text-muted-foreground">CPU</td>
-              <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{metrics.cpu.avg}%</td>
-              <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{metrics.cpu.max}%</td>
+              <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{(+metrics.cpu.avg).toFixed(2)}%</td>
+              <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.max).toFixed(2)}%</td>
             </tr>
             <tr>
               <td className="text-muted-foreground font-bold">Memory</td>
-              <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{metrics.memory.avg}{metrics.memUnit}</td>
-              <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{metrics.memory.max}{metrics.memUnit}</td>
+              <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{(+metrics.memory.avg).toFixed(2)}{metrics.memUnit}</td>
+              <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</td>
             </tr>
-            {metrics.responseTime != null && (
-              <tr>
-                <td className="text-muted-foreground font-bold">Response</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
-              </tr>
-            )}
-            {metrics.availability != null && (() => {
-              const availColor = metrics.availability.pct >= 99 ? '#3fb950' : metrics.availability.pct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
-              const degradedInsts = (metrics.instanceHealthSeries ?? []).map(inst => {
-                const vals = inst.series.map(p => p.v);
-                const avg = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10 : 100;
-                const min = vals.length ? Math.min(...vals) : 100;
-                return { name: inst.name, avg, min };
-              }).filter(i => i.avg < 100);
+            {metrics.responseTime != null && (() => {
+              const slowUrls = Array.isArray(metrics.requestInsights?.slowUrls) ? metrics.requestInsights!.slowUrls : [];
+              const hasSlow = slowUrls.length > 0;
+              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : ms >= 1000 ? `${(ms/1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
               return (
                 <>
-                  <tr>
-                    <td className="text-muted-foreground font-bold">Availability</td>
-                    <td className="text-right" colSpan={2} style={{ color: availColor }}>
-                      <button
-                        className="hover:opacity-70 transition-opacity"
-                        style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', fontSize: 'inherit', cursor: degradedInsts.length > 0 ? 'pointer' : 'default', color: availColor }}
-                        onClick={() => degradedInsts.length > 0 && setAvailExpanded(v => !v)}
-                      >
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                          {metrics.availability.pct}%
-                          {degradedInsts.length > 0 && (availExpanded ? <ChevronDown style={{ width: 10, height: 10 }} /> : <ChevronRight style={{ width: 10, height: 10 }} />)}
-                        </span>
-                      </button>
+                  <tr
+                    style={{ cursor: hasSlow ? 'pointer' : 'default' }}
+                    onClick={() => hasSlow && setResponseExpanded(v => !v)}
+                    onMouseEnter={e => hasSlow && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold">
+                      Response{hasSlow && <span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{responseExpanded ? '▾' : '›'}</span>}
                     </td>
+                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
+                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
                   </tr>
-                  {availExpanded && degradedInsts.length > 0 && degradedInsts.map((inst, i) => {
-                    const hColor = inst.avg < 50 ? 'hsl(var(--destructive))' : inst.avg < 90 ? '#d29922' : '#3fb950';
-                    const minColor = inst.min < 50 ? 'hsl(var(--destructive))' : inst.min < 90 ? '#d29922' : '#484f58';
-                    const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
+                  {responseExpanded && slowUrls.map((u, i) => {
+                    const avgColor = u.avgMs >= 5000 ? 'hsl(var(--destructive))' : u.avgMs >= 2000 ? '#d29922' : '#58a6ff';
+                    const maxColor = u.maxMs >= 10000 ? 'hsl(var(--destructive))' : u.maxMs >= 5000 ? '#d29922' : '#484f58';
                     return (
                       <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={inst.name}>{shortName}</td>
-                        <td className="text-right tabular-nums" style={{ color: hColor }}>{inst.avg}%</td>
-                        <td className="text-right tabular-nums" style={{ color: minColor }}>{inst.min}%</td>
+                        <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={u.url}>{u.url}</td>
+                        <td className="text-right tabular-nums" style={{ color: avgColor, whiteSpace: 'nowrap' }}>{fmtMs(u.avgMs)}</td>
+                        <td className="text-right tabular-nums" style={{ color: maxColor, whiteSpace: 'nowrap' }}>{fmtMs(u.maxMs)} max</td>
                       </tr>
                     );
                   })}
                 </>
               );
             })()}
+            {metrics.availability != null && (() => {
+              const availColor = metrics.availability.pct >= 99 ? '#3fb950' : metrics.availability.pct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
+              const instances = metrics.instances ?? [];
+              const hasInstances = instances.length > 0;
+              return (
+                <>
+                  <tr
+                    style={{ cursor: hasInstances ? 'pointer' : 'default' }}
+                    onClick={() => hasInstances && setAvailExpanded(v => !v)}
+                    onMouseEnter={e => hasInstances && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold">
+                      Availability{hasInstances && <span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{availExpanded ? '▾' : '›'}</span>}
+                    </td>
+                    <td className="text-right" colSpan={2} style={{ color: availColor }}>{metrics.availability.pct.toFixed(2)}%</td>
+                  </tr>
+                  {availExpanded && instances.map((inst, i) => {
+                    const series = (metrics.instanceHealthSeries ?? []).find(s => s.name === inst.name);
+                    const vals = series?.series.map(p => p.v) ?? [];
+                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+                    const min = vals.length ? Math.min(...vals) : null;
+                    const avgColor = avg == null ? '#8b9ab3' : avg >= 99 ? '#3fb950' : avg >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+                    const minColor = min == null ? '#484f58' : min >= 99 ? '#3fb950' : min >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+                    const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
+                    return (
+                      <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={inst.name}>{shortName}</td>
+                        <td className="text-right tabular-nums" style={{ color: avgColor }}>{avg != null ? `${avg.toFixed(2)}%` : '—'}</td>
+                        <td className="text-right tabular-nums" style={{ color: minColor }}>{min != null ? `${min.toFixed(2)}% min` : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </>
+              );
+            })()}
+            {urMonitors.length > 0 && (() => {
+              const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
+              const totalIncidents = downLogs.length;
+              const totalDownSec = downLogs.reduce((s, l) => s + l.duration, 0);
+              const spanSec = spanMinutes * 60;
+              const uptimePct = spanSec > 0 ? Math.round((1 - totalDownSec / spanSec) * 10000) / 100 : null;
+              const uptimeColor = uptimePct == null ? '#8b9ab3' : uptimePct >= 99 ? '#3fb950' : uptimePct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
+              const fmtDur = (sec: number) => sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.round(sec / 60)}m` : `${(sec / 3600).toFixed(1)}h`;
+              const incidentColor = totalIncidents === 0 ? '#3fb950' : '#f85149';
+              return (
+                <>
+                  <tr
+                    onClick={() => setUrExpanded(v => !v)}
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold">
+                      UptimeRobot<span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{urExpanded ? '▾' : '›'}</span>
+                    </td>
+                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
+                      <span style={{ color: incidentColor }}>{totalIncidents} incident{totalIncidents !== 1 ? 's' : ''}</span>
+                      {totalDownSec > 0 && <span style={{ color: '#484f58' }}> · </span>}
+                      {totalDownSec > 0 && <span style={{ color: incidentColor }}>{fmtDur(totalDownSec)} down</span>}
+                    </td>
+                    <td className="text-right tabular-nums" style={{ color: uptimeColor, whiteSpace: 'nowrap' }}>
+                      {uptimePct != null ? `${uptimePct.toFixed(2)}% uptime` : '—'}
+                    </td>
+                  </tr>
+                  {urExpanded && (
+                    <tr>
+                      <td colSpan={3} style={{ padding: 0 }}>
+                        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                          {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
+                          {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
+                          {!urLoading && urMonitors.length === 0 && !urError && (
+                            <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3', fontStyle: 'italic' }}>No monitors found</div>
+                          )}
+                          {!urLoading && !incidentDetailLoading && (() => {
+                            const muted = '#8b9ab3';
+                            const iMet = incidentDetailMetrics ?? metrics;
+                            const cpuSeries = iMet.cpu.series;
+                            const memSeries = iMet.memory.series;
+                            const reqSeries = iMet.requestsSeries ?? [];
+                            const failSeries: Array<{ t: string; count: number }> = (() => {
+                              const m = new Map<string, number>();
+                              for (const s of [...(iMet.failedRequestsSeries ?? []), ...(iMet.http4xxSeries ?? [])]) {
+                                m.set(s.t, (m.get(s.t) ?? 0) + s.count);
+                              }
+                              return Array.from(m.entries()).map(([t, count]) => ({ t, count }));
+                            })();
+                            function maxInRangeUr(series: Array<{ t: string; v: number }>, start: number, end: number) {
+                              const vals = series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; }).map(s => s.v);
+                              return vals.length ? Math.max(...vals) : null;
+                            }
+                            function maxDuringUr(series: Array<{ t: string; v: number }>, ivStart: number, ivEnd: number) {
+                              const strict = maxInRangeUr(series, ivStart, ivEnd);
+                              if (strict !== null) return strict;
+                              return maxInRangeUr(series, ivStart - 60 * 60 * 1000, ivEnd);
+                            }
+                            function sumInRangeUr(series: Array<{ t: string; count: number }>, start: number, end: number) {
+                              return series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; }).reduce((acc, s) => acc + s.count, 0);
+                            }
+                            function sumDuringUr(series: Array<{ t: string; count: number }>, ivStart: number, ivEnd: number) {
+                              const strict = sumInRangeUr(series, ivStart, ivEnd);
+                              if (strict > 0) return strict;
+                              return sumInRangeUr(series, ivStart - 60 * 60 * 1000, ivEnd);
+                            }
+                            function instSnapsInRange(start: number, end: number) {
+                              return (iMet.instanceHealthSeries ?? []).map(inst => {
+                                const pts = inst.series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; });
+                                const avg = pts.length ? Math.round(pts.reduce((a, s) => a + s.v, 0) / pts.length * 10) / 10 : null;
+                                const min = pts.length ? Math.min(...pts.map(s => s.v)) : null;
+                                return { name: inst.name, avg, min };
+                              }).filter(s => s.avg != null);
+                            }
+                            const rawLogs2 = urMonitors.flatMap(mon =>
+                              (mon.logs ?? []).filter(l => l.type === 1).map(log => ({ log, mon }))
+                            ).sort((a, b) => a.log.datetime - b.log.datetime);
+                            if (rawLogs2.length === 0 && urMonitors.length > 0 && !incidentDetailLoading) {
+                              return <div style={{ padding: '5px 10px', fontSize: 10, color: muted, fontStyle: 'italic' }}>No downtime recorded</div>;
+                            }
+                            type FlatInc2 = { ivStart: number; ivEnd: number; url: string; reason: string };
+                            const flat2: FlatInc2[] = rawLogs2.map(({ log, mon }) => ({
+                              ivStart: log.datetime * 1000,
+                              ivEnd:   (log.datetime + log.duration) * 1000,
+                              url:     mon.url || mon.friendly_name,
+                              reason:  log.reason?.detail ?? '',
+                            })).sort((a, b) => b.ivStart - a.ivStart);
+                            const byDate2 = new Map<string, FlatInc2[]>();
+                            flat2.forEach(inc => {
+                              const dateKey = new Date(inc.ivStart).toLocaleDateString('en-GB', { ...SGT, day: '2-digit', month: 'short', year: 'numeric' });
+                              if (!byDate2.has(dateKey)) byDate2.set(dateKey, []);
+                              byDate2.get(dateKey)!.push(inc);
+                            });
+                            return Array.from(byDate2.entries()).map(([dateKey, incidents]) => (
+                              <div key={dateKey} className="scrollable-content" style={{ maxHeight: 200, overflowY: 'auto' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                                  <thead>
+                                    <tr>
+                                      <td colSpan={16} style={{ padding: '3px 10px', fontSize: 9, fontWeight: 700, color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)', borderTop: '1px solid rgba(255,255,255,0.04)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>{dateKey}</td>
+                                    </tr>
+                                    <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                                      <td rowSpan={2} style={{ padding: '3px 10px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Time (SGT)</td>
+                                      <td rowSpan={2} style={{ padding: '3px 6px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Dur</td>
+                                      <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Cause</td>
+                                      <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Monitored</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>Before (5min)</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#8b9ab3', borderBottom: '1px solid rgba(255,255,255,0.04)', borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>During</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>After (5min)</td>
+                                    </tr>
+                                    <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                                      {['Instances','Req','CPU','Mem','Instances','Req','CPU','Mem','Instances','Req','CPU','Mem'].map((h, i) => (
+                                        <td key={i} style={{ padding: '2px 6px', textAlign: i % 4 !== 0 ? 'right' : undefined, ...(i === 4 ? { borderLeft: '1px solid rgba(255,255,255,0.06)' } : {}), ...(i === 7 ? { borderRight: '1px solid rgba(255,255,255,0.06)' } : {}) }}>{h}</td>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {incidents.map((inc, i) => {
+                                      const { ivStart, ivEnd, url, reason } = inc;
+                                      const reasons = reason ? [reason] : [];
+                                      const logKey = `${dateKey}-${i}`;
+                                      const durSecs = Math.round((ivEnd - ivStart) / 1000);
+                                      const dur = durSecs >= 3600 ? `${Math.floor(durSecs/3600)}h ${Math.floor((durSecs%3600)/60)}m ${durSecs%60}s` : durSecs >= 60 ? `${Math.floor(durSecs/60)}m ${durSecs%60}s` : `${durSecs}s`;
+                                      const startLabel = new Date(ivStart).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                                      const endLabel   = new Date(ivEnd).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                                      const PRE = 5 * 60 * 1000;
+                                      const PRE_END = ivStart - 60 * 1000;
+                                      const cpuBefore  = maxInRangeUr(cpuSeries, ivStart - PRE, PRE_END);
+                                      const cpuDuring  = maxDuringUr(cpuSeries, ivStart, ivEnd) ?? iMet.cpu.avg;
+                                      const cpuAfter   = maxInRangeUr(cpuSeries, ivEnd, ivEnd + PRE);
+                                      const memBefore  = maxInRangeUr(memSeries, ivStart - PRE, PRE_END);
+                                      const memDuring  = maxDuringUr(memSeries, ivStart, ivEnd) ?? (iMet.memUnit !== 'MB' ? iMet.memory.avg : null);
+                                      const memAfter   = maxInRangeUr(memSeries, ivEnd, ivEnd + PRE);
+                                      const reqBefore  = sumInRangeUr(reqSeries,  ivStart - PRE, PRE_END);
+                                      const reqDuring  = sumDuringUr(reqSeries,  ivStart, ivEnd);
+                                      const reqAfter   = sumInRangeUr(reqSeries,  ivEnd, ivEnd + PRE);
+                                      const failBefore = sumInRangeUr(failSeries, ivStart - PRE, PRE_END);
+                                      const failDuring = sumDuringUr(failSeries, ivStart, ivEnd);
+                                      const failAfter  = sumInRangeUr(failSeries, ivEnd, ivEnd + PRE);
+                                      const cpuColor = cpuDuring > 90 ? 'hsl(var(--destructive))' : cpuDuring > 70 ? '#d29922' : muted;
+                                      const memColor = memDuring == null ? muted : memDuring > 95 ? 'hsl(var(--destructive))' : memDuring > 80 ? '#d29922' : muted;
+                                      const urCause = (() => {
+                                        if (failDuring === 0) return null;
+                                        const availPts = (iMet.availability?.series ?? []).filter(s => { const t = new Date(s.t).getTime(); return t >= ivStart && t <= ivEnd; });
+                                        const availAvg = availPts.length ? availPts.reduce((a, s) => a + s.v, 0) / availPts.length : null;
+                                        if (availAvg !== null && availAvg >= 100) return null;
+                                        const instHealthVals = (iMet.instanceHealthSeries ?? []).map(inst => {
+                                          const pts = inst.series.filter(s => { const t = new Date(s.t).getTime(); return t >= ivStart && t <= ivEnd; });
+                                          return pts.length ? pts.reduce((a, s) => a + s.v, 0) / pts.length : null;
+                                        }).filter((v): v is number => v !== null);
+                                        if (instHealthVals.length === 0) return 'outage';
+                                        const total = instHealthVals.length;
+                                        const affected = instHealthVals.filter(v => v < 50).length;
+                                        if (affected === 0) return 'dependency_failure';
+                                        if (affected < total) return 'instance_crash';
+                                        return 'full_outage';
+                                      })();
+                                      const urCauseColor = CAUSE_COLOR[urCause ?? ''] ?? muted;
+                                      const instBefore = instSnapsInRange(ivStart - PRE, PRE_END);
+                                      const instDuring = instSnapsInRange(ivStart, ivEnd);
+                                      const instAfter  = instSnapsInRange(ivEnd, ivEnd + PRE);
+                                      const openPopup = () => {
+                                        const instSeries = iMet.instanceHealthSeries ?? [];
+                                        const filteredCpu = cpuSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
+                                        const filteredMem = memSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
+                                        const filteredInst = instSeries.map(inst => ({ name: inst.name, series: inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; }) }));
+                                        const cpuVals = filteredCpu.map(p => p.v);
+                                        const memVals = filteredMem.map(p => p.v);
+                                        const cpuMetric: MetricSeries = { avg: cpuVals.length ? Math.round(cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length * 10) / 10 : 0, max: cpuVals.length ? Math.max(...cpuVals) : 0, series: filteredCpu };
+                                        const memMetric: MetricSeries = { avg: memVals.length ? Math.round(memVals.reduce((a, b) => a + b, 0) / memVals.length * 10) / 10 : 0, max: memVals.length ? Math.max(...memVals) : 0, series: filteredMem };
+                                        setSelectedIncident({ date: dateKey, timeRange: `${startLabel} → ${endLabel}`, dur, reasons, causeLabel: urCause ? (CAUSE_LABEL[urCause] ?? null) : null, causeColor: urCauseColor, cpu: cpuMetric, memory: memMetric, instanceHealthSeries: filteredInst, ivStart, ivEnd });
+                                        setPopupChartData(null); setDetectorData(null); setTimelineOpen(false); setHighFreqOpen(false); setDepsOpen(false); setInstOpen(false); setProbesOpen(false); setTrafficOpen(false);
+                                        setPopupChartLoading(true);
+                                        window.electronAPI.azureMetrics.fetch({ appKeys: [appKey], range: 'custom', config: azureSettings, customStart: new Date(ivStart - PRE).toISOString(), customEnd: new Date(ivEnd).toISOString(), granularity: 'PT1M' })
+                                          .then(data => { const m = data[appKey]; if (m) setPopupChartData({ cpu: m.cpu, memory: m.memory, instanceHealthSeries: m.instanceHealthSeries ?? [], failedDependencies: m.failedDependencies ?? null, instanceProbeSeries: m.instanceProbeSeries ?? null, highFreq: m.requestInsights?.highFreq ?? null, requestsSeries: m.requestsSeries ?? null, failedRequestsSeries: m.failedRequestsSeries ?? null, http4xxSeries: m.http4xxSeries ?? null, responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max } : null, requests: m.requests ?? null, failedRequests: m.failedRequests ?? null, requestInsights: m.requestInsights ?? null }); })
+                                          .catch(() => {}).finally(() => setPopupChartLoading(false));
+                                        const aiAppId = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey)?.appInsightsAppId ?? null;
+                                        if (metrics.appInsightsConfigured && aiAppId) {
+                                          setDetectorLoading(true);
+                                          window.electronAPI.azureMetrics.fetchDetectors({ appInsightsAppId: aiAppId, startIso: new Date(ivStart - PRE).toISOString(), endIso: new Date(ivEnd).toISOString() })
+                                            .then(r => setDetectorData(r))
+                                            .catch((e: Error) => setDetectorData({ categories: [], error: e.message }))
+                                            .finally(() => setDetectorLoading(false));
+                                        }
+                                      };
+                                      return (
+                                        <tr key={logKey} onClick={openPopup} style={{ cursor: 'pointer', borderTop: '1px solid rgba(255,255,255,0.04)' }}
+                                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
+                                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                                          <td style={{ padding: '4px 10px', color: muted, whiteSpace: 'nowrap' }}>{startLabel} → {endLabel}</td>
+                                          <td style={{ padding: '4px 6px', color: '#d29922', whiteSpace: 'nowrap' }}>{dur}</td>
+                                          <td style={{ padding: '4px 6px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {urCause
+                                              ? <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.04em', padding: '1px 4px', borderRadius: 3, background: `${urCauseColor}22`, border: `1px solid ${urCauseColor}55`, color: urCauseColor }}>{CAUSE_LABEL[urCause]}</span>
+                                              : reasons.length > 0 ? <span style={{ color: muted }}>{reasons.join(' · ')}</span> : <span style={{ color: '#484f58' }}>—</span>}
+                                          </td>
+                                          <td style={{ padding: '4px 6px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            <span style={{ color: '#58a6ff' }}>{url}</span>
+                                          </td>
+                                          <td style={{ padding: '4px 6px' }}>{instBefore.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instBefore.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqBefore > 0 ? <><span style={{ color: failBefore > 0 ? '#d29922' : '#484f58' }}>{failBefore.toLocaleString()}</span><span> / </span><span>{reqBefore.toLocaleString()}</span></> : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuBefore != null ? `${cpuBefore.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memBefore != null ? `${memBefore.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>{instDuring.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instDuring.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; const hc = (inst.avg ?? 100) < 50 ? 'hsl(var(--destructive))' : (inst.avg ?? 100) < 90 ? '#d29922' : '#3fb950'; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: hc }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{reqDuring > 0 ? <><span style={{ color: failDuring > 0 ? 'hsl(var(--destructive))' : muted }}>{failDuring.toLocaleString()}</span><span style={{ color: '#484f58' }}> / </span><span style={{ color: muted }}>{reqDuring.toLocaleString()}</span></> : <span style={{ color: '#484f58' }}>—</span>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: cpuColor, whiteSpace: 'nowrap' }}>{cpuDuring.toFixed(1)}%</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: memColor, whiteSpace: 'nowrap', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{memDuring != null ? `${memDuring.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px' }}>{instAfter.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instAfter.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqAfter > 0 ? <><span style={{ color: failAfter > 0 ? '#d29922' : '#484f58' }}>{failAfter.toLocaleString()}</span><span> / </span><span>{reqAfter.toLocaleString()}</span></> : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuAfter != null ? `${cpuAfter.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memAfter != null ? `${memAfter.toFixed(1)}%` : '—'}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })()}
             {metrics.requests != null && (
               <>
-                <tr>
-                  <td className="text-muted-foreground font-bold">Requests</td>
+                <tr
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setRequestsExpanded(v => !v)}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <td className="text-muted-foreground font-bold">
+                    Requests<span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{requestsExpanded ? '▾' : '›'}</span>
+                  </td>
                   <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
                     {spanMinutes > 0 && (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -501,22 +725,15 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     )}
                   </td>
                   <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    <button
-                      className="hover:opacity-70 transition-opacity"
-                      style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', fontSize: 'inherit', cursor: 'pointer' }}
-                      onClick={() => setRequestsExpanded(v => !v)}
-                    >
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                        {metrics.failedRequests != null && (
-                          <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
-                            {metrics.failedRequests.total.toLocaleString()}
-                          </span>
-                        )}
-                        {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
-                        <span style={{ color: '#58a6ff' }}>{metrics.requests.total.toLocaleString()}</span>
-                        {requestsExpanded ? <ChevronDown style={{ width: 10, height: 10 }} /> : <ChevronRight style={{ width: 10, height: 10 }} />}
-                      </span>
-                    </button>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      {metrics.failedRequests != null && (
+                        <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
+                          {metrics.failedRequests.total.toLocaleString()}
+                        </span>
+                      )}
+                      {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
+                      <span style={{ color: '#58a6ff' }}>{metrics.requests.total.toLocaleString()}</span>
+                    </span>
                   </td>
                 </tr>
                 {requestsExpanded && (
@@ -530,8 +747,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                             <div className="flex flex-col gap-1 pt-1">
                               {/* Tab buttons */}
                               <div className="flex gap-0.5 flex-wrap">
-                                {(['requests', 'highfreq', 'failed'] as const).map(t => {
-                                  const labels: Record<string, string> = { requests: 'Requests', highfreq: 'High Freq', failed: 'Failed' };
+                                {(['requests', 'highfreq', 'failed', 'deps'] as const).map(t => {
+                                  const labels: Record<string, string> = { requests: 'Requests', highfreq: 'High Freq', failed: 'Failed', deps: 'Dep Failures' };
                                   return (
                                     <button
                                       key={t}
@@ -555,7 +772,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
                               {/* Requests tab */}
                               {requestsTab === 'requests' && (
-                                !metrics.requestInsights.urls || metrics.requestInsights.urls.length === 0
+                                !Array.isArray(metrics.requestInsights.urls) || metrics.requestInsights.urls.length === 0
                                   ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
                                   : <div className="flex flex-col gap-0.5">
                                     {metrics.requestInsights.urls.map((u, i) => (
@@ -570,7 +787,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
                               {/* High Frequency tab */}
                               {requestsTab === 'highfreq' && (
-                                !metrics.requestInsights.highFreq || metrics.requestInsights.highFreq.length === 0
+                                !Array.isArray(metrics.requestInsights.highFreq) || metrics.requestInsights.highFreq.length === 0
                                   ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
                                   : <div className="flex flex-col gap-0.5">
                                     {metrics.requestInsights.highFreq.map((u, i) => {
@@ -594,7 +811,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
                               {/* Failed Requests tab */}
                               {requestsTab === 'failed' && (
-                                !metrics.requestInsights.failedUrls || metrics.requestInsights.failedUrls.length === 0
+                                !Array.isArray(metrics.requestInsights.failedUrls) || metrics.requestInsights.failedUrls.length === 0
                                   ? <span className="text-[10px] text-muted-foreground italic">No failed request data</span>
                                   : <div className="flex flex-col gap-0.5">
                                     {metrics.requestInsights.failedUrls.map((u, i) => (
@@ -606,6 +823,36 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                     ))}
                                   </div>
                               )}
+
+                              {/* Dependency Failures tab */}
+                              {requestsTab === 'deps' && (() => {
+                                const deps = metrics.failedDependencies;
+                                if (!deps?.length) return <span className="text-[10px] text-muted-foreground italic">No dependency failure data</span>;
+                                const grouped = new Map<string, { name: string; type: string; count: number; totalDur: number; times: number }>();
+                                for (const d of deps) {
+                                  const k = d.name + '||' + d.type;
+                                  const prev = grouped.get(k);
+                                  if (!prev) grouped.set(k, { name: d.name, type: d.type, count: d.failCount, totalDur: d.avgDuration, times: 1 });
+                                  else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
+                                }
+                                const list = Array.from(grouped.values()).sort((a, b) => b.count - a.count).slice(0, 10);
+                                return (
+                                  <div className="flex flex-col gap-0.5">
+                                    {list.map((d, i) => {
+                                      const ms = d.totalDur / d.times;
+                                      const dur = ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+                                      return (
+                                        <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                          <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={d.name}>{d.name}</span>
+                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{d.type}</span>
+                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{d.count.toLocaleString()} fails</span>
+                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{dur}</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )
                       }
@@ -620,11 +867,10 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
         )}
 
 
-        {/* UptimeRobot tab */}
-        {uptimeRobotMonitorIds?.length && activeTab === 'uptimerobot' && (
+        {false && (
           <div className="rounded-md border border-border overflow-hidden">
             <div>
-                {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading 1m metrics…'}</div>}
+                {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
                 {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
                 {!urLoading && urMonitors.length === 0 && !urError && (
                   <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3', fontStyle: 'italic' }}>No monitors found</div>
@@ -677,34 +923,22 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     (mon.logs ?? []).filter(l => l.type === 1).map(log => ({ log, mon }))
                   ).sort((a, b) => a.log.datetime - b.log.datetime);
 
-                  if (rawLogs.length === 0 && urMonitors.length > 0) {
+                  if (rawLogs.length === 0 && urMonitors.length > 0 && !incidentDetailLoading) {
                     return <div style={{ padding: '5px 10px', fontSize: 10, color: muted, fontStyle: 'italic' }}>No downtime recorded</div>;
                   }
 
-                  // Merge overlapping intervals (within 10-min tolerance) into single incidents
-                  const MERGE_GAP_MS = 10 * 60 * 1000;
-                  type MergedIncident = { ivStart: number; ivEnd: number; urls: string[]; reasons: string[] };
-                  const merged: MergedIncident[] = [];
-                  for (const { log, mon } of rawLogs) {
-                    const s = log.datetime * 1000;
-                    const e = (log.datetime + log.duration) * 1000;
-                    const url = mon.url || mon.friendly_name;
-                    const reason = log.reason?.detail ?? '';
-                    const last = merged[merged.length - 1];
-                    if (last && s <= last.ivEnd + MERGE_GAP_MS) {
-                      last.ivEnd = Math.max(last.ivEnd, e);
-                      if (!last.urls.includes(url)) last.urls.push(url);
-                      if (reason && !last.reasons.includes(reason)) last.reasons.push(reason);
-                    } else {
-                      merged.push({ ivStart: s, ivEnd: e, urls: [url], reasons: reason ? [reason] : [] });
-                    }
-                  }
-                  // Sort merged desc
-                  merged.sort((a, b) => b.ivStart - a.ivStart);
+                  // All down logs — each shown individually, sorted desc
+                  type FlatIncident = { ivStart: number; ivEnd: number; url: string; reason: string };
+                  const flat: FlatIncident[] = rawLogs.map(({ log, mon }) => ({
+                    ivStart: log.datetime * 1000,
+                    ivEnd:   (log.datetime + log.duration) * 1000,
+                    url:     mon.url || mon.friendly_name,
+                    reason:  log.reason?.detail ?? '',
+                  })).sort((a, b) => b.ivStart - a.ivStart);
 
                   // Group by date in SGT
-                  const byDate = new Map<string, MergedIncident[]>();
-                  merged.forEach(inc => {
+                  const byDate = new Map<string, FlatIncident[]>();
+                  flat.forEach(inc => {
                     const dateKey = new Date(inc.ivStart).toLocaleDateString('en-GB', { ...SGT, day: '2-digit', month: 'short', year: 'numeric' });
                     if (!byDate.has(dateKey)) byDate.set(dateKey, []);
                     byDate.get(dateKey)!.push(inc);
@@ -745,7 +979,9 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                         </thead>
                         <tbody>
                       {incidents.map((inc, i) => {
-                            const { ivStart, ivEnd, urls, reasons } = inc;
+                            const { ivStart, ivEnd, url, reason } = inc;
+                            const reasons = reason ? [reason] : [];
+                            const urls = [url];
                             const logKey = `${dateKey}-${i}`;
                             const durSecs = Math.round((ivEnd - ivStart) / 1000);
                             const dur = durSecs >= 3600
@@ -817,6 +1053,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                               };
                               setSelectedIncident({ date: dateKey, timeRange: `${startLabel} → ${endLabel}`, dur, reasons, causeLabel: urCause ? (CAUSE_LABEL[urCause] ?? null) : null, causeColor: urCauseColor, cpu: cpuMetric, memory: memMetric, instanceHealthSeries: filteredInst, ivStart, ivEnd });
                               setPopupChartData(null);
+                              setDetectorData(null);
                               setTimelineOpen(false);
                               setHighFreqOpen(false);
                               setDepsOpen(false);
@@ -848,6 +1085,14 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                   requestInsights: m.requestInsights ?? null,
                                 });
                               }).catch(() => {}).finally(() => setPopupChartLoading(false));
+                              const aiAppId2 = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey)?.appInsightsAppId ?? null;
+                              if (metrics.appInsightsConfigured && aiAppId2) {
+                                setDetectorLoading(true);
+                                window.electronAPI.azureMetrics.fetchDetectors({ appInsightsAppId: aiAppId2, startIso: new Date(ivStart - PRE).toISOString(), endIso: new Date(ivEnd).toISOString() })
+                                  .then(r => setDetectorData(r))
+                                  .catch((e: Error) => setDetectorData({ categories: [], error: e.message }))
+                                  .finally(() => setDetectorLoading(false));
+                              }
                             };
                             return (
                               <tr key={logKey} onClick={openPopup} style={{ cursor: 'pointer', borderTop: '1px solid rgba(255,255,255,0.04)' }}
@@ -865,7 +1110,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                       : <span style={{ color: '#484f58' }}>—</span>}
                                 </td>
                                 <td style={{ padding: '4px 6px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {urls.length < urMonitors.length && <span style={{ color: '#58a6ff' }}>{urls.join(', ')}</span>}
+                                  <span style={{ color: '#58a6ff' }}>{url}</span>
                                 </td>
                                 {/* Before: Inst | Req | CPU | Mem */}
                                 <td style={{ padding: '4px 6px' }}>
@@ -946,11 +1191,11 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
     {selectedIncident && (
       <div
-        style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', overflowY: 'auto', padding: '24px 0' }}
-        onClick={() => { setSelectedIncident(null); setPopupChartData(null); }}
+        style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px' }}
+        onClick={() => { setSelectedIncident(null); setPopupChartData(null); setDetectorData(null); setDetectorLoading(false); }}
       >
         <div
-          style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: '0', minWidth: 480, maxWidth: 700, width: '90vw', display: 'flex', flexDirection: 'column', fontSize: 12 }}
+          style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: '0', minWidth: 480, maxWidth: 700, width: '90vw', display: 'flex', flexDirection: 'column', fontSize: 12, maxHeight: '90vh' }}
           onClick={e => e.stopPropagation()}
         >
           {/* ── Header ── */}
@@ -960,15 +1205,15 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               <span style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', letterSpacing: '0.08em', textTransform: 'uppercase', flex: 1 }}>Incident Report</span>
               <button
                 onClick={() => reportActionsRef.current?.copy()}
-                disabled={popupChartLoading}
-                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: popupChartLoading ? '#484f58' : '#8b9ab3', cursor: popupChartLoading ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                disabled={popupChartLoading || detectorLoading}
+                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600 }}
               >Copy Text</button>
               <button
                 onClick={() => reportActionsRef.current?.pdf()}
-                disabled={popupChartLoading}
-                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: popupChartLoading ? '#484f58' : '#8b9ab3', cursor: popupChartLoading ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                disabled={popupChartLoading || detectorLoading}
+                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600 }}
               >Export PDF</button>
-              <button onClick={() => { setSelectedIncident(null); setPopupChartData(null); reportActionsRef.current = null; }} style={{ background: 'none', border: 'none', color: '#8b9ab3', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>✕</button>
+              <button onClick={() => { setSelectedIncident(null); setPopupChartData(null); setDetectorData(null); setDetectorLoading(false); reportActionsRef.current = null; }} style={{ background: 'none', border: 'none', color: '#8b9ab3', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>✕</button>
             </div>
             {/* Row 2: date · time → time · duration · severity · type */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -985,7 +1230,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               </>)}
             </div>
           </div>
-          <div style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="table-scroll-area" style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
           {popupChartLoading && (
             <div className="animate-pulse" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
               <div style={{ height: 10, width: 120, borderRadius: 4, background: 'rgba(255,255,255,0.08)' }} />
@@ -1008,9 +1253,10 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
           )}
           {/* ── Metrics Snapshot ── */}
           {false && (() => {
-            const chartCpu = popupChartData?.cpu ?? selectedIncident.cpu;
-            const chartMem = popupChartData?.memory ?? selectedIncident.memory;
-            const { ivStart, ivEnd } = selectedIncident;
+            const si = selectedIncident; if (!si) return null;
+            const chartCpu = popupChartData?.cpu ?? si.cpu;
+            const chartMem = popupChartData?.memory ?? si.memory;
+            const { ivStart, ivEnd } = si;
             const PRE = 5 * 60 * 1000;
             const inRange = (series: Array<{ t: string; v: number }>, s: number, e: number) =>
               series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.v);
@@ -1066,7 +1312,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     <SRow label="Mem max" before={maxV(memBefore) != null ? `${maxV(memBefore)}%` : null} during={maxV(memDuring) != null ? `${maxV(memDuring)}%` : null} bc={dim} dc={memCol(maxV(memDuring))} />
                     {(reqBefore > 0 || reqDuring > 0) && <SRow label="Requests" before={reqBefore > 0 ? reqBefore.toLocaleString() : '0'} during={reqDuring > 0 ? reqDuring.toLocaleString() : '0'} bc={dim} dc='#58a6ff' />}
                     {(failBefore > 0 || failDuring > 0) && <SRow label="Failed req" before={failBefore.toLocaleString()} during={failDuring.toLocaleString()} bc={failBefore > 0 ? '#d29922' : dim} dc={failDuring === 0 ? '#3fb950' : failDuring / (reqDuring || 1) > 0.1 ? 'hsl(var(--destructive))' : '#d29922'} />}
-                    {availDuring != null && <SRow label="Availability" before={null} during={`${availDuring}%`} dc={availDuring >= 99 ? '#3fb950' : availDuring >= 95 ? '#d29922' : 'hsl(var(--destructive))'} />}
+                    {availDuring != null && <SRow label="Availability" before={null} during={`${availDuring}%`} dc={availDuring! >= 99 ? '#3fb950' : availDuring! >= 95 ? '#d29922' : 'hsl(var(--destructive))'} />}
                     {(popupChartData?.responseTime ?? metrics.responseTime) != null && (() => {
                       const rt = popupChartData?.responseTime ?? metrics.responseTime!;
                       return <SRow label="Response time" before={null} during={`avg ${rt.avg}s · max ${rt.max}s`} dc='#58a6ff' />;
@@ -1457,7 +1703,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             if (probeStats.some(p => p.failures > 0)) factors.push(`Health probe failures on ${probeStats.filter(p => p.failures > 0).length} instance(s)`);
             if (reqSpikePct && reqSpikePct > 50) factors.push(`Request spike — ${reqSpikePct}% above baseline`);
             const firstSig = events.find(e => !e.isMarker && e.t >= ivStart);
-            const hfAll = ((popupChartData?.highFreq?.length ? popupChartData.highFreq : null) ?? (metrics.requestInsights?.highFreq?.length ? metrics.requestInsights.highFreq : null) ?? []) as Array<{ timestamp: string; ip: string; country: string; userAgent: string; rpm: number }>;
+            const hfAll = ((popupChartData?.highFreq?.length ? popupChartData.highFreq : null) ?? (metrics.requestInsights?.highFreq?.length ? metrics.requestInsights.highFreq : null) ?? []) as Array<{ timestamp: string; lastSeen?: string; ip: string; country: string; userAgent: string; count: number; rpm: number }>;
             const preHfTop5 = hfAll.filter(h => { const t = new Date(h.timestamp).getTime(); return t >= ivStart - PRE && t <= ivEnd; }).sort((a, b) => b.rpm - a.rpm).slice(0, 5);
 
             // Text export
@@ -1524,6 +1770,26 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 L.push(''); L.push('7. TIMELINE'); L.push(sep());
                 events.forEach(e => L.push(`  ${sgtTime(e.t)} SGT  ${e.icon}  ${e.label}`));
               }
+              if (detectorData && !detectorLoading) {
+                const visDetCats = detectorData.categories.filter(cat => cat.queries.some(q => q.result.rows.length > 0));
+                if (visDetCats.length > 0) {
+                  L.push(''); L.push('8. DETECTOR ANALYSIS'); L.push(sep());
+                  for (const cat of visDetCats) {
+                    L.push(`  [${cat.label}]`);
+                    for (const q of cat.queries.filter(qq => qq.result.rows.length > 0)) {
+                      L.push(`    ${q.name}:`);
+                      if (q.result.error) {
+                        L.push(`      Error: ${q.result.error}`);
+                      } else {
+                        for (const row of q.result.rows.slice(0, 10)) {
+                          L.push(`      ${row.map(v => v == null ? '—' : String(v)).join('  ')}`);
+                        }
+                        if (q.result.rows.length > 10) L.push(`      … +${q.result.rows.length - 10} more`);
+                      }
+                    }
+                  }
+                }
+              }
               L.push(''); L.push('─'.repeat(60));
               L.push(`Generated: ${sgtFull(Date.now())} SGT  |  DevForge`);
               return L.join('\n');
@@ -1572,7 +1838,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             return (
               <div style={{ marginTop: 0 }}>
                 {/* 1. Metrics Snapshot */}
-                <SecHead n="1." label="Metrics Snapshot" />
+                <SecHead n="1." label="Metrics Snapshot" color="#3fb950" />
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead><tr style={{ color: dim, fontSize: 9, fontWeight: 700 }}>
                     <th style={{ textAlign: 'left', padding: '2px 0' }} />
@@ -1592,7 +1858,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 </table>
 
                 {/* 3. Root Cause */}
-                <SecHead n="2." label="Root Cause Analysis" />
+                <SecHead n="2." label="Root Cause Analysis" color="hsl(var(--destructive))" />
                 <div style={{ fontSize: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
                   <div><span style={{ color: dim }}>Primary: </span><span style={{ color: causeColor, fontWeight: 700 }}>{(causeLabel ?? reasons.join(', ')) || 'Unknown'}</span></div>
                   {causeDetail && <div style={{ color: sub, fontSize: 10 }}><span style={{ color: dim }}>Signals: </span>{causeDetail.signals}</div>}
@@ -1775,6 +2041,80 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     </div>
                   </>
                 )}
+
+                {/* Detector Analysis */}
+                {detectorLoading && (
+                  <div className="animate-pulse" style={{ marginTop: 14, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Detector Analysis</div>
+                    {[80, 60, 70, 50].map((w, i) => (
+                      <div key={i} style={{ height: 9, width: `${w}%`, borderRadius: 3, background: 'rgba(255,255,255,0.05)', marginBottom: 5 }} />
+                    ))}
+                  </div>
+                )}
+                {!detectorLoading && detectorData && (() => {
+                  const visibleCats = detectorData.categories.filter(cat =>
+                    cat.queries.some(q => q.result.rows.length > 0 || q.result.error)
+                  );
+                  if (visibleCats.length === 0 && !detectorData.error) return null;
+                  return (
+                    <>
+                      <SecHead n="8." label="Detector Analysis" color="#58a6ff" />
+                      {detectorData.error && (
+                        <div style={{ fontSize: 10, color: 'hsl(var(--destructive))', marginBottom: 6 }}>{detectorData.error}</div>
+                      )}
+                      {visibleCats.map(cat => {
+                        const nonempty = cat.queries.filter(q => q.result.rows.length > 0 || q.result.error);
+                        return (
+                          <div key={cat.id} style={{ marginBottom: 10 }}>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: cat.color, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>{cat.label}</div>
+                            {nonempty.map((q, qi) => (
+                              <div key={qi} style={{ marginBottom: 6 }}>
+                                <div style={{ fontSize: 9, color: sub, marginBottom: 2 }}>{q.name}</div>
+                                {q.result.error
+                                  ? <span style={{ fontSize: 9, color: 'hsl(var(--destructive))' }}>{q.result.error}</span>
+                                  : (
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
+                                      {q.result.columns.length > 0 && (
+                                        <thead>
+                                          <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                            {q.result.columns.map((col, ci) => (
+                                              <th key={ci} style={{ padding: '2px 6px 3px 0', color: '#484f58', fontWeight: 700, textAlign: 'left', whiteSpace: 'nowrap', letterSpacing: '0.04em', textTransform: 'uppercase', fontSize: 8 }}>{col}</th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                      )}
+                                      <tbody>
+                                        {q.result.rows.slice(0, 10).map((row, ri) => (
+                                          <tr key={ri} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                                            {row.map((val, ci) => {
+                                              const str = val == null ? '—'
+                                                : typeof val === 'number' ? (Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2))
+                                                : typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(val)
+                                                  ? sgtTime(new Date(val).getTime())
+                                                  : String(val);
+                                              return (
+                                                <td key={ci} style={{ padding: '2px 6px 2px 0', color: ci === 0 ? sub : dim, maxWidth: ci === 0 ? 200 : 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                                                  {str}
+                                                </td>
+                                              );
+                                            })}
+                                          </tr>
+                                        ))}
+                                        {q.result.rows.length > 10 && (
+                                          <tr><td colSpan={q.result.columns.length || 1} style={{ padding: '2px 0', color: dim, fontSize: 8 }}>+{q.result.rows.length - 10} more rows</td></tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  )
+                                }
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </>
+                  );
+                })()}
 
                 {/* Footer */}
                 <div style={{ marginTop: 14, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 9, color: '#333d48', display: 'flex', justifyContent: 'space-between' }}>

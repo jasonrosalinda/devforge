@@ -259,6 +259,7 @@ async function getInstanceProbeSeries(client, resId, range, granularity, customS
   } catch { return null; }
 }
 
+
 async function queryCountSeries(client, resId, metricName, range, granularity, customStart, customEnd) {
   try {
     const ts = buildTimespan(range, customStart, customEnd);
@@ -641,13 +642,14 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   const rpm = (n) => Math.round((n / spanMins) * 100) / 100;
 
-  const [urlRows, ipRows, uaRows, botRows, hfRows, failedUrlRows] = await Promise.all([
+  const [urlRows, ipRows, uaRows, botRows, hfRows, failedUrlRows, slowUrlRows] = await Promise.all([
     runQuery(`requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ip=iff(isnotempty(client_IP) and client_IP != "::1", client_IP, tostring(customDimensions["Client IP Address"])) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | where ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=tostring(customDimensions["User-Agent"]) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`),
     runQuery(`requests | where success == false | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`),
+    runQuery(`requests | summarize avgMs=avg(duration), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), maxMs=round(maxMs,1), count=n`),
   ]);
 
   const parseOrErr = (rows, mapper) => Array.isArray(rows) ? rows.map(mapper) : rows;
@@ -659,6 +661,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     bots:        parseOrErr(botRows,       ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     highFreq:    parseOrErr(hfRows,        ([ts, lastSeen, ip, country, ua, count, rpm]) => ({ timestamp: String(ts), lastSeen: String(lastSeen), ip: String(ip), country: String(country), userAgent: String(ua), count: Number(count), rpm: Number(rpm) })),
     failedUrls:  parseOrErr(failedUrlRows, ([url, count, rpm])    => ({ url: String(url),       count: Number(count), rpm: Number(rpm) })),
+    slowUrls:    parseOrErr(slowUrlRows,   ([url, avgMs, maxMs, count]) => ({ url: String(url), avgMs: Number(avgMs), maxMs: Number(maxMs), count: Number(count) })),
   };
 }
 
@@ -705,18 +708,20 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     ? 'PT1M'
     : (granularityOverride || ((customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range)));
 
-  let metricsResId = resId;
-  let plan = null;
-  if (app.type === 'appservice') {
-    plan = await getPlanInfo(token, resId);
-    if (plan?.farmId) metricsResId = plan.farmId;
-  }
-
   const isAppService = app.type === 'appservice';
 
-  const aiAppId = isAppService
-    ? (app.appInsightsAppId || await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null))
-    : null;
+  // Resolve plan (needed for metricsResId) and aiAppId in parallel
+  const [planResult, aiAppId] = await Promise.all([
+    isAppService ? getPlanInfo(token, resId).catch(() => null) : Promise.resolve(null),
+    isAppService
+      ? (app.appInsightsAppId
+          ? Promise.resolve(app.appInsightsAppId)
+          : findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null))
+      : Promise.resolve(null),
+  ]);
+
+  const plan = planResult;
+  const metricsResId = (isAppService && plan?.farmId) ? plan.farmId : resId;
 
   async function fetchMemory() {
     if (!isAppService) return { metric: await queryMetric(client, metricsResId, 'MemoryPercentage', range, gran, customStart, customEnd), unit: '%' };
@@ -728,23 +733,25 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     return { metric: m, unit: 'MB' };
   }
 
-  const [cpu, { metric: memory, unit: memUnit }] = await Promise.all([
+  const [
+    cpu, { metric: memory, unit: memUnit },
+    instances, availability, responseTime, requests, failedRequests, failedRequestsSeries,
+    instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries,
+    aiFailedByInstance, failedDependencies,
+  ] = await Promise.all([
     queryMetric(client, metricsResId, 'CpuPercentage', range, gran, customStart, customEnd),
     fetchMemory(),
-  ]);
-
-  const [instances, availability, responseTime, requests, failedRequests, failedRequestsSeries, instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries, aiFailedByInstance, failedDependencies] = await Promise.all([
-    app.type === 'appservice' ? getInstances(token, resId) : getReplicas(token, resId),
+    isAppService ? getInstances(token, resId) : getReplicas(token, resId),
     getAvailability(client, token, resId, app.type, range, gran, customStart, customEnd, aiAppId, credential),
-    app.type === 'appservice' ? getResponseTime(client, resId, range, gran, customStart, customEnd) : Promise.resolve(null),
-    app.type === 'appservice' ? queryCountMetrics(client, resId, ['Requests'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    app.type === 'appservice' ? queryCountMetrics(client, resId, ['Http4xx', 'Http5xx'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    app.type === 'appservice' ? queryFailedRequestsSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    app.type === 'appservice' ? getInstanceHealthSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    app.type === 'appservice' ? getInstanceProbeSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? getResponseTime(client, resId, range, gran, customStart, customEnd) : Promise.resolve(null),
+    isAppService ? queryCountMetrics(client, resId, ['Requests'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? queryCountMetrics(client, resId, ['Http4xx', 'Http5xx'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? queryFailedRequestsSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? getInstanceHealthSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? getInstanceProbeSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getRequestInsights(aiAppId, credential, range, customStart, customEnd) : Promise.resolve(null),
-    app.type === 'appservice' ? queryCountSeries(client, resId, 'Http4xx', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    app.type === 'appservice' ? queryCountSeries(client, resId, 'Requests', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? queryCountSeries(client, resId, 'Http4xx', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    isAppService ? queryCountSeries(client, resId, 'Requests', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getFailedRequestsByInstance(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getFailedDependencies(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
   ]);
@@ -786,12 +793,9 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     const rawIntervals = extractDowntimeIntervalsMultiSignal(settledSeries, effectiveFailedSeries, http4xxSeries, instanceProbeSeries);
     const multiIntervals = rawIntervals
       .map(iv => ({ ...iv, cause: classifyDowntimeCause(iv, { instanceHealthSeries: effectiveInstanceHealth }) }));
-    const downPts = settledSeries.filter(p => p.v < 100).length;
-    const downtimeMins = multiIntervals.reduce((sum, iv) => sum + Math.round((iv.end - iv.start) / 60_000), 0) || downPts * granMins;
-    const pct = Math.round((1 - downPts / settledSeries.length) * 1000) / 10;
+    const downtimeMins = multiIntervals.reduce((sum, iv) => sum + Math.round((iv.end - iv.start) / 60_000), 0) || availability.downtimeMins;
     refinedAvailability = {
       ...availability,
-      pct,
       downtimeMins,
       incidents: multiIntervals.length,
       downtimeIntervals: multiIntervals,
@@ -821,6 +825,68 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     appInsightsConfigured: !!aiAppId,
   };
 }
+
+// ─── Detector KQL helpers ─────────────────────────────────────────────────────
+
+function makeRunQuery(appId, token, timespan) {
+  const endpoint = `https://api.applicationinsights.io/v1/apps/${appId}/query`;
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+    'x-ms-app': 'devforge',
+  };
+  return async function runQuery(query) {
+    try {
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query, timespan }) });
+      if (!res.ok) { const t = await res.text().catch(() => ''); return { error: `${res.status}: ${t}` }; }
+      const data = await res.json();
+      if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
+      const table = data.tables?.[0];
+      return { columns: (table?.columns ?? []).map(c => c.name), rows: table?.rows || [] };
+    } catch (e) { return { error: e.message }; }
+  };
+}
+
+const DETECTOR_QUERIES = [
+  { id: 'web_app_down', label: 'Web App Down', color: '#f85149', queries: [
+    { name: 'Request Failure Rate',
+      kql: `requests | where {BETWEEN} | summarize Total=count(), Failed=countif(success==false) by bin(timestamp,5m) | extend FailureRate=todouble(Failed)/Total*100 | order by timestamp asc` },
+    { name: 'Near-Zero Traffic',
+      kql: `requests | where {BETWEEN} | summarize Requests=count() by bin(timestamp,5m) | order by timestamp asc` },
+  ]},
+  { id: 'web_app_slow', label: 'Web App Slow', color: '#d29922', queries: [
+    { name: 'Request Duration P95/P99',
+      kql: `requests | where {BETWEEN} | summarize AvgDuration=avg(duration), P95=percentile(duration,95), P99=percentile(duration,99) by bin(timestamp,5m) | order by timestamp asc` },
+    { name: 'Slow Dependencies',
+      kql: `dependencies | where {BETWEEN} | summarize AvgDuration=avg(duration), P95=percentile(duration,95) by target | order by P95 desc | take 10` },
+  ]},
+  { id: 'snat', label: 'SNAT Port Exhaustion', color: '#a371f7', queries: [
+    { name: 'Socket Exceptions',
+      kql: `exceptions | where {BETWEEN} | where outerMessage has_any ("SocketException","timeout","No buffer space available","actively refused","ENOBUFS") | summarize Count=count() by outerMessage | order by Count desc` },
+    { name: 'Dependency Duration Spike',
+      kql: `dependencies | where {BETWEEN} | summarize Failures=countif(success==false), P95=percentile(duration,95) by bin(timestamp,5m) | order by timestamp asc` },
+  ]},
+  { id: 'memory', label: 'Memory Analysis', color: '#58a6ff', queries: [
+    { name: 'OOM Exceptions',
+      kql: `exceptions | where {BETWEEN} | where outerMessage has_any ("OutOfMemory","OOM","memory") | summarize Count=count() by outerMessage` },
+  ]},
+  { id: 'crashes', label: 'Application Crashes', color: '#f85149', queries: [
+    { name: 'Critical Exceptions',
+      kql: `exceptions | where {BETWEEN} | where severityLevel >= 3 | summarize Count=count() by type, outerMessage | order by Count desc | take 10` },
+    { name: 'Crash Traces',
+      kql: `traces | where {BETWEEN} | where message has_any ("crash","terminated","shutdown","stopped") | project timestamp, message | order by timestamp desc | take 20` },
+  ]},
+  { id: 'restart', label: 'Web App Restarted', color: '#d29922', queries: [
+    { name: 'Restart Detection',
+      kql: `traces | where {BETWEEN} | where message has_any ("restart","restarted","Starting","Stopping") | project timestamp, message | order by timestamp desc | take 20` },
+  ]},
+  { id: 'http4xx', label: 'HTTP 4xx Errors', color: '#d29922', queries: [
+    { name: 'Client Error Breakdown',
+      kql: `requests | where {BETWEEN} | where toint(resultCode) between (400 .. 499) | summarize Count=count() by resultCode, url | order by Count desc | take 10` },
+    { name: 'Top Failing Endpoints',
+      kql: `requests | where {BETWEEN} | where success == false | summarize Failures=count() by name | order by Failures desc | take 10` },
+  ]},
+];
 
 // ─── IPC handler ─────────────────────────────────────────────────────────────
 
@@ -882,6 +948,31 @@ const handler = (_mainWindow) => {
       })
     );
     return results;
+  });
+
+  ipcMain.handle('azure-metrics:fetch-detectors', async (_event, { appInsightsAppId, startIso, endIso }) => {
+    if (!appInsightsAppId) return { categories: [], error: 'No App Insights App ID' };
+    let token;
+    try {
+      const cred = new DefaultAzureCredential();
+      token = (await cred.getToken('https://api.applicationinsights.io/.default')).token;
+    } catch (e) { return { categories: [], error: `Token error: ${e.message}` }; }
+
+    const timespan = `${startIso}/${endIso}`;
+    const between = `timestamp between (datetime(${startIso}) .. datetime(${endIso}))`;
+    const runQuery = makeRunQuery(appInsightsAppId, token, timespan);
+    const sub = (kql) => kql.replace(/\{BETWEEN\}/g, between);
+
+    const categories = await Promise.all(
+      DETECTOR_QUERIES.map(async (cat) => ({
+        id: cat.id, label: cat.label, color: cat.color,
+        queries: await Promise.all(cat.queries.map(async (q) => {
+          const raw = await runQuery(sub(q.kql));
+          return { name: q.name, result: raw.error ? { columns: [], rows: [], error: raw.error } : { columns: raw.columns ?? [], rows: raw.rows ?? [] } };
+        })),
+      }))
+    );
+    return { categories };
   });
 };
 
