@@ -1,6 +1,7 @@
 export interface MetricSeries {
   avg: number
   max: number
+  p99: number
   series: Array<{ t: string; v: number; m: number }>
 }
 
@@ -31,11 +32,25 @@ export interface AppMetrics {
     userAgents?: Array<{ userAgent: string; rpm: number; count: number }>
     bots?: Array<{ userAgent: string; rpm: number; count: number }>
     highFreq?: Array<{ timestamp: string; lastSeen?: string; ip: string; country: string; userAgent: string; count: number; rpm: number }>
-    failedUrls?: Array<{ url: string; rpm: number; count: number }>
-    slowUrls?: Array<{ url: string; avgMs: number; maxMs: number; count: number }>
+    failedUrls?: Array<{ url: string; totalCount: number; count: number; p95: number; p99: number }>
+    slowUrls?: Array<{ url: string; avgMs: number; p99Ms: number; maxMs: number; count: number }>
+    insight?: {
+      summary: string
+      totalDependencies: number
+      failedDependencies: number
+      dependencyFailureRate: number
+      dependencyP95: number
+      dependencyP99: number
+      totalRequests: number
+      failedRequests: number
+      requestFailureRate: number
+      requestP95: number
+      requestP99: number
+      socketExceptions: number
+    } | null
     error?: string
   } | null
-  responseTime?: { avg: number; max: number; series?: Array<{ t: string; avg: number }> } | null
+  responseTime?: { avg: number; max: number; p99?: number; series?: Array<{ t: string; avg: number }> } | null
   requestsSeries?: Array<{ t: string; count: number }> | null
   availability?: {
     pct: number
@@ -44,7 +59,7 @@ export interface AppMetrics {
     downtimeIntervals: Array<{ start: number; end: number; cause?: string }>
     series: Array<{ t: string; v: number }>
   } | null
-  failedDependencies?: Array<{ t: string; name: string; type: string; target: string; failCount: number; avgDuration: number }> | null
+  failedDependencies?: Array<{ t: string; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
   appInsightsConfigured?: boolean
   error?: string
 }

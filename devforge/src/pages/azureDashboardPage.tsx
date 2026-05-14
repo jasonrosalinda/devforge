@@ -371,9 +371,9 @@ export default function AzureDashboardPage() {
         borderRadius: 8,
         display: 'flex', gap: 20, fontSize: 11, color: C.textSub, flexWrap: 'wrap',
       }}>
-        <span><span style={{ color: C.green  }}>● Healthy</span>  — CPU ≤70% / Mem ≤80%</span>
-        <span><span style={{ color: C.yellow }}>● Warning</span>  — CPU &gt;70% / Mem &gt;80%</span>
-        <span><span style={{ color: C.red    }}>● Critical</span> — CPU &gt;90% / Mem &gt;95%</span>
+        <span><span style={{ color: C.green  }}>● Healthy</span>  — CPU p99 ≤70% / Mem p99 ≤80%</span>
+        <span><span style={{ color: C.yellow }}>● Warning</span>  — CPU p99 &gt;70% / Mem p99 &gt;80%</span>
+        <span><span style={{ color: C.red    }}>● Critical</span> — CPU p99 &gt;90% / Mem p99 &gt;95%</span>
       </div>
 
       <style>{`

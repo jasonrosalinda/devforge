@@ -10,6 +10,8 @@ import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 
 type Status = 'healthy' | 'warning' | 'critical';
 
+const stripQs = (name: string) => name.split('?')[0];
+
 type TimelineEvent = { t: number; label: string; color: string; icon: string; isMarker?: boolean };
 
 type FailedDep = { t: string; name: string; type: string; target: string; failCount: number; avgDuration: number };
@@ -58,10 +60,8 @@ function buildTimeline(
   }
 
   // Failed dependencies near incident — group by method+domain
-  const nearDeps = (failedDependencies ?? []).filter(d => {
-    const t = new Date(d.t).getTime();
-    return t >= ivStart - DEP_WINDOW && t <= ivEnd + DEP_WINDOW;
-  });
+  // Data is pre-scoped to incident window via timespan param; no timestamp filter needed
+  const nearDeps = failedDependencies ?? [];
   const depDomainKey = (name: string): string => {
     const m = name.match(/^(GET|POST|PUT|DELETE|PATCH)\s+(.+)/i);
     const method = m ? (m[1] ?? '').toUpperCase() : '';
@@ -71,10 +71,9 @@ function buildTimeline(
   const depGroups = new Map<string, { domain: string; type: string; count: number; t: number; endpoints: Set<string> }>();
   for (const d of nearDeps) {
     const k = depDomainKey(d.name) + '||' + d.type;
-    const t = new Date(d.t).getTime();
     const prev = depGroups.get(k);
-    if (!prev) depGroups.set(k, { domain: depDomainKey(d.name), type: d.type, count: d.failCount, t, endpoints: new Set([d.name]) });
-    else { prev.count += d.failCount; prev.t = Math.min(prev.t, t); prev.endpoints.add(d.name); }
+    if (!prev) depGroups.set(k, { domain: depDomainKey(d.name), type: d.type, count: d.failCount, t: ivStart, endpoints: new Set([d.name]) });
+    else { prev.count += d.failCount; prev.endpoints.add(d.name); }
   }
   const normDepType = (raw: string): string => {
     const t = raw.toLowerCase();
@@ -154,9 +153,9 @@ function buildTimeline(
   return events.sort((a, b) => a.t - b.t);
 }
 
-export function getStatus(cpuAvg: number, memAvg: number, cpuMax?: number, memMax?: number): Status {
-  if (cpuAvg > 90 || memAvg > 95 || (cpuMax ?? 0) >= 100 || (memMax ?? 0) >= 100) return 'critical';
-  if (cpuAvg > 70 || memAvg > 80  || (cpuMax ?? 0) > 85  || (memMax ?? 0) > 90)  return 'warning';
+export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP99?: number): Status {
+  if (cpuAvg > 90 || memAvg > 95 || (cpuP99 ?? 0) >= 100 || (memP99 ?? 0) >= 100) return 'critical';
+  if (cpuAvg > 70 || memAvg > 80  || (cpuP99 ?? 0) > 85  || (memP99 ?? 0) > 90)  return 'warning';
   return 'healthy';
 }
 
@@ -202,7 +201,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
   };
   const [selectedIncident, setSelectedIncident] = useState<IncidentPopup | null>(null);
   const [popupChartLoading, setPopupChartLoading] = useState(false);
-  const reportActionsRef = useRef<{ copy: () => void; pdf: () => void } | null>(null);
+  const reportActionsRef = useRef<{ copy: () => void; pdf: () => void; downloadMd: () => void } | null>(null); // downloadMd = copyMd internally
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [highFreqOpen, setHighFreqOpen] = useState(false);
   const [depsOpen, setDepsOpen] = useState(false);
@@ -219,7 +218,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
     requestsSeries?: Array<{ t: string; count: number }> | null;
     failedRequestsSeries?: Array<{ t: string; count: number }> | null;
     http4xxSeries?: Array<{ t: string; count: number }> | null;
-    responseTime?: { avg: number; max: number } | null;
+    responseTime?: { avg: number; max: number; p99?: number; series?: Array<{ t: string; avg: number }> } | null;
     requests?: { total: number } | null;
     failedRequests?: { total: number } | null;
     requestInsights?: AppMetrics['requestInsights'];
@@ -231,7 +230,15 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
   const [requestsExpanded, setRequestsExpanded] = useState(false);
   const [availExpanded, setAvailExpanded] = useState(false);
   const [responseExpanded, setResponseExpanded] = useState(false);
-  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'failed' | 'deps'>('requests');
+  const [insightExpanded, setInsightExpanded] = useState(false);
+  const [showInsight, setShowInsight] = useState(true);
+  const [failedDepsInsightOpen, setFailedDepsInsightOpen] = useState(false);
+  const [failedReqInsightOpen, setFailedReqInsightOpen] = useState(false);
+  const [socketExInsightOpen, setSocketExInsightOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [mdCopied, setMdCopied] = useState(false);
+  const [textCopied, setTextCopied] = useState(false);
+  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'failed'>('requests');
 
   // PT1M data fetched separately for the incidents panel — avoids dashboard-interval gaps
   const [incidentDetailMetrics, setIncidentDetailMetrics] = useState<AppMetrics | null>(null);
@@ -274,8 +281,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
 
   const memPct = metrics.memUnit === 'MB' ? 0 : metrics.memory.avg;
-  const memMaxPct = metrics.memUnit === 'MB' ? 0 : metrics.memory.max;
-  const status = getStatus(metrics.cpu.avg, memPct, metrics.cpu.max, memMaxPct);
+  const memP99Pct = metrics.memUnit === 'MB' ? 0 : metrics.memory.p99;
+  const status = getStatus(metrics.cpu.avg, memPct, metrics.cpu.p99, memP99Pct);
   const borderColor = STATUS_BORDER[status];
   const statusColor = STATUS_COLORS[status];
   const downtimeIntervals = metrics.availability?.downtimeIntervals ?? [];
@@ -350,6 +357,29 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
           {seriesStart && seriesEnd && (
             <span className="text-[10px] text-muted-foreground">{seriesStart} → {seriesEnd}</span>
           )}
+          {metrics.appInsightsConfigured && (
+            <div
+              data-html2canvas-ignore="true"
+              title={showInsight ? 'Hide Insight block' : 'Show Insight block'}
+              style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
+              onClick={() => setShowInsight(v => !v)}
+            >
+              <span className="text-[10px] text-muted-foreground">Insight</span>
+              <div style={{
+                position: 'relative', width: 28, height: 15, borderRadius: 8,
+                background: showInsight ? 'hsl(var(--primary))' : 'hsl(var(--muted))',
+                border: `1px solid ${showInsight ? 'hsl(var(--primary))' : 'hsl(var(--border))'}`,
+                transition: 'background 0.2s, border-color 0.2s',
+              }}>
+                <div style={{
+                  position: 'absolute', top: 2, left: showInsight ? 13 : 2,
+                  width: 9, height: 9, borderRadius: '50%',
+                  background: showInsight ? 'hsl(var(--primary-foreground))' : 'hsl(var(--muted-foreground))',
+                  transition: 'left 0.2s, background 0.2s',
+                }} />
+              </div>
+            </div>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -391,18 +421,21 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             <tr className="text-muted-foreground font-bold">
               <td />
               <td className="text-right">Average</td>
+              <td className="text-right">P99</td>
               <td className="text-right">Max</td>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td className="text-muted-foreground">CPU</td>
+              <td className="text-muted-foreground font-bold">CPU</td>
               <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{(+metrics.cpu.avg).toFixed(2)}%</td>
+              <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.p99).toFixed(2)}%</td>
               <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.max).toFixed(2)}%</td>
             </tr>
             <tr>
               <td className="text-muted-foreground font-bold">Memory</td>
               <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{(+metrics.memory.avg).toFixed(2)}{metrics.memUnit}</td>
+              <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.p99).toFixed(2)}{metrics.memUnit}</td>
               <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</td>
             </tr>
             {metrics.responseTime != null && (() => {
@@ -418,25 +451,161 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      Response{hasSlow && <span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{responseExpanded ? '▾' : '›'}</span>}
+                      Response{hasSlow && (responseExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
                     <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
+                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—'}</td>
                     <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
                   </tr>
                   {responseExpanded && slowUrls.map((u, i) => {
                     const avgColor = u.avgMs >= 5000 ? 'hsl(var(--destructive))' : u.avgMs >= 2000 ? '#d29922' : '#58a6ff';
+                    const p99Color = u.p99Ms >= 5000 ? 'hsl(var(--destructive))' : u.p99Ms >= 2000 ? '#d29922' : '#58a6ff';
                     const maxColor = u.maxMs >= 10000 ? 'hsl(var(--destructive))' : u.maxMs >= 5000 ? '#d29922' : '#484f58';
                     return (
                       <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                         <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={u.url}>{u.url}</td>
                         <td className="text-right tabular-nums" style={{ color: avgColor, whiteSpace: 'nowrap' }}>{fmtMs(u.avgMs)}</td>
-                        <td className="text-right tabular-nums" style={{ color: maxColor, whiteSpace: 'nowrap' }}>{fmtMs(u.maxMs)} max</td>
+                        <td className="text-right tabular-nums" style={{ color: p99Color, whiteSpace: 'nowrap' }}>{u.p99Ms != null ? fmtMs(u.p99Ms) : '—'}</td>
+                        <td className="text-right tabular-nums" style={{ color: maxColor, whiteSpace: 'nowrap' }}>{fmtMs(u.maxMs)}</td>
                       </tr>
                     );
                   })}
                 </>
               );
             })()}
+            {metrics.requests != null && (
+              <>
+                <tr
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setRequestsExpanded(v => !v)}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <td className="text-muted-foreground font-bold">
+                    Requests{requestsExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                  </td>
+                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                    {spanMinutes > 0 && (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        {metrics.failedRequests != null && (
+                          <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
+                            {(metrics.failedRequests.total / spanMinutes).toFixed(1)}
+                          </span>
+                        )}
+                        {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
+                        <span style={{ color: '#58a6ff' }}>{(metrics.requests.total / spanMinutes).toFixed(1)} rpm</span>
+                      </span>
+                    )}
+                  </td>
+                  <td className="text-right text-muted-foreground">—</td>
+                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      {metrics.failedRequests != null && (
+                        <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
+                          {metrics.failedRequests.total.toLocaleString()}
+                        </span>
+                      )}
+                      {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
+                      <span style={{ color: '#58a6ff' }}>{metrics.requests.total.toLocaleString()}</span>
+                    </span>
+                  </td>
+                </tr>
+                {requestsExpanded && (
+                  <tr>
+                    <td colSpan={4} className="pb-1">
+                      {!metrics.requestInsights
+                        ? <span className="text-[10px] text-muted-foreground italic">Requires App Insights Application ID in settings</span>
+                        : metrics.requestInsights.error
+                          ? <span className="text-[10px] text-destructive">{metrics.requestInsights.error}</span>
+                          : (
+                            <div className="flex flex-col gap-1 pt-1">
+                              {/* Tab buttons */}
+                              <div className="flex gap-0.5 flex-wrap">
+                                {(['requests', 'highfreq', 'failed'] as const).map(t => {
+                                  const labels: Record<string, string> = { requests: 'Requests', highfreq: 'High Freq', failed: 'Failed' };
+                                  return (
+                                    <button
+                                      key={t}
+                                      onClick={() => setRequestsTab(t)}
+                                      style={{
+                                        background: requestsTab === t ? '#58a6ff22' : 'none',
+                                        border: `1px solid ${requestsTab === t ? '#58a6ff66' : 'transparent'}`,
+                                        color: requestsTab === t ? '#58a6ff' : 'var(--muted-foreground)',
+                                        borderRadius: 4,
+                                        padding: '1px 6px',
+                                        fontSize: 9,
+                                        cursor: 'pointer',
+                                        fontWeight: requestsTab === t ? 600 : 400,
+                                      }}
+                                    >
+                                      {labels[t]}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              {/* Requests tab */}
+                              {requestsTab === 'requests' && (
+                                !Array.isArray(metrics.requestInsights.urls) || metrics.requestInsights.urls.length === 0
+                                  ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
+                                  : <div className="flex flex-col gap-0.5">
+                                    {metrics.requestInsights.urls.map((u, i) => (
+                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
+                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
+                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                              )}
+
+                              {/* High Frequency tab */}
+                              {requestsTab === 'highfreq' && (
+                                !Array.isArray(metrics.requestInsights.highFreq) || metrics.requestInsights.highFreq.length === 0
+                                  ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
+                                  : <div className="flex flex-col gap-0.5">
+                                    {metrics.requestInsights.highFreq.map((u, i) => {
+                                      const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+                                      const start = new Date(u.timestamp);
+                                      const end = new Date(start.getTime() + 10 * 60 * 1000);
+                                      const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
+                                      const textColor = isDowntime ? '#c0392b' : undefined;
+                                      return (
+                                        <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                          <div className="flex flex-col min-w-0 flex-1">
+                                            <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
+                                            <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
+                                          </div>
+                                          <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                              )}
+
+                              {/* Failed Requests tab */}
+                              {requestsTab === 'failed' && (
+                                !Array.isArray(metrics.requestInsights.failedUrls) || metrics.requestInsights.failedUrls.length === 0
+                                  ? <span className="text-[10px] text-muted-foreground italic">No failed request data</span>
+                                  : <div className="flex flex-col gap-0.5">
+                                    {metrics.requestInsights.failedUrls.map((u, i) => (
+                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
+                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
+                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.count.toLocaleString()} failed</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                              )}
+
+                            </div>
+                          )
+                      }
+                    </td>
+                  </tr>
+                )}
+              </>
+            )}
             {metrics.availability != null && (() => {
               const availColor = metrics.availability.pct >= 99 ? '#3fb950' : metrics.availability.pct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
               const instances = metrics.instances ?? [];
@@ -450,9 +619,9 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      Availability{hasInstances && <span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{availExpanded ? '▾' : '›'}</span>}
+                      Availability{hasInstances && (availExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
-                    <td className="text-right" colSpan={2} style={{ color: availColor }}>{metrics.availability.pct.toFixed(2)}%</td>
+                    <td className="text-right" colSpan={3} style={{ color: availColor }}>{metrics.availability.pct.toFixed(2)}%</td>
                   </tr>
                   {availExpanded && instances.map((inst, i) => {
                     const series = (metrics.instanceHealthSeries ?? []).find(s => s.name === inst.name);
@@ -466,6 +635,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                       <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                         <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={inst.name}>{shortName}</td>
                         <td className="text-right tabular-nums" style={{ color: avgColor }}>{avg != null ? `${avg.toFixed(2)}%` : '—'}</td>
+                        <td className="text-right tabular-nums text-muted-foreground">—</td>
                         <td className="text-right tabular-nums" style={{ color: minColor }}>{min != null ? `${min.toFixed(2)}% min` : '—'}</td>
                       </tr>
                     );
@@ -491,9 +661,9 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      UptimeRobot<span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{urExpanded ? '▾' : '›'}</span>
+                      UptimeRobot{urExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </td>
-                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
+                    <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap' }}>
                       <span style={{ color: incidentColor }}>{totalIncidents} incident{totalIncidents !== 1 ? 's' : ''}</span>
                       {totalDownSec > 0 && <span style={{ color: '#484f58' }}> · </span>}
                       {totalDownSec > 0 && <span style={{ color: incidentColor }}>{fmtDur(totalDownSec)} down</span>}
@@ -504,7 +674,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                   </tr>
                   {urExpanded && (
                     <tr>
-                      <td colSpan={3} style={{ padding: 0 }}>
+                      <td colSpan={4} style={{ padding: 0 }}>
                         <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
                           {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
                           {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
@@ -642,13 +812,16 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                         const filteredInst = instSeries.map(inst => ({ name: inst.name, series: inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; }) }));
                                         const cpuVals = filteredCpu.map(p => p.v);
                                         const memVals = filteredMem.map(p => p.v);
-                                        const cpuMetric: MetricSeries = { avg: cpuVals.length ? Math.round(cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length * 10) / 10 : 0, max: cpuVals.length ? Math.max(...cpuVals) : 0, series: filteredCpu };
-                                        const memMetric: MetricSeries = { avg: memVals.length ? Math.round(memVals.reduce((a, b) => a + b, 0) / memVals.length * 10) / 10 : 0, max: memVals.length ? Math.max(...memVals) : 0, series: filteredMem };
+                                        const cpuSorted = [...cpuVals].sort((a, b) => a - b);
+                                        const memSorted = [...memVals].sort((a, b) => a - b);
+                                        const pct99 = (s: number[]) => s.length ? s[Math.ceil(s.length * 0.99) - 1] : 0;
+                                        const cpuMetric: MetricSeries = { avg: cpuVals.length ? Math.round(cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length * 10) / 10 : 0, max: cpuVals.length ? Math.max(...cpuVals) : 0, p99: Math.round(pct99(cpuSorted) * 100) / 100, series: filteredCpu };
+                                        const memMetric: MetricSeries = { avg: memVals.length ? Math.round(memVals.reduce((a, b) => a + b, 0) / memVals.length * 10) / 10 : 0, max: memVals.length ? Math.max(...memVals) : 0, p99: Math.round(pct99(memSorted) * 100) / 100, series: filteredMem };
                                         setSelectedIncident({ date: dateKey, timeRange: `${startLabel} → ${endLabel}`, dur, reasons, causeLabel: urCause ? (CAUSE_LABEL[urCause] ?? null) : null, causeColor: urCauseColor, cpu: cpuMetric, memory: memMetric, instanceHealthSeries: filteredInst, ivStart, ivEnd });
                                         setPopupChartData(null); setDetectorData(null); setTimelineOpen(false); setHighFreqOpen(false); setDepsOpen(false); setInstOpen(false); setProbesOpen(false); setTrafficOpen(false);
                                         setPopupChartLoading(true);
                                         window.electronAPI.azureMetrics.fetch({ appKeys: [appKey], range: 'custom', config: azureSettings, customStart: new Date(ivStart - PRE).toISOString(), customEnd: new Date(ivEnd).toISOString(), granularity: 'PT1M' })
-                                          .then(data => { const m = data[appKey]; if (m) setPopupChartData({ cpu: m.cpu, memory: m.memory, instanceHealthSeries: m.instanceHealthSeries ?? [], failedDependencies: m.failedDependencies ?? null, instanceProbeSeries: m.instanceProbeSeries ?? null, highFreq: m.requestInsights?.highFreq ?? null, requestsSeries: m.requestsSeries ?? null, failedRequestsSeries: m.failedRequestsSeries ?? null, http4xxSeries: m.http4xxSeries ?? null, responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max } : null, requests: m.requests ?? null, failedRequests: m.failedRequests ?? null, requestInsights: m.requestInsights ?? null }); })
+                                          .then(data => { const m = data[appKey]; if (m) setPopupChartData({ cpu: m.cpu, memory: m.memory, instanceHealthSeries: m.instanceHealthSeries ?? [], failedDependencies: m.failedDependencies ?? null, instanceProbeSeries: m.instanceProbeSeries ?? null, highFreq: m.requestInsights?.highFreq ?? null, requestsSeries: m.requestsSeries ?? null, failedRequestsSeries: m.failedRequestsSeries ?? null, http4xxSeries: m.http4xxSeries ?? null, responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max, p99: m.responseTime.p99, series: m.responseTime.series } : null, requests: m.requests ?? null, failedRequests: m.failedRequests ?? null, requestInsights: m.requestInsights ?? null }); })
                                           .catch(() => {}).finally(() => setPopupChartLoading(false));
                                         const aiAppId = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey)?.appInsightsAppId ?? null;
                                         if (metrics.appInsightsConfigured && aiAppId) {
@@ -700,167 +873,183 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 </>
               );
             })()}
-            {metrics.requests != null && (
-              <>
-                <tr
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => setRequestsExpanded(v => !v)}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <td className="text-muted-foreground font-bold">
-                    Requests<span style={{ marginLeft: 4, fontSize: 10, verticalAlign: 'middle' }}>{requestsExpanded ? '▾' : '›'}</span>
-                  </td>
-                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    {spanMinutes > 0 && (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                        {metrics.failedRequests != null && (
-                          <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
-                            {(metrics.failedRequests.total / spanMinutes).toFixed(1)}
-                          </span>
-                        )}
-                        {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
-                        <span style={{ color: '#58a6ff' }}>{(metrics.requests.total / spanMinutes).toFixed(1)} rpm</span>
-                      </span>
-                    )}
-                  </td>
-                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                      {metrics.failedRequests != null && (
-                        <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
-                          {metrics.failedRequests.total.toLocaleString()}
-                        </span>
-                      )}
-                      {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
-                      <span style={{ color: '#58a6ff' }}>{metrics.requests.total.toLocaleString()}</span>
-                    </span>
-                  </td>
-                </tr>
-                {requestsExpanded && (
-                  <tr>
-                    <td colSpan={3} className="pb-1">
-                      {!metrics.requestInsights
-                        ? <span className="text-[10px] text-muted-foreground italic">Requires App Insights Application ID in settings</span>
-                        : metrics.requestInsights.error
-                          ? <span className="text-[10px] text-destructive">{metrics.requestInsights.error}</span>
-                          : (
-                            <div className="flex flex-col gap-1 pt-1">
-                              {/* Tab buttons */}
-                              <div className="flex gap-0.5 flex-wrap">
-                                {(['requests', 'highfreq', 'failed', 'deps'] as const).map(t => {
-                                  const labels: Record<string, string> = { requests: 'Requests', highfreq: 'High Freq', failed: 'Failed', deps: 'Dep Failures' };
-                                  return (
-                                    <button
-                                      key={t}
-                                      onClick={() => setRequestsTab(t)}
-                                      style={{
-                                        background: requestsTab === t ? '#58a6ff22' : 'none',
-                                        border: `1px solid ${requestsTab === t ? '#58a6ff66' : 'transparent'}`,
-                                        color: requestsTab === t ? '#58a6ff' : 'var(--muted-foreground)',
-                                        borderRadius: 4,
-                                        padding: '1px 6px',
-                                        fontSize: 9,
-                                        cursor: 'pointer',
-                                        fontWeight: requestsTab === t ? 600 : 400,
-                                      }}
-                                    >
-                                      {labels[t]}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-
-                              {/* Requests tab */}
-                              {requestsTab === 'requests' && (
-                                !Array.isArray(metrics.requestInsights.urls) || metrics.requestInsights.urls.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.urls.map((u, i) => (
-                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                              )}
-
-                              {/* High Frequency tab */}
-                              {requestsTab === 'highfreq' && (
-                                !Array.isArray(metrics.requestInsights.highFreq) || metrics.requestInsights.highFreq.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.highFreq.map((u, i) => {
-                                      const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-                                      const start = new Date(u.timestamp);
-                                      const end = new Date(start.getTime() + 10 * 60 * 1000);
-                                      const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
-                                      const textColor = isDowntime ? '#c0392b' : undefined;
-                                      return (
-                                        <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                          <div className="flex flex-col min-w-0 flex-1">
-                                            <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
-                                            <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
-                                          </div>
-                                          <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                              )}
-
-                              {/* Failed Requests tab */}
-                              {requestsTab === 'failed' && (
-                                !Array.isArray(metrics.requestInsights.failedUrls) || metrics.requestInsights.failedUrls.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No failed request data</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.failedUrls.map((u, i) => (
-                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.rpm} rpm</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                              )}
-
-                              {/* Dependency Failures tab */}
-                              {requestsTab === 'deps' && (() => {
-                                const deps = metrics.failedDependencies;
-                                if (!deps?.length) return <span className="text-[10px] text-muted-foreground italic">No dependency failure data</span>;
-                                const grouped = new Map<string, { name: string; type: string; count: number; totalDur: number; times: number }>();
-                                for (const d of deps) {
-                                  const k = d.name + '||' + d.type;
-                                  const prev = grouped.get(k);
-                                  if (!prev) grouped.set(k, { name: d.name, type: d.type, count: d.failCount, totalDur: d.avgDuration, times: 1 });
-                                  else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
-                                }
-                                const list = Array.from(grouped.values()).sort((a, b) => b.count - a.count).slice(0, 10);
-                                return (
-                                  <div className="flex flex-col gap-0.5">
-                                    {list.map((d, i) => {
-                                      const ms = d.totalDur / d.times;
-                                      const dur = ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-                                      return (
-                                        <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                          <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={d.name}>{d.name}</span>
-                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{d.type}</span>
-                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{d.count.toLocaleString()} fails</span>
-                                          <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{dur}</span>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )
-                      }
+            {showInsight && metrics.requestInsights?.insight && (() => {
+              const ins = metrics.requestInsights!.insight!;
+              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : ms >= 1000 ? `${(ms/1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+              const fmtPct = (v: number) => `${v.toFixed(1)}%`;
+              return (
+                <>
+                  <tr
+                    style={{ borderTop: '1px solid rgba(255,255,255,0.06)', cursor: 'pointer' }}
+                    onClick={() => setInsightExpanded(v => !v)}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold" style={{ paddingTop: 6, verticalAlign: 'top' }}>
+                      Insight{insightExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </td>
+                    <td colSpan={3} style={{ paddingTop: 6, fontSize: 10, lineHeight: 1.5, textAlign: 'right', color: (() => { const prefix = ins.summary.split(':')[0].trim(); return prefix === 'Critical' ? '#f85149' : prefix === 'High' ? '#f85149' : prefix === 'Elevated' ? '#d29922' : prefix === 'Warning' ? '#d29922' : prefix === 'Info' ? '#58a6ff' : '#8b9ab3'; })() }}>{ins.summary}</td>
                   </tr>
-                )}
-              </>
-            )}
+                  {insightExpanded && (
+                    <tr>
+                      <td colSpan={4} style={{ paddingBottom: 8, paddingLeft: 12 }}>
+                        {(() => {
+                          const grouped = new Map<string, { name: string; type: string; count: number; totalCount: number; p95: number; p99: number }>();
+                          for (const d of metrics.failedDependencies ?? []) {
+                            const baseName = stripQs(d.name);
+                            const k = baseName + '||' + d.type;
+                            const prev = grouped.get(k);
+                            if (!prev) grouped.set(k, { name: baseName, type: d.type, count: d.failCount, totalCount: d.totalCount, p95: d.p95, p99: d.p99 });
+                            else { prev.count += d.failCount; prev.totalCount += d.totalCount; prev.p95 = Math.max(prev.p95, d.p95); prev.p99 = Math.max(prev.p99, d.p99); }
+                          }
+                          const topFailedDeps = Array.from(grouped.values()).sort((a, b) => b.count - a.count).slice(0, 10);
+                          return (
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9, paddingTop: 4 }}>
+                          <thead>
+                            <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                              <td style={{ padding: '0 12px 3px 8px' }}>Metric</td>
+                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Total</td>
+                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Failed</td>
+                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Failure Rate</td>
+                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>P95</td>
+                              <td style={{ padding: '0 8px 3px 0', textAlign: 'right' }}>P99</td>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr
+                              style={{ borderTop: '1px solid rgba(255,255,255,0.04)', cursor: topFailedDeps.length > 0 ? 'pointer' : 'default' }}
+                              onClick={() => topFailedDeps.length > 0 && setFailedDepsInsightOpen(v => !v)}
+                              onMouseEnter={e => topFailedDeps.length > 0 && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                            >
+                              <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>
+                                Dependencies{topFailedDeps.length > 0 && (failedDepsInsightOpen ? <ChevronDown size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} /> : <ChevronRight size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} />)}
+                              </td>
+                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{ins.totalDependencies.toLocaleString()}</td>
+                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.failedDependencies > 0 ? '#f85149' : '#484f58' }}>{ins.failedDependencies.toLocaleString()}</td>
+                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.dependencyFailureRate > 10 ? '#f85149' : ins.dependencyFailureRate > 5 ? '#d29922' : '#3fb950' }}>{fmtPct(ins.dependencyFailureRate)}</td>
+                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{fmtMs(ins.dependencyP95)}</td>
+                              <td style={{ padding: '4px 8px 4px 0', textAlign: 'right', color: ins.dependencyP99 > 15000 ? '#f85149' : ins.dependencyP99 > 8000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.dependencyP99)}</td>
+                            </tr>
+                            {failedDepsInsightOpen && topFailedDeps.map((d, i) => (
+                              <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(255,255,255,0.01)' }}>
+                                <td style={{ padding: '3px 12px 3px 20px', color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${d.name} · ${d.type}`}>{d.name}</td>
+                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{d.totalCount.toLocaleString()}</td>
+                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#f85149', whiteSpace: 'nowrap' }}>{d.count.toLocaleString()}</td>
+                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: d.totalCount > 0 ? (d.count / d.totalCount * 100 > 10 ? '#f85149' : d.count / d.totalCount * 100 > 5 ? '#d29922' : '#3fb950') : '#484f58', whiteSpace: 'nowrap' }}>{d.totalCount > 0 ? fmtPct(d.count / d.totalCount * 100) : '—'}</td>
+                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(d.p95)}</td>
+                                <td style={{ padding: '3px 8px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(d.p99)}</td>
+                              </tr>
+                            ))}
+                            {(() => {
+                              const topFailedReqs = [...(metrics.requestInsights?.failedUrls ?? [])].sort((a, b) => b.count - a.count).slice(0, 10);
+                              return (
+                                <>
+                                  <tr
+                                    style={{ borderTop: '1px solid rgba(255,255,255,0.04)', cursor: topFailedReqs.length > 0 ? 'pointer' : 'default' }}
+                                    onClick={() => topFailedReqs.length > 0 && setFailedReqInsightOpen(v => !v)}
+                                    onMouseEnter={e => topFailedReqs.length > 0 && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                  >
+                                    <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>
+                                      Requests{topFailedReqs.length > 0 && (failedReqInsightOpen ? <ChevronDown size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} /> : <ChevronRight size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} />)}
+                                    </td>
+                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{ins.totalRequests.toLocaleString()}</td>
+                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.failedRequests > 0 ? '#f85149' : '#484f58' }}>{ins.failedRequests.toLocaleString()}</td>
+                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.requestFailureRate > 20 ? '#f85149' : ins.requestFailureRate > 5 ? '#d29922' : '#3fb950' }}>{fmtPct(ins.requestFailureRate)}</td>
+                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.requestP95 > 3000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.requestP95)}</td>
+                                    <td style={{ padding: '4px 8px 4px 0', textAlign: 'right', color: ins.requestP99 > 60000 ? '#f85149' : ins.requestP99 > 30000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.requestP99)}</td>
+                                  </tr>
+                                  {failedReqInsightOpen && topFailedReqs.map((r, i) => (
+                                    <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(255,255,255,0.01)' }}>
+                                      <td style={{ padding: '3px 12px 3px 20px', color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.url}>{r.url}</td>
+                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{r.totalCount.toLocaleString()}</td>
+                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#f85149', whiteSpace: 'nowrap' }}>{r.count.toLocaleString()}</td>
+                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: r.totalCount > 0 ? (r.count / r.totalCount * 100 > 20 ? '#f85149' : r.count / r.totalCount * 100 > 5 ? '#d29922' : '#3fb950') : '#484f58', whiteSpace: 'nowrap' }}>{r.totalCount > 0 ? fmtPct(r.count / r.totalCount * 100) : '—'}</td>
+                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(r.p95)}</td>
+                                      <td style={{ padding: '3px 8px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(r.p99)}</td>
+                                    </tr>
+                                  ))}
+                                </>
+                              );
+                            })()}
+                            <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                              <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>Socket Exceptions</td>
+                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.socketExceptions > 0 ? '#f85149' : '#484f58' }}>{ins.socketExceptions.toLocaleString()}</td>
+                              <td colSpan={4} />
+                            </tr>
+                          </tbody>
+                        </table>
+                        );
+                        })()}
+                        {ins.socketExceptions > 0 && (
+                          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                            <div
+                              style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', marginBottom: socketExInsightOpen ? 6 : 0 }}
+                              onClick={() => setSocketExInsightOpen(v => !v)}
+                            >
+                              {socketExInsightOpen ? <ChevronDown size={10} style={{ color: '#484f58' }} /> : <ChevronRight size={10} style={{ color: '#484f58' }} />}
+                              <span style={{ fontSize: 9, color: '#484f58', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                                Socket Exceptions
+                              </span>
+                            </div>
+                            {socketExInsightOpen && (
+                              <div style={{ paddingLeft: 8, paddingTop: 4 }}>
+                                <div style={{ fontSize: 9, color: '#8b9ab3', marginBottom: 4 }}>
+                                  <span style={{ color: '#f85149', fontWeight: 700 }}>{ins.socketExceptions.toLocaleString()}</span> socket exception{ins.socketExceptions !== 1 ? 's' : ''} detected in the selected time range.
+                                </div>
+                                <div style={{ fontSize: 9, color: '#484f58', lineHeight: 1.5 }}>
+                                  Socket exceptions indicate SNAT port exhaustion or connection pool saturation. Individual records are not tracked — check Azure SNAT metrics and connection pool configuration for root cause.
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                          <div
+                            style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', marginBottom: legendOpen ? 6 : 0 }}
+                            onClick={() => setLegendOpen(v => !v)}
+                          >
+                            {legendOpen ? <ChevronDown size={10} style={{ color: '#484f58' }} /> : <ChevronRight size={10} style={{ color: '#484f58' }} />}
+                            <span style={{ fontSize: 9, color: '#484f58', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Detection Legend</span>
+                          </div>
+                          {legendOpen && <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
+                            <thead>
+                              <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                                <td style={{ padding: '0 12px 6px 8px' }}>Condition</td>
+                                <td style={{ padding: '0 12px 6px 8px', whiteSpace: 'nowrap' }}>Threshold</td>
+                                <td style={{ padding: '0 8px 6px 8px' }}>Diagnosis</td>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[
+                                { cond: 'Dependency Failure Rate > 15% + Dependency P99 > 15s + Socket Exceptions > 0', label: 'Critical', color: '#f85149', diag: 'SNAT/socket exhaustion' },
+                                { cond: 'Dependency Failure Rate > 10% + Socket Exceptions > 0',                        label: 'High',     color: '#f85149', diag: 'Socket pressure + fast-fail rejections' },
+                                { cond: 'Dependency Failure Rate > 15% + Dependency P99 > 10s',                         label: 'High',     color: '#f85149', diag: 'Slow & failing dependencies' },
+                                { cond: 'Dependency Failure Rate > 10% + Dependency P99 > 8s',                          label: 'Elevated', color: '#d29922', diag: 'Intermittent dep unresponsiveness' },
+                                { cond: 'Request P99 > 60s + Request Failure Rate < 5%',                                label: 'Warning',  color: '#d29922', diag: 'Extreme latency, resource saturation' },
+                                { cond: 'Request P99 > 30s',                                                            label: 'Warning',  color: '#d29922', diag: 'Severe tail latency / intermittent outage' },
+                                { cond: 'Dependency Failure Rate > 5% + Dependency P95 > 5s',                           label: 'Warning',  color: '#d29922', diag: 'Partial dep degradation (slow + failing)' },
+                                { cond: 'Dependency Failure Rate > 5%',                                                 label: 'Warning',  color: '#d29922', diag: 'Fast-fail rejections (quota/circuit-breaker)' },
+                                { cond: 'Request P95 > 3s + Request Failure Rate < 2%',                                 label: 'Info',     color: '#58a6ff', diag: 'Load pressure, latency climbing' },
+                                { cond: 'Request Failure Rate > 20%',                                                   label: 'Critical', color: '#f85149', diag: 'Major application failure' },
+                                { cond: 'Request Failure Rate > 5%',                                                    label: 'Warning',  color: '#d29922', diag: 'Elevated request error rate' },
+                              ].map((r, i) => (
+                                <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                                  <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>{r.cond}</td>
+                                  <td style={{ padding: '4px 12px 4px 8px', color: r.color, whiteSpace: 'nowrap', fontWeight: 600 }}>{r.label}</td>
+                                  <td style={{ padding: '4px 8px 4px 8px', color: '#8b9ab3' }}>{r.diag}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })()}
           </tbody>
         </table>
         </div>
@@ -1079,7 +1268,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                   requestsSeries: m.requestsSeries ?? null,
                                   failedRequestsSeries: m.failedRequestsSeries ?? null,
                                   http4xxSeries: m.http4xxSeries ?? null,
-                                  responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max } : null,
+                                  responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max, p99: m.responseTime.p99, series: m.responseTime.series } : null,
                                   requests: m.requests ?? null,
                                   failedRequests: m.failedRequests ?? null,
                                   requestInsights: m.requestInsights ?? null,
@@ -1206,8 +1395,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               <button
                 onClick={() => reportActionsRef.current?.copy()}
                 disabled={popupChartLoading || detectorLoading}
-                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600 }}
-              >Copy Text</button>
+                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: `1px solid ${textCopied ? '#3fb95055' : '#30363d'}`, background: textCopied ? '#3fb95011' : '#161b22', color: textCopied ? '#3fb950' : (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600, transition: 'all 0.2s ease' }}
+              >{textCopied ? '✓ Copied!' : 'Copy Text'}</button>
               <button
                 onClick={() => reportActionsRef.current?.pdf()}
                 disabled={popupChartLoading || detectorLoading}
@@ -1329,9 +1518,10 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             if (!deps?.length) return null;
             const grouped = new Map<string, { name: string; type: string; target: string; count: number; totalDur: number; times: number }>();
             for (const d of deps) {
-              const k = d.name + '||' + d.type;
+              const baseName = stripQs(d.name);
+              const k = baseName + '||' + d.type;
               const prev = grouped.get(k);
-              if (!prev) grouped.set(k, { name: d.name, type: d.type, target: d.target, count: d.failCount, totalDur: d.avgDuration, times: 1 });
+              if (!prev) grouped.set(k, { name: baseName, type: d.type, target: d.target, count: d.failCount, totalDur: d.avgDuration, times: 1 });
               else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
             }
             const list = Array.from(grouped.values()).sort((a, b) => b.count - a.count);
@@ -1516,8 +1706,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                         {failedUrls.map((u, i) => (
                           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#8b9ab3' }} title={u.url}>{u.url}</span>
-                            <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.rpm} rpm</span>
-                            <span style={{ flexShrink: 0, color: '#484f58', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()}</span>
+                            <span style={{ flexShrink: 0, color: '#484f58', fontVariantNumeric: 'tabular-nums' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
+                            <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()} failed</span>
                           </div>
                         ))}
                       </div>
@@ -1630,9 +1820,12 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
 
             const inRange  = (series: Array<{ t: string; v: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.v);
             const inRangeC = (series: Array<{ t: string; count: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).reduce((a, p) => a + p.count, 0);
+            const inRangeCB = (series: Array<{ t: string; count: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.count);
             const avg  = (v: number[]) => v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null;
             const maxV = (v: number[]) => v.length ? +Math.max(...v).toFixed(1) : null;
             const minV = (v: number[]) => v.length ? +Math.min(...v).toFixed(1) : null;
+
+            const p99V = (v: number[]) => { if (!v.length) return null; const s = [...v].sort((a, b) => a - b); return +s[Math.ceil(s.length * 0.99) - 1].toFixed(1); };
 
             const cpuBefore = inRange(chartCpu.series, ivStart - PRE, ivStart);
             const cpuDuring = inRange(chartCpu.series, ivStart, ivEnd);
@@ -1646,13 +1839,19 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             const availDuring = availPts.length ? +(availPts.reduce((a, p) => a + p.v, 0) / availPts.length).toFixed(1) : null;
             const rt = popupChartData?.responseTime ?? metrics.responseTime;
             const reqSpikePct = reqBefore > 0 ? Math.round((reqDuring - reqBefore) / reqBefore * 100) : null;
+            const reqBucketsBefore = inRangeCB(reqSeries, ivStart - PRE, ivStart);
+            const reqBucketsDuring = inRangeCB(reqSeries, ivStart, ivEnd);
+            const rtSeries = rt?.series ?? [];
+            const rtBucketsBefore = rtSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivStart; }).map(p => p.avg);
+            const rtBucketsDuring = rtSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; }).map(p => p.avg);
 
             // Deps grouped
             const depMap = new Map<string, { name: string; type: string; count: number; totalDur: number; times: number }>();
             for (const d of chartDeps ?? []) {
-              const k = d.name + '||' + d.type;
+              const baseName = stripQs(d.name);
+              const k = baseName + '||' + d.type;
               const prev = depMap.get(k);
-              if (!prev) depMap.set(k, { name: d.name, type: d.type, count: d.failCount, totalDur: d.avgDuration, times: 1 });
+              if (!prev) depMap.set(k, { name: baseName, type: d.type, count: d.failCount, totalDur: d.avgDuration, times: 1 });
               else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
             }
             const deps = Array.from(depMap.values()).sort((a, b) => b.count - a.count).slice(0, 5);
@@ -1727,13 +1926,17 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               L.push('Metric           Before (5m)    During');
               const pad = (s: string | null, w = 14) => String(s ?? '—').padEnd(w);
               L.push(`CPU avg          ${pad(`${avg(cpuBefore) ?? '—'}%`)}${avg(cpuDuring) ?? '—'}%`);
-              L.push(`CPU max          ${pad(`${maxV(cpuBefore) ?? '—'}%`)}${maxV(cpuDuring) ?? '—'}%`);
+              L.push(`CPU p99          ${pad(`${p99V(cpuBefore) ?? '—'}%`)}${p99V(cpuDuring) ?? '—'}%`);
               L.push(`Mem avg          ${pad(`${avg(memBefore) ?? '—'}%`)}${avg(memDuring) ?? '—'}%`);
-              L.push(`Mem max          ${pad(`${maxV(memBefore) ?? '—'}%`)}${maxV(memDuring) ?? '—'}%`);
-              if (reqBefore > 0 || reqDuring > 0) L.push(`Requests         ${pad(reqBefore.toLocaleString())}${reqDuring.toLocaleString()}`);
-              if (failBefore > 0 || failDuring > 0) L.push(`Failed req       ${pad(failBefore.toLocaleString())}${failDuring.toLocaleString()}`);
-              if (availDuring != null) L.push(`Availability     ${pad('—')}${availDuring}%`);
-              if (rt) L.push(`Response time    ${pad('—')}avg ${rt.avg}s / max ${rt.max}s`);
+              L.push(`Mem p99          ${pad(`${p99V(memBefore) ?? '—'}%`)}${p99V(memDuring) ?? '—'}%`);
+              if (reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0) {
+                L.push(`Req avg          ${pad(`${avg(reqBucketsBefore) ?? '—'}`)}${avg(reqBucketsDuring) ?? '—'}`);
+                L.push(`Req p99          ${pad(`${p99V(reqBucketsBefore) ?? '—'}`)}${p99V(reqBucketsDuring) ?? '—'}`);
+              }
+              if (rt) {
+                L.push(`Resp avg         ${pad(avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—')}${avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—'}`);
+                L.push(`Resp p99         ${pad(p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—')}${p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'}`);
+              }
               L.push('');
               L.push('2. ROOT CAUSE ANALYSIS');
               L.push(sep());
@@ -1763,7 +1966,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 if (reqBefore > 0 || reqDuring > 0) L.push(`  Requests: ${reqBefore.toLocaleString()} before → ${reqDuring.toLocaleString()} during${reqSpikePct != null ? ` (${reqSpikePct > 0 ? '+' : ''}${reqSpikePct}%)` : ''}`);
                 if (failBefore > 0 || failDuring > 0) L.push(`  Failures: ${failBefore.toLocaleString()} before → ${failDuring.toLocaleString()} during`);
                 if (ri?.urls?.length) { L.push('  Top Endpoints:'); ri.urls.slice(0, 5).forEach(u => L.push(`    ${u.rpm} rpm  ${u.count}  ${u.url}`)); }
-                if (ri?.failedUrls?.length) { L.push('  Failed Endpoints:'); ri.failedUrls.slice(0, 5).forEach(u => L.push(`    ${u.rpm} rpm  ${u.count}  ${u.url}`)); }
+                if (ri?.failedUrls?.length) { L.push('  Failed Endpoints:'); ri.failedUrls.slice(0, 5).forEach(u => L.push(`    ${u.count} failed  ${u.url}`)); }
                 if (preHfTop5.length > 0) { L.push('  High Freq (−5min→end):'); preHfTop5.forEach(h => { const fmtTs = (iso: string) => new Date(iso).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' }); const tr = h.lastSeen ? `${fmtTs(h.timestamp)} → ${fmtTs(h.lastSeen)}` : fmtTs(h.timestamp); L.push(`    ${h.ip}  ${h.country ?? ''}  ${tr}  ${h.count.toLocaleString()} reqs  ${h.rpm} rpm  UA: ${h.userAgent || '?'}`); }); }
               }
               if (events.length > 0) {
@@ -1809,10 +2012,287 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               setTimeout(() => { try { document.body.removeChild(iframe); } catch {} }, 2000);
             };
 
+            const generateMd = () => {
+              const nl = '\n';
+              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms / 60000).toFixed(1)}m` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+              const tbl = (headers: string[], rows: (string | number | null)[][]) => {
+                if (!rows.length) return '';
+                const escape = (v: string | number | null) => String(v == null ? '—' : v).replace(/\|/g, '\\|');
+                const h = `| ${headers.map(escape).join(' | ')} |`;
+                const sep2 = `| ${headers.map(() => '---').join(' | ')} |`;
+                const body = rows.map(r => `| ${r.map(escape).join(' | ')} |`).join(nl);
+                return [h, sep2, body].join(nl);
+              };
+              const fmtSgtFull = (iso: string) => new Date(iso).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              const M: string[] = [];
+              const ins2 = metrics.requestInsights?.insight;
+              const ri2 = popupChartData?.requestInsights;
+
+              // Frontmatter
+              M.push('---');
+              M.push(`app: ${appKey}`);
+              M.push(`type: ${metrics.type === 'appservice' ? 'App Service' : 'Container App'}${metrics.plan ? ` · ${metrics.plan.sku} · ${metrics.plan.cores}c` : ''}`);
+              M.push(`incident_date: ${date}`);
+              M.push(`incident_window_sgt: "${timeRange}"`);
+              M.push(`duration: ${dur}`);
+              M.push(`severity: ${severity}`);
+              M.push(`classification: ${causeLabel ?? 'Unknown'}`);
+              M.push(`generated: ${sgtFull(Date.now())} SGT`);
+              M.push('---');
+              M.push('');
+              M.push(`# Incident Report — ${appKey}`);
+              M.push('');
+              M.push('> Incident telemetry from Azure Monitor and App Insights.');
+              M.push('> Feed this file with the project codebase to an AI assistant for root cause analysis and recommendations.');
+              M.push('');
+
+              // App Profile
+              M.push('## App Profile');
+              M.push('');
+              M.push(`- **Name**: ${appKey}`);
+              M.push(`- **Type**: ${metrics.type === 'appservice' ? 'App Service' : 'Container App'}`);
+              if (metrics.plan) M.push(`- **Plan**: ${metrics.plan.sku} · ${metrics.plan.cores} cores · ${metrics.plan.memoryMB} MB RAM`);
+              if (metrics.instances?.length) M.push(`- **Instances**: ${metrics.instances.length} (${metrics.instances.map(i => i.name.split('_').slice(-1)[0]).join(', ')})`);
+              if (ins2?.summary) M.push(`- **Assessment**: ${ins2.summary}`);
+              M.push(`- **Incident Description**: ${plainEnglish}`);
+              M.push('');
+
+              // 1. Metrics Snapshot
+              M.push('## 1. Metrics Snapshot');
+              M.push('');
+              M.push(tbl(
+                ['Metric', 'Before Avg', 'Before P99', 'During Avg', 'During P99'],
+                [
+                  ['CPU', avg(cpuBefore) != null ? `${avg(cpuBefore)}%` : '—', p99V(cpuBefore) != null ? `${p99V(cpuBefore)}%` : '—', avg(cpuDuring) != null ? `${avg(cpuDuring)}%` : '—', p99V(cpuDuring) != null ? `${p99V(cpuDuring)}%` : '—'],
+                  ['Memory', avg(memBefore) != null ? `${avg(memBefore)}%` : '—', p99V(memBefore) != null ? `${p99V(memBefore)}%` : '—', avg(memDuring) != null ? `${avg(memDuring)}%` : '—', p99V(memDuring) != null ? `${p99V(memDuring)}%` : '—'],
+                  ...(reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0 ? [
+                    ['Requests', String(avg(reqBucketsBefore) ?? '—'), String(p99V(reqBucketsBefore) ?? '—'), String(avg(reqBucketsDuring) ?? '—'), String(p99V(reqBucketsDuring) ?? '—')],
+                  ] : []),
+                  ...(rt ? [
+                    ['Response Time', avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—', p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—', avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—', p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'],
+                  ] : []),
+                ]
+              ));
+              M.push('');
+
+              // Overall metrics (from main card data)
+              M.push('**Overall period metrics (full selected range):**');
+              M.push('');
+              M.push(tbl(
+                ['Metric', 'Avg', 'P99', 'Max'],
+                [
+                  ['CPU', `${(+metrics.cpu.avg).toFixed(2)}%`, `${(+(metrics.cpu.p99 ?? 0)).toFixed(2)}%`, `${(+metrics.cpu.max).toFixed(2)}%`],
+                  ['Memory', `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, `${(+(metrics.memory.p99 ?? 0)).toFixed(2)}${metrics.memUnit}`, `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`],
+                  ...(metrics.responseTime ? [['Response Time', `${metrics.responseTime.avg}s`, metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—', `${metrics.responseTime.max}s`]] : []),
+                  ...(metrics.requests ? [['Total Requests', metrics.requests.total.toLocaleString(), '—', '—']] : []),
+                  ...(metrics.availability ? [['Availability', `${metrics.availability.pct.toFixed(2)}%`, '—', '—']] : []),
+                  ...(availDuring != null ? [['Availability During', `${availDuring}%`, '—', '—']] : []),
+                ]
+              ));
+              M.push('');
+
+              // 2. Root Cause
+              M.push('## 2. Root Cause Analysis');
+              M.push('');
+              M.push(`- **Primary**: ${(causeLabel ?? reasons.join(', ')) || 'Unknown'}`);
+              if (causeDetail) M.push(`- **Signals**: ${causeDetail.signals}`);
+              if (factors.length > 0) {
+                M.push('- **Contributing Factors**:');
+                factors.forEach(f => M.push(`  - ${f}`));
+              }
+              if (firstSig) M.push(`- **First Signal**: ${sgtTime(firstSig.t)} SGT — ${firstSig.label}`);
+              M.push('');
+
+              // 3. Dependency Failures
+              if (deps.length > 0) {
+                M.push('## 3. Dependency Failures');
+                M.push('');
+                M.push(tbl(
+                  ['Type', 'Name', 'Fail Count', 'Avg Duration'],
+                  deps.map(d => [d.type, d.name, d.count, fmtDur(d.totalDur / d.times)])
+                ));
+                M.push('');
+              }
+
+              // 4. Instance Health
+              if (instStats.length > 0) {
+                M.push('## 4. Instance Health');
+                M.push('');
+                M.push(tbl(
+                  ['Instance', 'Status', 'Before Avg', 'During Avg', 'During Min'],
+                  instStats.map(i => [i.shortName, i.color === '#3fb950' ? 'Healthy' : i.color === '#d29922' ? 'Degraded' : 'Critical', i.beforeAvg != null ? `${i.beforeAvg}%` : '—', i.duringAvg != null ? `${i.duringAvg}%` : '—', i.duringMin != null ? `${i.duringMin}%` : '—'])
+                ));
+                M.push('');
+              }
+
+              // 5. Health Probes
+              const failProbes = probeStats.filter(p => p.failures > 0);
+              if (failProbes.length > 0) {
+                M.push('## 5. Health Probes');
+                M.push('');
+                M.push(`Total failures: ${probeStats.reduce((a, p) => a + p.failures, 0)} across ${failProbes.length} instance(s)`);
+                M.push('');
+                M.push(tbl(
+                  ['Instance', 'Failures', 'Total Checks', 'Min %', 'Avg %', 'Fail Times (SGT)'],
+                  failProbes.map(p => [p.shortName, p.failures, p.total, p.minPct ?? '—', p.avgPct ?? '—', p.failTimes.map(t => sgtTime(t)).join(', ')])
+                ));
+                M.push('');
+              }
+
+              // 6. Traffic Analysis
+              if (reqBefore > 0 || reqDuring > 0 || ri2?.urls?.length || ri2?.failedUrls?.length || hfAll.length > 0) {
+                M.push('## 6. Traffic Analysis');
+                M.push('');
+                if (reqBefore > 0 || reqDuring > 0) {
+                  M.push(`- **Requests**: ${reqBefore.toLocaleString()} before → ${reqDuring.toLocaleString()} during${reqSpikePct != null ? ` (${reqSpikePct > 0 ? '+' : ''}${reqSpikePct}% change)` : ''}`);
+                  if (failBefore > 0 || failDuring > 0) M.push(`- **Failures**: ${failBefore.toLocaleString()} before → ${failDuring.toLocaleString()} during`);
+                }
+                if (metrics.requests) M.push(`- **Total Requests (full range)**: ${metrics.requests.total.toLocaleString()}${metrics.failedRequests ? ` · ${metrics.failedRequests.total.toLocaleString()} failed` : ''}`);
+                M.push('');
+
+                if (ri2?.urls?.length) {
+                  M.push('**Top Endpoints by Volume:**');
+                  M.push('');
+                  M.push(tbl(['URL', 'RPM', 'Count'], ri2.urls.map(u => [u.url, u.rpm, u.count])));
+                  M.push('');
+                }
+                if (ri2?.failedUrls?.length) {
+                  M.push('**Failed Endpoints:**');
+                  M.push('');
+                  M.push(tbl(['URL', 'Failed', 'Total', 'Failure Rate'], ri2.failedUrls.map(u => [u.url, u.count, u.totalCount, u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'])));
+                  M.push('');
+                }
+                if (ri2?.slowUrls?.length) {
+                  M.push('**Slow Endpoints:**');
+                  M.push('');
+                  M.push(tbl(['URL', 'Avg (ms)', 'P99 (ms)', 'Max (ms)', 'Count'], ri2.slowUrls.map(u => [u.url, u.avgMs, u.p99Ms, u.maxMs, u.count])));
+                  M.push('');
+                }
+                if (ri2?.ips?.length) {
+                  M.push('**Top IP Addresses:**');
+                  M.push('');
+                  M.push(tbl(['IP', 'RPM', 'Count'], ri2.ips.map(u => [u.ip, u.rpm, u.count])));
+                  M.push('');
+                }
+                if (ri2?.userAgents?.length) {
+                  M.push('**Top User Agents:**');
+                  M.push('');
+                  M.push(tbl(['User Agent', 'RPM', 'Count'], ri2.userAgents.map(u => [u.userAgent, u.rpm, u.count])));
+                  M.push('');
+                }
+                if (ri2?.bots?.length) {
+                  M.push('**Bots / Crawlers:**');
+                  M.push('');
+                  M.push(tbl(['User Agent', 'RPM', 'Count'], ri2.bots.map(u => [u.userAgent, u.rpm, u.count])));
+                  M.push('');
+                }
+                // Full high-freq traffic list (all, pre-incident window)
+                const hfWindow = hfAll.filter(h => {
+                  const t = new Date(h.timestamp).getTime();
+                  return t >= ivStart - 5 * 60 * 1000 && t <= ivEnd;
+                }).sort((a, b) => b.rpm - a.rpm);
+                if (hfWindow.length > 0) {
+                  M.push('**High-Frequency Traffic (−5 min → incident end):**');
+                  M.push('');
+                  M.push(tbl(
+                    ['IP / ID', 'Country', 'RPM', 'Total Requests', 'Window (SGT)', 'User Agent'],
+                    hfWindow.map(h => {
+                      const start = fmtSgtFull(h.timestamp);
+                      const end = h.lastSeen ? fmtSgtFull(h.lastSeen) : start;
+                      return [h.ip || '(unknown)', h.country ?? '—', h.rpm, h.count, `${start} → ${end}`, h.userAgent || '(unknown)'];
+                    })
+                  ));
+                  M.push('');
+                }
+              }
+
+              // 7. Timeline
+              if (events.length > 0) {
+                M.push('## 7. Timeline (SGT)');
+                M.push('');
+                events.forEach(e => M.push(`- \`${sgtTime(e.t)}\` ${e.icon} ${e.label}`));
+                M.push('');
+              }
+
+              // 8. Detector Analysis
+              if (detectorData && !detectorLoading) {
+                const visCats = detectorData.categories.filter(cat => cat.queries.some(q => q.result.rows.length > 0 || q.result.error));
+                if (visCats.length > 0) {
+                  M.push('## 8. Detector Analysis');
+                  M.push('');
+                  for (const cat of visCats) {
+                    M.push(`### ${cat.label}`);
+                    M.push('');
+                    for (const q of cat.queries.filter(qq => qq.result.rows.length > 0 || qq.result.error)) {
+                      M.push(`**${q.name}**`);
+                      M.push('');
+                      if (q.result.error) {
+                        M.push(`_Error: ${q.result.error}_`);
+                      } else if (q.result.columns.length === 1 && q.result.columns[0] === 'IncidentSummary') {
+                        M.push(`> ${String(q.result.rows[0]?.[0] ?? '—')}`);
+                      } else {
+                        const t = tbl(q.result.columns, q.result.rows);
+                        if (t) M.push(t);
+                      }
+                      M.push('');
+                    }
+                  }
+                }
+              }
+
+              // 9. App Insights Analysis
+              if (ins2) {
+                M.push('## 9. App Insights Analysis (Full Range)');
+                M.push('');
+                M.push(tbl(
+                  ['Metric', 'Value'],
+                  [
+                    ['Total Dependencies', ins2.totalDependencies.toLocaleString()],
+                    ['Failed Dependencies', `${ins2.failedDependencies.toLocaleString()} (${ins2.dependencyFailureRate.toFixed(2)}%)`],
+                    ['Dep P95 / P99', `${fmtMs(ins2.dependencyP95)} / ${fmtMs(ins2.dependencyP99)}`],
+                    ['Total Requests', ins2.totalRequests.toLocaleString()],
+                    ['Failed Requests', `${ins2.failedRequests.toLocaleString()} (${ins2.requestFailureRate.toFixed(2)}%)`],
+                    ['Req P95 / P99', `${fmtMs(ins2.requestP95)} / ${fmtMs(ins2.requestP99)}`],
+                    ['Socket Exceptions', ins2.socketExceptions.toLocaleString()],
+                    ['Assessment', ins2.summary],
+                  ]
+                ));
+                M.push('');
+              }
+
+              // AI prompt
+              M.push('---');
+              M.push('');
+              M.push('## AI Analysis Request');
+              M.push('');
+              M.push('You are analyzing a production incident for the application described above.');
+              M.push('Using this incident report **together with the project codebase**, please provide:');
+              M.push('');
+              M.push('1. **Root Cause** — What most likely caused this incident? Cite specific metrics or signals from this report.');
+              M.push('2. **Affected Code** — Which files, modules, or components in the codebase are most likely involved or contributed to the issue?');
+              M.push('3. **Immediate Fix** — What is the fastest safe remediation to stop recurrence?');
+              M.push('4. **Long-term Enhancements** — What architectural, configuration, or code changes would prevent this class of incident?');
+              M.push('5. **Monitoring Gaps** — What additional metrics, alerts, or dashboards would have caught this earlier?');
+              M.push('6. **Risk Assessment** — Are there other latent risks visible in this data that have not yet caused an incident?');
+              M.push('');
+              M.push('Be specific. Reference file names, function names, or configuration keys where possible.');
+              M.push('');
+              M.push(`_Generated by DevForge · ${sgtFull(Date.now())} SGT_`);
+              return M.join(nl);
+            };
+
+            const copyMd = () => {
+              navigator.clipboard.writeText(generateMd()).then(() => {
+                setMdCopied(true);
+                setTimeout(() => setMdCopied(false), 2000);
+              });
+            };
+
             // Wire actions to ref so popup header can call them
             reportActionsRef.current = {
-              copy: () => navigator.clipboard.writeText(generateText()),
+              copy: () => navigator.clipboard.writeText(generateText()).then(() => { setTextCopied(true); setTimeout(() => setTextCopied(false), 2000); }),
               pdf:  exportPDF,
+              downloadMd: copyMd,
             };
 
             // Shared styles
@@ -1827,33 +2307,66 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 <span style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.05)', display: 'inline-block' }} />
               </div>
             );
-            const TRow = ({ label, before, during, dc }: { label: string; before: string | null; during: string | null; dc?: string }) => (
-              <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>{label}</td>
-                <td style={{ padding: '3px 12px', textAlign: 'right', color: sub, fontSize: 10, fontVariantNumeric: 'tabular-nums' }}>{before ?? '—'}</td>
-                <td style={{ padding: '3px 0', textAlign: 'right', color: dc ?? '#e6edf3', fontSize: 10, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{during ?? '—'}</td>
-              </tr>
-            );
+            const bCell = (v: string | null) => ({ padding: '3px 4px', textAlign: 'right' as const, color: sub, fontSize: 10, fontVariantNumeric: 'tabular-nums' as const });
+            const dCell = (c?: string) => ({ padding: '3px 4px', textAlign: 'right' as const, color: c ?? '#e6edf3', fontSize: 10, fontVariantNumeric: 'tabular-nums' as const, fontWeight: 600 });
+            const divider = { borderLeft: '1px solid rgba(255,255,255,0.08)' };
 
             return (
               <div style={{ marginTop: 0 }}>
                 {/* 1. Metrics Snapshot */}
                 <SecHead n="1." label="Metrics Snapshot" color="#3fb950" />
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead><tr style={{ color: dim, fontSize: 9, fontWeight: 700 }}>
-                    <th style={{ textAlign: 'left', padding: '2px 0' }} />
-                    <th style={{ textAlign: 'right', padding: '2px 12px' }}>Before (5m)</th>
-                    <th style={{ textAlign: 'right', padding: '2px 0', color: sub }}>During</th>
-                  </tr></thead>
+                  <thead>
+                    <tr style={{ fontSize: 9, fontWeight: 700 }}>
+                      <th style={{ textAlign: 'left', padding: '2px 0' }} />
+                      <th colSpan={2} style={{ textAlign: 'center', padding: '2px 4px', color: dim, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>Before (5m)</th>
+                      <th colSpan={2} style={{ textAlign: 'center', padding: '2px 0', color: sub, borderBottom: '1px solid rgba(255,255,255,0.06)', ...divider }}>During</th>
+                    </tr>
+                    <tr style={{ fontSize: 9, fontWeight: 700, color: dim }}>
+                      <th style={{ textAlign: 'left', padding: '2px 0' }} />
+                      <th style={{ textAlign: 'right', padding: '2px 4px' }}>avg</th>
+                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>p99</th>
+                      <th style={{ textAlign: 'right', padding: '2px 4px', ...divider }}>avg</th>
+                      <th style={{ textAlign: 'right', padding: '2px 0' }}>p99</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    <TRow label="CPU avg"      before={avg(cpuBefore)  != null ? `${avg(cpuBefore)}%`  : null} during={avg(cpuDuring)  != null ? `${avg(cpuDuring)}%`  : null} dc={cpuCol(avg(cpuDuring))} />
-                    <TRow label="CPU max"      before={maxV(cpuBefore) != null ? `${maxV(cpuBefore)}%` : null} during={maxV(cpuDuring) != null ? `${maxV(cpuDuring)}%` : null} dc={cpuCol(maxV(cpuDuring))} />
-                    <TRow label="Mem avg"      before={avg(memBefore)  != null ? `${avg(memBefore)}%`  : null} during={avg(memDuring)  != null ? `${avg(memDuring)}%`  : null} dc={memCol(avg(memDuring))} />
-                    <TRow label="Mem max"      before={maxV(memBefore) != null ? `${maxV(memBefore)}%` : null} during={maxV(memDuring) != null ? `${maxV(memDuring)}%` : null} dc={memCol(maxV(memDuring))} />
-                    {(reqBefore > 0 || reqDuring > 0) && <TRow label="Requests"  before={reqBefore.toLocaleString()}  during={reqDuring.toLocaleString()}  dc='#58a6ff' />}
-                    {(failBefore > 0 || failDuring > 0) && <TRow label="Failed req" before={failBefore.toLocaleString()} during={failDuring.toLocaleString()} dc={failDuring === 0 ? '#3fb950' : failDuring / (reqDuring || 1) > 0.1 ? 'hsl(var(--destructive))' : '#d29922'} />}
-                    {availDuring != null && <TRow label="Availability" before={null} during={`${availDuring}%`} dc={availDuring >= 99 ? '#3fb950' : availDuring >= 95 ? '#d29922' : 'hsl(var(--destructive))'} />}
-                    {rt != null && <TRow label="Response time" before={null} during={`avg ${rt.avg}s · max ${rt.max}s`} dc='#58a6ff' />}
+                    {/* CPU */}
+                    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                      <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>CPU</td>
+                      <td style={bCell(null)}>{avg(cpuBefore) != null ? `${avg(cpuBefore)}%` : '—'}</td>
+                      <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(cpuBefore) != null ? `${p99V(cpuBefore)}%` : '—'}</td>
+                      <td style={{ ...dCell(cpuCol(avg(cpuDuring))), ...divider }}>{avg(cpuDuring) != null ? `${avg(cpuDuring)}%` : '—'}</td>
+                      <td style={{ ...dCell(cpuCol(p99V(cpuDuring))), padding: '3px 0' }}>{p99V(cpuDuring) != null ? `${p99V(cpuDuring)}%` : '—'}</td>
+                    </tr>
+                    {/* Mem */}
+                    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                      <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Mem</td>
+                      <td style={bCell(null)}>{avg(memBefore) != null ? `${avg(memBefore)}%` : '—'}</td>
+                      <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(memBefore) != null ? `${p99V(memBefore)}%` : '—'}</td>
+                      <td style={{ ...dCell(memCol(avg(memDuring))), ...divider }}>{avg(memDuring) != null ? `${avg(memDuring)}%` : '—'}</td>
+                      <td style={{ ...dCell(memCol(p99V(memDuring))), padding: '3px 0' }}>{p99V(memDuring) != null ? `${p99V(memDuring)}%` : '—'}</td>
+                    </tr>
+                    {/* Requests */}
+                    {(reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0) && (
+                      <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Requests</td>
+                        <td style={bCell(null)}>{avg(reqBucketsBefore) != null ? avg(reqBucketsBefore)!.toLocaleString() : '—'}</td>
+                        <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(reqBucketsBefore) != null ? p99V(reqBucketsBefore)!.toLocaleString() : '—'}</td>
+                        <td style={{ ...dCell('#58a6ff'), ...divider }}>{avg(reqBucketsDuring) != null ? avg(reqBucketsDuring)!.toLocaleString() : '—'}</td>
+                        <td style={{ ...dCell('#58a6ff'), padding: '3px 0' }}>{p99V(reqBucketsDuring) != null ? p99V(reqBucketsDuring)!.toLocaleString() : '—'}</td>
+                      </tr>
+                    )}
+                    {/* Response */}
+                    {rt != null && (
+                      <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Response</td>
+                        <td style={bCell(null)}>{avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—'}</td>
+                        <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—'}</td>
+                        <td style={{ ...dCell('#58a6ff'), ...divider }}>{avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—'}</td>
+                        <td style={{ ...dCell('#58a6ff'), padding: '3px 0' }}>{p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'}</td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
 
@@ -1989,8 +2502,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                             {ri.failedUrls.slice(0, 5).map((u, i) => (
                               <div key={i} style={{ display: 'flex', gap: 8, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
                                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sub }} title={u.url}>{u.url}</span>
-                                <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.rpm} rpm</span>
-                                <span style={{ flexShrink: 0, color: dim, fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()}</span>
+                                <span style={{ flexShrink: 0, color: dim, fontVariantNumeric: 'tabular-nums' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
+                                <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()} failed</span>
                               </div>
                             ))}
                           </div>
@@ -2067,12 +2580,21 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                         return (
                           <div key={cat.id} style={{ marginBottom: 10 }}>
                             <div style={{ fontSize: 9, fontWeight: 700, color: cat.color, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>{cat.label}</div>
-                            {nonempty.map((q, qi) => (
+                            {nonempty.map((q, qi) => {
+                              const hasMsCol = q.result.columns.some(c => /duration|latency|responsetime|processingtime|elapsed/.test(c.toLowerCase()));
+                              return (
                               <div key={qi} style={{ marginBottom: 6 }}>
                                 <div style={{ fontSize: 9, color: sub, marginBottom: 2 }}>{q.name}</div>
                                 {q.result.error
                                   ? <span style={{ fontSize: 9, color: 'hsl(var(--destructive))' }}>{q.result.error}</span>
+                                  : q.result.columns.length === 1 && q.result.columns[0] === 'IncidentSummary'
+                                  ? (
+                                    <div style={{ fontSize: 10, color: sub, padding: '6px 8px', background: 'rgba(88,166,255,0.06)', borderLeft: '2px solid #58a6ff', borderRadius: 3, lineHeight: 1.5 }}>
+                                      {String(q.result.rows[0]?.[0] ?? '—')}
+                                    </div>
+                                  )
                                   : (
+                                    <>
                                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
                                       {q.result.columns.length > 0 && (
                                         <thead>
@@ -2087,11 +2609,23 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                         {q.result.rows.slice(0, 10).map((row, ri) => (
                                           <tr key={ri} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                                             {row.map((val, ci) => {
+                                              const col = (q.result.columns[ci] ?? '').toLowerCase();
+                                              const isMs = /duration|latency|responsetime|processingtime|elapsed/.test(col) || (/^p\d+$/.test(col) && hasMsCol);
+                                              const isSec = /seconds?$|_s$/.test(col);
+                                              const isPct = /rate$|pct$|percent/.test(col);
                                               const str = val == null ? '—'
-                                                : typeof val === 'number' ? (Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2))
+                                                : typeof val === 'boolean' ? (val ? 'true' : 'false')
                                                 : typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(val)
                                                   ? sgtTime(new Date(val).getTime())
-                                                  : String(val);
+                                                : typeof val === 'number' && isMs
+                                                  ? (val >= 1000 ? `${(val / 1000).toFixed(2)}s` : `${Math.round(val)}ms`)
+                                                : typeof val === 'number' && isSec
+                                                  ? `${val.toFixed(2)}s`
+                                                : typeof val === 'number' && isPct
+                                                  ? `${val.toFixed(1)}%`
+                                                : typeof val === 'number'
+                                                  ? (Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2))
+                                                : String(val);
                                               return (
                                                 <td key={ci} style={{ padding: '2px 6px 2px 0', color: ci === 0 ? sub : dim, maxWidth: ci === 0 ? 200 : 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                                                   {str}
@@ -2105,16 +2639,92 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                         )}
                                       </tbody>
                                     </table>
+                                    {q.name === 'Dependency Duration Spike' && q.result.rows.length > 0 && (() => {
+                                      const cols = q.result.columns;
+                                      const iTarget = cols.findIndex(c => /target/i.test(c));
+                                      const iP99   = cols.findIndex(c => /p99/i.test(c));
+                                      const iP95   = cols.findIndex(c => /p95/i.test(c));
+                                      const iFR    = cols.findIndex(c => /rate/i.test(c));
+                                      if (iP99 < 0) return null;
+                                      type Finding = { target: string; cause: string; color: string };
+                                      const findings: Finding[] = [];
+                                      q.result.rows.forEach(row => {
+                                        const p99  = typeof row[iP99] === 'number' ? row[iP99] as number : 0;
+                                        const p95  = iP95 >= 0 && typeof row[iP95] === 'number' ? row[iP95] as number : 0;
+                                        const fr   = iFR  >= 0 && typeof row[iFR]  === 'number' ? row[iFR]  as number : 0;
+                                        const tgt  = iTarget >= 0 ? String(row[iTarget]).replace(/\s*\|.*/, '') : '';
+                                        const highP99 = p99 > 5000;
+                                        const highFR  = fr > 10;
+                                        const lowDur  = p95 < 1000;
+                                        let cause = ''; let color = dim;
+                                        if (highP99 && highFR)       { cause = 'Timeout Exhaustion';       color = '#f85149'; }
+                                        else if (highP99 && !highFR) { cause = 'Performance Degradation';  color = '#d29922'; }
+                                        else if (highFR && lowDur)   { cause = 'Immediate Rejection';      color = '#f85149'; }
+                                        else if (highFR)             { cause = 'SNAT/Socket Pressure';     color = '#a371f7'; }
+                                        if (cause) findings.push({ target: tgt, cause, color });
+                                      });
+                                      if (!findings.length) return null;
+                                      return (
+                                        <div style={{ marginTop: 5, padding: '4px 6px', background: 'rgba(255,255,255,0.03)', borderRadius: 4, borderLeft: '2px solid #30363d' }}>
+                                          <div style={{ fontSize: 8, color: '#484f58', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>Interpretation</div>
+                                          {findings.map((f, i) => (
+                                            <div key={i} style={{ display: 'flex', gap: 6, fontSize: 9, marginBottom: 2 }}>
+                                              <span style={{ color: f.color, fontWeight: 700, flexShrink: 0 }}>{f.cause}</span>
+                                              <span style={{ color: dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.target}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      );
+                                    })()}
+                                    </>
                                   )
                                 }
                               </div>
-                            ))}
+                            );
+                            })}
                           </div>
                         );
                       })}
                     </>
                   );
                 })()}
+
+                {/* AI Report section */}
+                <div style={{ marginTop: 14, borderTop: '1px solid rgba(88,166,255,0.15)', paddingTop: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: '#58a6ff', letterSpacing: '0.08em', textTransform: 'uppercase' }}>AI Analysis Report</span>
+                      <span style={{ fontSize: 9, color: '#484f58' }}>— Markdown file for AI-assisted root cause analysis</span>
+                    </div>
+                    <button
+                      onClick={() => copyMd()}
+                      style={{ fontSize: 9, padding: '2px 8px', borderRadius: 4, border: `1px solid ${mdCopied ? '#3fb95055' : '#58a6ff55'}`, background: mdCopied ? '#3fb95011' : '#58a6ff11', color: mdCopied ? '#3fb950' : '#58a6ff', cursor: 'pointer', fontWeight: 600, flexShrink: 0, transition: 'all 0.2s ease' }}
+                    >{mdCopied ? '✓ Copied!' : 'Copy AI Report (.md)'}</button>
+                  </div>
+                  <div style={{ fontSize: 9, color: '#484f58', marginBottom: 6, lineHeight: 1.5 }}>
+                    Feed this file together with your project codebase to an AI assistant (Claude, ChatGPT, Gemini) to get:
+                    root cause analysis · fix suggestions · architectural enhancements · monitoring recommendations
+                  </div>
+                  <div style={{ background: '#010409', border: '1px solid rgba(88,166,255,0.12)', borderRadius: 5, padding: '8px 10px', maxHeight: 120, overflowY: 'auto' }}>
+                    <pre style={{ margin: 0, fontSize: 8, color: '#484f58', fontFamily: 'monospace', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{[
+                      `# Incident Report — ${appKey}`,
+                      `Date: ${date} · ${timeRange} SGT · ${dur} · ${severity}`,
+                      `Classification: ${causeLabel ?? 'Unknown'}`,
+                      metrics.requestInsights?.insight?.summary ? `Insight: ${metrics.requestInsights.insight.summary}` : null,
+                      ``,
+                      `Sections included: Metrics Snapshot · Root Cause · Dependencies · Instance Health`,
+                      `  · Health Probes · Traffic Analysis · Timeline · Detector Analysis · App Insights`,
+                      ``,
+                      `## AI Analysis Request`,
+                      `1. Root Cause — cite specific metrics from this report`,
+                      `2. Affected Code — files, modules, components`,
+                      `3. Immediate Fix — fastest safe remediation`,
+                      `4. Long-term Enhancements — prevent recurrence`,
+                      `5. Monitoring Gaps — what alerts would catch this earlier`,
+                      `6. Risk Assessment — other latent risks visible in data`,
+                    ].filter(l => l != null).join('\n')}</pre>
+                  </div>
+                </div>
 
                 {/* Footer */}
                 <div style={{ marginTop: 14, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 9, color: '#333d48', display: 'flex', justifyContent: 'space-between' }}>

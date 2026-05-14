@@ -31,7 +31,7 @@ function getGranularity(range) {
 }
 
 function summarize(data) {
-  if (!data || data.length === 0) return { avg: 0, max: 0, series: [] };
+  if (!data || data.length === 0) return { avg: 0, max: 0, p99: 0, series: [] };
   const series = data.map(d => ({
     t: d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp),
     v: d.average ?? 0,
@@ -39,9 +39,12 @@ function summarize(data) {
   }));
   const avg = series.reduce((s, p) => s + p.v, 0) / series.length;
   const max = Math.max(...series.map(p => p.m));
+  const sorted = [...series.map(p => p.v)].sort((a, b) => a - b);
+  const p99 = sorted.length ? sorted[Math.ceil(sorted.length * 0.99) - 1] : 0;
   return {
     avg: Math.round(avg * 10) / 10,
     max: Math.round(max * 10) / 10,
+    p99: Math.round(p99 * 100) / 100,
     series,
   };
 }
@@ -290,7 +293,7 @@ async function getResponseTime(client, resId, range, granularity, customStart, c
       t: d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp),
       avg: Math.round((d.average ?? 0) * 1000) / 1000,
     }));
-    return { avg: s.avg, max: s.max, series };
+    return { avg: s.avg, max: s.max, p99: s.p99, series };
   } catch {
     return null;
   }
@@ -489,10 +492,13 @@ async function getFailedDependencies(appId, credential, range, customStart, cust
     const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
     const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
     const query = `dependencies
+| extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
 | where success == false
-| extend depType = type, depTarget = target
-| summarize failCount=count(), avgDuration=avg(duration) by name, depType, depTarget, bin(timestamp, 1m)
-| order by timestamp asc`;
+| summarize failCount=count(), p95=percentile(duration, 95), p99=percentile(duration, 99), avgDuration=avg(duration) by nameClean, type, target
+| join kind=leftouter (dependencies | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean, type, target) on nameClean, type, target
+| project name=nameClean, type, target, totalCount=coalesce(totalCount, failCount), failCount, avgDuration, p95, p99
+| order by failCount desc
+| take 50`;
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
@@ -501,13 +507,17 @@ async function getFailedDependencies(appId, credential, range, customStart, cust
     if (!res.ok) return null;
     const data = await res.json();
     const rows = data.tables?.[0]?.rows || [];
-    return rows.map(([name, depType, depTarget, ts, failCount, avgDuration]) => ({
-      t:           new Date(ts).toISOString(),
+    const t = startTime.toISOString();
+    return rows.map(([name, depType, depTarget, totalCount, failCount, avgDuration, p95, p99]) => ({
+      t,
       name:        name      ?? '(unknown)',
       type:        depType   ?? '(unknown)',
       target:      depTarget ?? '',
+      totalCount:  Number(totalCount)  || 0,
       failCount:   Number(failCount)   || 0,
       avgDuration: Math.round(Number(avgDuration) || 0),
+      p95:         Math.round(Number(p95) || 0),
+      p99:         Math.round(Number(p99) || 0),
     }));
   } catch { return null; }
 }
@@ -642,17 +652,52 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   const rpm = (n) => Math.round((n / spanMins) * 100) / 100;
 
-  const [urlRows, ipRows, uaRows, botRows, hfRows, failedUrlRows, slowUrlRows] = await Promise.all([
+  async function runQueryFull(query) {
+    try {
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query, timespan }) });
+      if (!res.ok) { const t = await res.text().catch(() => ''); return { error: `${res.status}: ${t}` }; }
+      const data = await res.json();
+      if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
+      const table = data.tables?.[0];
+      return { columns: table?.columns?.map(c => c.name) ?? [], rows: table?.rows ?? [] };
+    } catch (e) { return { error: e.message }; }
+  }
+
+  const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
+
+  const [urlRows, ipRows, uaRows, botRows, hfRows, failedUrlRows, slowUrlRows, insightResult] = await Promise.all([
     runQuery(`requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ip=iff(isnotempty(client_IP) and client_IP != "::1", client_IP, tostring(customDimensions["Client IP Address"])) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | where ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
     runQuery(`requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=tostring(customDimensions["User-Agent"]) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`),
-    runQuery(`requests | where success == false | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`),
-    runQuery(`requests | summarize avgMs=avg(duration), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), maxMs=round(maxMs,1), count=n`),
+    runQuery(`requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | where success == false | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`),
+    runQuery(`requests | summarize avgMs=avg(duration), p99Ms=percentile(duration,99), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), p99Ms=round(p99Ms,1), maxMs=round(maxMs,1), count=n`),
+    runQueryFull(insightKql),
   ]);
 
   const parseOrErr = (rows, mapper) => Array.isArray(rows) ? rows.map(mapper) : rows;
+
+  let insight = null;
+  if (insightResult && !insightResult.error && insightResult.rows?.length > 0) {
+    const cols = insightResult.columns;
+    const row = insightResult.rows[0];
+    const get = (name) => { const i = cols.indexOf(name); return i >= 0 ? row[i] : null; };
+    insight = {
+      summary:               String(get('IncidentSummary') ?? ''),
+      totalDependencies:     Number(get('TotalDependencies')     ?? 0),
+      failedDependencies:    Number(get('FailedDependencies')    ?? 0),
+      dependencyFailureRate: Number(get('DependencyFailureRate') ?? 0),
+      dependencyP95:         Number(get('DependencyP95')         ?? 0),
+      dependencyP99:         Number(get('DependencyP99')         ?? 0),
+      totalRequests:         Number(get('TotalRequests')         ?? 0),
+      failedRequests:        Number(get('FailedRequests')        ?? 0),
+      requestFailureRate:    Number(get('RequestFailureRate')    ?? 0),
+      requestP95:            Number(get('RequestP95')            ?? 0),
+      requestP99:            Number(get('RequestP99')            ?? 0),
+      socketExceptions:      Number(get('SocketExceptions')      ?? 0),
+    };
+  }
 
   return {
     urls:        parseOrErr(urlRows,       ([url, count, rpm])    => ({ url: String(url),       count: Number(count), rpm: Number(rpm) })),
@@ -660,8 +705,9 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     userAgents:  parseOrErr(uaRows,        ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     bots:        parseOrErr(botRows,       ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     highFreq:    parseOrErr(hfRows,        ([ts, lastSeen, ip, country, ua, count, rpm]) => ({ timestamp: String(ts), lastSeen: String(lastSeen), ip: String(ip), country: String(country), userAgent: String(ua), count: Number(count), rpm: Number(rpm) })),
-    failedUrls:  parseOrErr(failedUrlRows, ([url, count, rpm])    => ({ url: String(url),       count: Number(count), rpm: Number(rpm) })),
-    slowUrls:    parseOrErr(slowUrlRows,   ([url, avgMs, maxMs, count]) => ({ url: String(url), avgMs: Number(avgMs), maxMs: Number(maxMs), count: Number(count) })),
+    failedUrls:  parseOrErr(failedUrlRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
+    slowUrls:    parseOrErr(slowUrlRows,   ([url, avgMs, p99Ms, maxMs, count]) => ({ url: String(url), avgMs: Number(avgMs), p99Ms: Number(p99Ms), maxMs: Number(maxMs), count: Number(count) })),
+    insight,
   };
 }
 
@@ -864,7 +910,7 @@ const DETECTOR_QUERIES = [
     { name: 'Socket Exceptions',
       kql: `exceptions | where {BETWEEN} | where outerMessage has_any ("SocketException","timeout","No buffer space available","actively refused","ENOBUFS") | summarize Count=count() by outerMessage | order by Count desc` },
     { name: 'Dependency Duration Spike',
-      kql: `dependencies | where {BETWEEN} | summarize Failures=countif(success==false), P95=percentile(duration,95) by bin(timestamp,5m) | order by timestamp asc` },
+      kql: `dependencies | where {BETWEEN} | summarize Total=count(), Failed=countif(success==false), DurationP95=percentile(duration,95), DurationP99=percentile(duration,99) by target | extend FailureRate=todouble(Failed)/Total*100 | order by DurationP99 desc` },
   ]},
   { id: 'memory', label: 'Memory Analysis', color: '#58a6ff', queries: [
     { name: 'OOM Exceptions',
@@ -961,7 +1007,10 @@ const handler = (_mainWindow) => {
     const timespan = `${startIso}/${endIso}`;
     const between = `timestamp between (datetime(${startIso}) .. datetime(${endIso}))`;
     const runQuery = makeRunQuery(appInsightsAppId, token, timespan);
-    const sub = (kql) => kql.replace(/\{BETWEEN\}/g, between);
+    const sub = (kql) => kql
+      .replace(/\{BETWEEN\}/g, between)
+      .replace(/\{START\}/g, `datetime(${startIso})`)
+      .replace(/\{END\}/g,   `datetime(${endIso})`);
 
     const categories = await Promise.all(
       DETECTOR_QUERIES.map(async (cat) => ({
