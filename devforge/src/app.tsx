@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
 import { ThemeProvider } from "@/components/provider/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -7,6 +7,8 @@ import { Home } from "lucide-react";
 import { SettingsProvider } from "@/context/settings-context";
 import { SettingsModal } from "@/components/settings/settings-modal";
 import { ReleaseNotesModal } from "@/components/release-notes/release-notes-modal";
+import { UpdateIndicator } from "@/components/updater/update-indicator";
+import { UpdateRestartDialog } from "@/components/updater/update-restart-dialog";
 
 import { pages, renderPage } from "./routes/page-routes";
 import { BuildLabel } from "./components/ui/buildLabel";
@@ -62,14 +64,25 @@ const LAUNCH_STYLES = `
 `;
 
 export default function App() {
-  useAppUpdater();
+  const { info: updateInfo, install: installUpdate } = useAppUpdater();
   const [activePage, setActivePage] = useState<string>("Home");
   const [phase, setPhase] = useState<Phase>("idle");
   const [originStyle, setOriginStyle] = useState<string>("50% 50%");
   const [search, setSearch] = useState<string>("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
+  const [restartPromptOpen, setRestartPromptOpen] = useState(false);
+  const [restartPromptShownFor, setRestartPromptShownFor] = useState<string | null>(null);
+  const [indicatorHidden, setIndicatorHidden] = useState(false);
   const pendingPage = useRef<string>("Home");
+
+  useEffect(() => {
+    if (updateInfo.state === "downloaded" && updateInfo.version && updateInfo.version !== restartPromptShownFor) {
+      setRestartPromptShownFor(updateInfo.version);
+      setRestartPromptOpen(true);
+      setIndicatorHidden(false);
+    }
+  }, [updateInfo.state, updateInfo.version, restartPromptShownFor]);
 
   const isAppVisible = phase === "launching" || phase === "open" || phase === "closing";
   const contentBlurred = isAppVisible;
@@ -151,7 +164,23 @@ export default function App() {
           <Toaster />
           <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
           <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
-          
+
+          <UpdateIndicator
+            info={updateInfo}
+            onRestart={installUpdate}
+            onDismiss={() => setIndicatorHidden(true)}
+            hidden={indicatorHidden || restartPromptOpen}
+          />
+          <UpdateRestartDialog
+            open={restartPromptOpen}
+            version={updateInfo.version}
+            onRestart={() => {
+              setRestartPromptOpen(false);
+              installUpdate();
+            }}
+            onLater={() => setRestartPromptOpen(false)}
+          />
+
         </div>
       </SidebarProvider>
       </SettingsProvider>
