@@ -99,7 +99,7 @@ Append a **footer**:
 ### 7. Output
 
 1. Print the full Markdown to chat inside a fenced code block so the user can copy it directly.
-2. Save the same content to `c:/GitProjects/devforge/release-notes-<currTag>.md` using the Write tool. If `currTag` is `HEAD`, use the current `package.json` version (`devforge/package.json`) — e.g. `release-notes-v1.3.1.md`.
+2. Save the same content to `c:/GitProjects/devforge/release-notes/<currTag>.md` using the Write tool. If `currTag` is `HEAD`, use the current `package.json` version (`devforge/package.json`) — e.g. `release-notes/v1.3.1.md`. Create the `release-notes/` directory if missing.
 3. End your reply with a one-line note: where the file was saved, and a suggestion to paste it into the matching GitHub Release.
 
 ## Style rules
