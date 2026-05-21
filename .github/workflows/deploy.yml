@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -55,41 +53,68 @@ jobs:
 
   auto-tag:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: |
+      github.ref == 'refs/heads/main' &&
+      !contains(github.event.head_commit.message, '[skip ci]')
     needs: deploy
     outputs:
-      version: ${{ steps.version.outputs.VERSION }}
-      tag_created: ${{ steps.tag.outputs.created }}
+      version: ${{ steps.bump.outputs.version }}
+      tag_created: ${{ steps.bump.outputs.bumped }}
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Get version from package.json
-      id: version
-      working-directory: devforge
-      run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-    - name: Create tag if not exists
-      id: tag
-      run: |
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        if git tag "v${{ steps.version.outputs.VERSION }}"; then
-          git push origin "v${{ steps.version.outputs.VERSION }}"
-          echo "created=true" >> $GITHUB_OUTPUT
-        else
-          echo "Tag already exists, skipping"
-          echo "created=false" >> $GITHUB_OUTPUT
-        fi
+      - name: Determine bump type from commit message
+        id: type
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $MSG"
+          if echo "$MSG" | grep -qE "(BREAKING CHANGE|^[a-z]+(\(.+\))?!:)"; then
+            BUMP=major
+          elif echo "$MSG" | grep -qE "^feat(\(.+\))?:"; then
+            BUMP=minor
+          elif echo "$MSG" | grep -qE "^(fix|perf)(\(.+\))?:"; then
+            BUMP=patch
+          else
+            BUMP=none
+          fi
+          echo "Detected bump: $BUMP"
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+      - name: Bump version, commit, tag, push
+        id: bump
+        if: steps.type.outputs.bump != 'none'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          cd devforge
+          NEW_TAG=$(npm version ${{ steps.type.outputs.bump }} --no-git-tag-version)
+          VERSION_NO_V="${NEW_TAG#v}"
+          cd ..
+          echo "version=$VERSION_NO_V" >> $GITHUB_OUTPUT
+          echo "bumped=true" >> $GITHUB_OUTPUT
+          git add devforge/package.json devforge/package-lock.json
+          git commit -m "chore: release $NEW_TAG [skip ci]"
+          git tag "$NEW_TAG"
+          git push origin main
+          git push origin "$NEW_TAG"
 
   release:
     runs-on: windows-latest
-    if: |
-      startsWith(github.ref, 'refs/tags/v') ||
-      (needs.auto-tag.outputs.tag_created == 'true')
+    if: needs.auto-tag.outputs.tag_created == 'true'
     needs: [auto-tag]
     steps:
-      - name: Checkout repository
+      - name: Checkout at new tag
         uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.auto-tag.outputs.version }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -107,13 +132,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload to GitHub Releases
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.auto-tag.outputs.version }}
+          generate_release_notes: true
           files: |
             devforge/release/*.exe
             devforge/release/*.dmg
             devforge/release/*.AppImage
             devforge/release/*.deb
+            devforge/release/latest*.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
