@@ -115,11 +115,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: v${{ needs.auto-tag.outputs.version }}
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          echo "Previous tag: $PREV_TAG"
+          node .github/scripts/release-notes.mjs "$PREV_TAG" "v${{ needs.auto-tag.outputs.version }}" > release-notes.md
+          echo "----- Release notes -----"
+          cat release-notes.md
+          echo "-------------------------"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Install dependencies
         working-directory: devforge
@@ -135,7 +148,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.auto-tag.outputs.version }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             devforge/release/*.exe
             devforge/release/*.dmg
