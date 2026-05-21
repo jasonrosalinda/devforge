@@ -9,9 +9,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     subscriptionId: '',
     apps: [],
   },
-  medu: {
-    apiDomain: '',
-  },
   apiKeys: {
     pagespeedApiKey: '',
     anthropicApiKey: '',
@@ -61,7 +58,6 @@ export async function loadSettings(): Promise<AppSettings> {
     const parsed = JSON.parse(json) as Partial<AppSettings>;
     return {
       azure: { ...DEFAULT_SETTINGS.azure, ...parsed.azure },
-      medu: { ...DEFAULT_SETTINGS.medu, ...parsed.medu },
       apiKeys: { ...DEFAULT_SETTINGS.apiKeys, ...parsed.apiKeys },
     };
   } catch {

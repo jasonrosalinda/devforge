@@ -1,6 +1,6 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { ChevronDown, ChevronRight, Loader2, Monitor, RotateCcw, Smartphone } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, RotateCcw } from 'lucide-react';
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Button, Toast } from '../ui';
@@ -9,6 +9,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages } from '@/lib/pageSpeedUtils';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 type AuditSlot = PageSpeedInsightResult | null | false | undefined;
+
+export interface PageSpeedResultsHandle {
+    startAudit: () => void;
+    cancelAudit: () => void;
+    getResults: () => {
+        results1: AuditSlot[];
+        results2: AuditSlot[];
+        config: PageSpeedConfiguration;
+        auditStart: Date | null;
+        auditEnd: Date | null;
+    };
+}
 
 interface PageSpeedResultsProps {
     config: PageSpeedConfiguration;
@@ -76,7 +88,7 @@ const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedI
     );
 };
 
-export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAuditingChange }) => {
+export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpeedResultsProps>(({ config, onAuditingChange }, ref) => {
     const { audit, clearCache } = usePageSpeedInsight(config);
     const { elementRef, copyAsImage } = useCopyElementAsImage({
         fileNamePrefix: `pagespeed-result-${config.strategy}-${Date.now()}`,
@@ -89,11 +101,27 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
     const [auditing2, setAuditing2] = useState(false);
     const [retryingRows, setRetryingRows] = useState<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
+    const abortControllerRef = useRef<AbortController | null>(null);
+    const activeAuditsRef = useRef(0);
+    const [auditStart, setAuditStart] = useState<Date | null>(null);
+    const [auditEnd, setAuditEnd] = useState<Date | null>(null);
+    const [elapsed, setElapsed] = useState(0);
+    const isAuditing = auditing1 || auditing2;
+    const isRetryingAny = retryingRows.size > 0;
+    const timerActive = isAuditing || isRetryingAny;
+
+    useEffect(() => {
+        if (!timerActive || !auditStart) return;
+        setElapsed(0);
+        const id = setInterval(() => {
+            setElapsed(Math.round((Date.now() - auditStart.getTime()) / 1000));
+        }, 1000);
+        return () => clearInterval(id);
+    }, [timerActive, auditStart]);
 
     const displayAudit = displayPageSpeedAudit(config);
     const showAnalyzeButton = config.urls.length > 0 && (!config.browserMode ? !isNullOrEmpty(config.apiKey) : true);
     const toast = Toast();
-    const isAuditing = auditing1 || auditing2;
     const hasSubHead = !!(displayAudit.before && displayAudit.after);
     const isAccuracyMode = config.runMode === 'average';
 
@@ -118,12 +146,13 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
 
     const MAX_RETRIES = 2;
 
-    const auditWithRetry = useCallback(async (url: string): Promise<PageSpeedInsightResult> => {
+    const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal): Promise<PageSpeedInsightResult> => {
         let lastError: unknown;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
-                return await audit(url);
+                return await audit(url, signal);
             } catch (err) {
+                if (err instanceof DOMException && err.name === 'AbortError') throw err;
                 lastError = err;
                 if (attempt < MAX_RETRIES) {
                     await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
@@ -138,35 +167,64 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         setAuditing: React.Dispatch<React.SetStateAction<boolean>>,
         otherAuditing: boolean,
     ): Promise<void> => {
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+        if (activeAuditsRef.current === 0) {
+            setAuditStart(new Date());
+            setAuditEnd(null);
+        }
+        activeAuditsRef.current++;
         setAuditingWithCallback(setAuditing, true, otherAuditing);
         setResults(new Array(config.urls.length).fill(null));
         if (config.browserMode) {
             await clearCache();
         }
 
-        for (const [index, url] of config.urls.entries()) {
-            try {
-                const result = await auditWithRetry(url);
-                setResults(prev => {
-                    const next = [...prev];
-                    next[index] = result;
-                    return next;
-                });
-            } catch (error) {
-                console.error(`Audit failed for ${url} after ${MAX_RETRIES} retries:`, error);
-                setResults(prev => {
-                    const next = [...prev];
-                    next[index] = false;
-                    return next;
-                });
-            }
-        }
+        try {
+            const effectiveConcurrency = config.browserMode ? 1 : config.concurrency;
+            const urlQueue: Array<[number, string]> = [...config.urls.entries()];
 
-        setAuditingWithCallback(setAuditing, false, otherAuditing);
+            const worker = async () => {
+                while (!controller.signal.aborted) {
+                    const next = urlQueue.shift();
+                    if (!next) break;
+                    const [index, url] = next;
+                    try {
+                        const result = await auditWithRetry(url, controller.signal);
+                        setResults(prev => {
+                            const next = [...prev];
+                            next[index] = result;
+                            return next;
+                        });
+                    } catch (error) {
+                        if (error instanceof DOMException && error.name === 'AbortError') return;
+                        console.error(`Audit failed for ${url} after ${MAX_RETRIES} retries:`, error);
+                        setResults(prev => {
+                            const next = [...prev];
+                            next[index] = false;
+                            return next;
+                        });
+                    }
+                }
+            };
+
+            await Promise.all(Array.from({ length: effectiveConcurrency }, worker));
+        } finally {
+            setResults(prev => prev.map(slot => (slot === null ? undefined : slot)));
+            activeAuditsRef.current--;
+            if (activeAuditsRef.current === 0) setAuditEnd(new Date());
+            setAuditingWithCallback(setAuditing, false, otherAuditing);
+        }
     };
 
     const audit1 = () => runAudit(setResults1, setAuditing1, auditing2);
     const audit2 = () => runAudit(setResults2, setAuditing2, auditing1);
+
+    useImperativeHandle(ref, () => ({
+        startAudit: audit1,
+        cancelAudit: () => abortControllerRef.current?.abort(),
+        getResults: () => ({ results1, results2, config, auditStart, auditEnd }),
+    }));
 
     const retryRow = useCallback(async (
         index: number,
@@ -177,6 +235,8 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         if (!url) return;
 
         const rowKey = `${slotKey}-${index}`;
+        if (activeAuditsRef.current === 0) setAuditEnd(null);
+        activeAuditsRef.current++;
         setRetryingRows(prev => new Set(prev).add(rowKey));
         setResults(prev => {
             const next = [...prev];
@@ -199,6 +259,8 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                 return next;
             });
         } finally {
+            activeAuditsRef.current--;
+            if (activeAuditsRef.current === 0) setAuditEnd(new Date());
             setRetryingRows(prev => {
                 const next = new Set(prev);
                 next.delete(rowKey);
@@ -285,8 +347,10 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
     const cellValue = (slot: AuditSlot, metric: PageSpeedMetrics | undefined): React.ReactNode => {
         if (slot === null) return <Loader2 className="animate-spin mx-auto" size={20} />;
         if (slot === undefined) return <span>-</span>;
+        // Show metric when available — even on partial run failure the average is still valid
+        if (metric?.displayValue) return metric.displayValue;
         if (slotHasError(slot)) return <span className="text-destructive/50 text-xs">—</span>;
-        return metric?.displayValue ?? '-';
+        return '-';
     };
 
     const slotHasError = (slot: AuditSlot) => {
@@ -308,14 +372,13 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
         const isRetrying = retryingRows.has(rowKey);
         return (
             <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="h-6 px-2 text-xs gap-1"
+                className="h-2.5 w-2.5 p-0"
                 disabled={isRetrying || isAuditing}
                 onClick={() => retryRow(index, setResults, slotKey)}
             >
-                <RotateCcw className={`h-3 w-3 ${isRetrying ? 'animate-spin' : ''}`} />
-                {isRetrying ? 'Retrying…' : 'Retry'}
+                <RotateCcw className={`h-2 w-2 ${isRetrying ? 'animate-spin' : ''}`} />
             </Button>
         );
     };
@@ -369,7 +432,6 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
             <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        {config.strategy === 'mobile' ? <Smartphone size={20} /> : <Monitor size={20} />}
                         {config.strategy.toUpperCase()}
                     </div>
                     {!copying && showAnalyzeButton && (
@@ -408,6 +470,11 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                                     ) : (
                                         <>Analyze</>
                                     )}
+                                </Button>
+                            )}
+                            {isAuditing && (
+                                <Button variant="outline" onClick={() => abortControllerRef.current?.abort()}>
+                                    Cancel
                                 </Button>
                             )}
                             <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
@@ -457,7 +524,7 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                                             {/* sticky URL cell — same inset box-shadow trick */}
                                             <TableCell className={`sticky left-0 bg-background z-10 w-1/3 ${stickyBorder}`}>
                                                 <div className="flex items-start gap-1">
-                                                    {hasHistory && (
+                                                    {!copying && hasHistory && (
                                                         <button
                                                             onClick={() => toggleHistory(index)}
                                                             className="shrink-0 mt-0.5 p-0.5 rounded hover:bg-muted transition-colors"
@@ -473,7 +540,7 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                                                             {url}
                                                         </a>
                                                         {getResultMessageForUrl(slot1, slot2)}
-                                                        {(slotHasError(slot1) || slotHasError(slot2)) && (
+                                                        {!copying && (slotHasError(slot1) || slotHasError(slot2)) && (
                                                             <div className="flex items-center gap-1 mt-1">
                                                                 <span className="text-xs text-destructive">Audit failed.</span>
                                                                 {retryButton(index, slot1, setResults1, '1')}
@@ -569,9 +636,21 @@ export const PageSpeedResults: React.FC<PageSpeedResultsProps> = ({ config, onAu
                         </TableBody>
                     </Table>
                 </div>
+                {auditStart && (
+                    <div className="mt-2 text-right text-xs text-muted-foreground">
+                        {auditStart.toLocaleString()}{auditEnd ? ` – ${auditEnd.toLocaleString()}` : ''}
+                        {' · '}
+                        {(() => {
+                            const secs = auditEnd
+                                ? Math.round((auditEnd.getTime() - auditStart.getTime()) / 1000)
+                                : elapsed;
+                            return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+                        })()}
+                    </div>
+                )}
             </CardContent>
         </Card>
     );
-};
+});
 
 export default PageSpeedResults;

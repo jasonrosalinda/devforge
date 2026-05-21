@@ -9,6 +9,30 @@ export interface PageSpeedErrorResponse {
     message: string | string[];
 }
 
+export interface AuditDetailsHeading {
+    key: string;
+    valueType?: string;
+    label?: string;
+}
+
+export interface AuditDetails {
+    type: string;
+    headings?: AuditDetailsHeading[];
+    items?: Record<string, unknown>[];
+    overallSavingsMs?: number;
+}
+
+export interface PageSpeedOpportunity {
+    type: 'opportunity' | 'diagnostic';
+    auditKey?: string;
+    title: string;
+    displayValue?: string;
+    score: number | null;
+    scoreDisplayMode?: string;
+    details?: AuditDetails;
+    metricSavings?: Record<string, number>;
+}
+
 export interface PageSpeedInsightResult {
     url: string;
     speedIndex: PageSpeedMetrics;
@@ -19,6 +43,11 @@ export interface PageSpeedInsightResult {
     runWarnings?: string | string[];
     errorResponse?: PageSpeedErrorResponse;
     runHistory?: PageSpeedInsightResult[];
+    opportunities?: PageSpeedOpportunity[];
+    interactive?: PageSpeedMetrics;
+    performanceScore?: number;
+    lighthouseVersion?: string;
+    fetchTime?: string;
 }
 
 export type PageSpeedStrategy = "mobile" | "desktop";
@@ -41,20 +70,35 @@ export interface PageSpeedConfiguration {
     showTBT: boolean;
     showFCP: boolean;
     showWarnings: boolean;
+    concurrency: 1 | 2 | 3;
 }
 
 export interface UsePageSpeedInsightHooks {
-    audit: (url: string) => Promise<PageSpeedInsightResult>;
+    audit: (url: string, signal?: AbortSignal) => Promise<PageSpeedInsightResult>;
     clearCache: () => Promise<{ success: boolean }>;
 }
 
 export interface PageSpeedApiResponse {
     lighthouseResult?: {
-        audits?: Record<string, Partial<PageSpeedMetrics>>;
+        audits?: Record<string, {
+            displayValue?: string;
+            numericValue?: number;
+            numericUnit?: string;
+            score?: number | null;
+            title?: string;
+            scoreDisplayMode?: string;
+            details?: AuditDetails;
+            metricSavings?: Record<string, number>;
+        }>;
         runWarnings?: string;
         timing?: {
             total: number;
-        }
+        };
+        lighthouseVersion?: string;
+        fetchTime?: string;
+        categories?: {
+            performance?: { score?: number };
+        };
     };
 }
 

@@ -1,5 +1,19 @@
 'use strict';
 
+// ─── Per-app result cache ─────────────────────────────────────────────────────
+
+const _fetchCache = new Map();
+const CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+
+function getCached(cacheKey) {
+  const h = _fetchCache.get(cacheKey);
+  return h && Date.now() < h.expiresAt ? h.data : null;
+}
+
+function setCached(cacheKey, data) {
+  _fetchCache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL });
+}
+
 // ─── Granularity / Duration maps ─────────────────────────────────────────────
 
 const GRANULARITY_MAP = {
@@ -82,6 +96,13 @@ function buildTimespan(range, customStart, customEnd) {
   return { startTime, endTime };
 }
 
+function isoGranToKql(gran) {
+  const m = gran.match(/P(?:T)?(\d+)([MHD])/i);
+  if (!m) return '5m';
+  const unit = { M: 'm', H: 'h', D: 'd' }[m[2].toUpperCase()] ?? 'm';
+  return `${m[1]}${unit}`;
+}
+
 function getCustomGranularity(customStart, customEnd) {
   const spanHours = (new Date(customEnd) - new Date(customStart)) / 3_600_000;
   if (spanHours <= 2)   return 'PT1M';
@@ -107,17 +128,24 @@ async function queryMetric(client, resId, metricName, range, granularity, custom
   return summarize(scaled);
 }
 
-async function getInstances(token, resId) {
+async function getInstances(token, resId, range, gran, customStart, customEnd) {
   const headers = { Authorization: `Bearer ${token}` };
   const res = await fetch(`https://management.azure.com${resId}/instances?api-version=2022-03-01`, { headers });
   if (!res.ok) return [];
   const data = await res.json();
 
-  const healthMap = {};
+  // Build timespan string for ARM metrics query
+  const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+  const timespanStr = `${startTime.toISOString()}/${endTime.toISOString()}`;
+  const interval = gran || 'PT5M';
+
+  // healthPctMap: instance name → health % averaged across all buckets in the selected window
+  const healthPctMap = {};
   try {
     const hcRes = await fetch(
       `https://management.azure.com${resId}/providers/microsoft.insights/metrics` +
-      `?api-version=2023-10-01&metricnames=HealthCheckStatus&timespan=PT1H&interval=PT5M` +
+      `?api-version=2023-10-01&metricnames=HealthCheckStatus` +
+      `&timespan=${encodeURIComponent(timespanStr)}&interval=${encodeURIComponent(interval)}` +
       `&aggregation=average&$filter=Instance+eq+%27*%27`,
       { headers }
     );
@@ -126,23 +154,34 @@ async function getInstances(token, resId) {
       const timeseries = hd?.value?.[0]?.timeseries ?? [];
       for (const ts of timeseries) {
         const key = ts.metadatavalues?.find(m => m.name?.value === 'instance')?.value?.toLowerCase() ?? '';
-        const lastVal = ts.data?.filter(d => d.average != null).at(-1)?.average;
-        if (key) healthMap[key] = lastVal === 1 ? 'Healthy' : lastVal === 0 ? 'Degraded' : 'Unknown';
+        if (!key) continue;
+        const vals = (ts.data ?? []).map(d => d.average).filter(v => v != null);
+        if (vals.length) {
+          const avgHealth = vals.reduce((s, v) => s + v, 0) / vals.length;
+          healthPctMap[key] = Math.round(avgHealth * 1000) / 10; // 0–100 %
+        }
       }
     }
   } catch { /* ignore */ }
 
-  return (data.value || []).map(i => {
+  const seen = new Set();
+  const result = [];
+  for (const i of (data.value || [])) {
     const props = i.properties ?? {};
     const machineName = props.machineName || i.name || '';
+    if (!machineName || seen.has(machineName.toLowerCase())) continue;
+    seen.add(machineName.toLowerCase());
     const zone = props.physicalZone || props.availabilityZone || '';
     const state = props.state || '';
-    const healthStatus =
-      healthMap[i.name?.toLowerCase()] ??
-      healthMap[machineName.toLowerCase()] ??
-      (state === 'READY' ? 'Healthy' : state === 'STOPPED' ? 'Stopped' : 'Unknown');
-    return { name: machineName, zone, healthStatus };
-  });
+    const key = (i.name?.toLowerCase() ?? '');
+    const keyMachine = machineName.toLowerCase();
+    const healthPct = healthPctMap[key] ?? healthPctMap[keyMachine] ?? null;
+    const healthStatus = healthPct != null
+      ? (healthPct >= 90 ? 'Healthy' : healthPct >= 50 ? 'Degraded' : 'Unhealthy')
+      : (state === 'READY' ? 'Healthy' : state === 'STOPPED' ? 'Stopped' : 'Unknown');
+    result.push({ name: machineName, zone, healthStatus, healthPct });
+  }
+  return result;
 }
 
 async function getReplicas(token, resId) {
@@ -160,6 +199,7 @@ async function getReplicas(token, resId) {
     name: r.name || '',
     zone: '',
     healthStatus: r.properties?.runningState || 'Unknown',
+    healthPct: null,
   }));
 }
 
@@ -464,8 +504,9 @@ async function getFailedRequestsByInstance(appId, credential, range, customStart
     const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
     const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
     const query = `requests
-| summarize total=count(), failedCount=countif(success==false) by cloud_RoleInstance, bin(timestamp, 1m)
+| summarize total=count(), failedCount=countif(success==false) by cloud_RoleInstance, cloud_RoleName, bin(timestamp, 1m)
 | extend healthPct=iif(total>0, round(todouble(total-failedCount)/todouble(total)*100.0, 1), 100.0)
+| project timestamp, cloud_RoleInstance, cloud_RoleName, total, failedCount, healthPct
 | order by timestamp asc`;
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
@@ -475,14 +516,48 @@ async function getFailedRequestsByInstance(appId, credential, range, customStart
     if (!res.ok) return null;
     const data = await res.json();
     const rows = data.tables?.[0]?.rows || [];
-    // rows: [cloud_RoleInstance, timestamp, total, failedCount, healthPct]
-    return rows.map(([instance, ts, total, failedCount, healthPct]) => ({
+    // rows: [timestamp, cloud_RoleInstance, cloud_RoleName, total, failedCount, healthPct]
+    return rows.map(([ts, instance, roleName, total, failedCount, healthPct]) => ({
       t:          new Date(ts).toISOString(),
       instance:   instance ?? 'unknown',
+      roleName:   roleName ?? null,
       count:      Number(failedCount) || 0,
       totalCount: Number(total) || 0,
       healthPct:  Math.round(Number(healthPct) * 10) / 10,
     }));
+  } catch { return null; }
+}
+
+async function getContainerAppTimeSeries(appId, credential, range, customStart, customEnd, gran) {
+  try {
+    const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+    const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+    const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
+    const bin = isoGranToKql(gran);
+    const headers = { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' };
+    const endpoint = `https://api.applicationinsights.io/v1/apps/${appId}/query`;
+    const queries = [
+      `requests | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
+      `requests | where toint(resultCode) >= 400 and toint(resultCode) < 500 | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
+      `requests | summarize avgSec=round(avg(duration)/1000,3) by bin(timestamp, ${bin}) | order by timestamp asc`,
+      `requests | summarize avgSec=round(avg(duration)/1000,3), maxSec=round(max(duration)/1000,3), p99Sec=round(percentile(duration,99)/1000,3)`,
+    ];
+    const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: queries.join(';\n'), timespan }) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.error) return null;
+    const tables = data.tables || [];
+    const reqRows  = tables[0]?.rows ?? [];
+    const h4xRows  = tables[1]?.rows ?? [];
+    const rtRows   = tables[2]?.rows ?? [];
+    const summRow  = tables[3]?.rows?.[0];
+    const requestsSeries = reqRows.map(([t, count]) => ({ t: new Date(t).toISOString(), count: Number(count) }));
+    const http4xxSeries  = h4xRows.map(([t, count]) => ({ t: new Date(t).toISOString(), count: Number(count) }));
+    const rtSeries       = rtRows.map(([t, avg]) => ({ t: new Date(t).toISOString(), avg: Number(avg) }));
+    const responseTime   = summRow
+      ? { avg: Number(summRow[0]) || 0, max: Number(summRow[1]) || 0, p99: Number(summRow[2]) || 0, series: rtSeries }
+      : null;
+    return { requestsSeries, http4xxSeries, responseTime };
   } catch { return null; }
 }
 
@@ -610,18 +685,22 @@ async function findAppInsightsAppId(token, subscriptionId, resourceGroup, appNam
     if (!componentsRes.ok) return null;
     const { value = [] } = await componentsRes.json();
 
-    // Match by instrumentation key first, then by name
+    // Match by instrumentation key first, then by name (prefer same resource group)
     let component = ikey
       ? value.find(c => c.properties?.InstrumentationKey?.toLowerCase() === ikey.toLowerCase())
       : null;
     if (!component) {
-      component = value.find(c => c.name?.toLowerCase() === appName.toLowerCase());
+      const rgLower = resourceGroup.toLowerCase();
+      component = value.find(c =>
+        c.name?.toLowerCase() === appName.toLowerCase() &&
+        c.id?.toLowerCase().includes(`/resourcegroups/${rgLower}/`)
+      ) || value.find(c => c.name?.toLowerCase() === appName.toLowerCase());
     }
     return component ? component.properties.AppId : null;
   } catch { return null; }
 }
 
-async function getRequestInsights(appId, credential, range, customStart, customEnd) {
+async function getRequestInsights(appId, credential, range, customStart, customEnd, summaryOnly = false) {
   const msMap = { '30m': 30*60e3, '1h': 3600e3, '6h': 6*3600e3, '12h': 12*3600e3, '1d': 24*3600e3, '3d': 72*3600e3, '7d': 168*3600e3, '30d': 720*3600e3 };
   const spanMs = customStart && customEnd ? new Date(customEnd) - new Date(customStart) : (msMap[range] || msMap['1d']);
   const spanMins = spanMs / 60000;
@@ -663,18 +742,73 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     } catch (e) { return { error: e.message }; }
   }
 
+  // Batch multiple KQL statements into one HTTP call.
+  // App Insights returns tables[0..N] matching statement order.
+  async function runBatch(queries) {
+    const combined = queries.join(';\n');
+    try {
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: combined, timespan }) });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        return queries.map(() => ({ error: `${res.status}: ${txt}` }));
+      }
+      const data = await res.json();
+      if (data.error) return queries.map(() => ({ error: data.error.message || JSON.stringify(data.error) }));
+      const tables = data.tables || [];
+      return tables.map(t => t?.rows || []);
+    } catch (e) {
+      return queries.map(() => ({ error: e.message }));
+    }
+  }
+
   const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
 
-  const [urlRows, ipRows, uaRows, botRows, hfRows, failedUrlRows, slowUrlRows, insightResult] = await Promise.all([
-    runQuery(`requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`),
-    runQuery(`requests | extend ip=iff(isnotempty(client_IP) and client_IP != "::1", client_IP, tostring(customDimensions["Client IP Address"])) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`),
-    runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
-    runQuery(`requests | extend ua=tostring(customDimensions["User-Agent"]) | where ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`),
-    runQuery(`requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=tostring(customDimensions["User-Agent"]) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`),
-    runQuery(`requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | where success == false | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`),
-    runQuery(`requests | summarize avgMs=avg(duration), p99Ms=percentile(duration,99), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), p99Ms=round(p99Ms,1), maxMs=round(maxMs,1), count=n`),
-    runQueryFull(insightKql),
-  ]);
+  // Group A: request/dependency-based (8 queries → 1 HTTP call)
+  const groupAKqls = [
+    `requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | where success == false | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
+    `requests | summarize avgMs=avg(duration), p99Ms=percentile(duration,99), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), p99Ms=round(p99Ms,1), maxMs=round(maxMs,1), count=n`,
+    `requests | extend rc=toint(resultCode) | where rc >= 400 and rc < 500 | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
+    `requests | extend rc=toint(resultCode) | where rc >= 500 | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
+    `requests | extend rc=toint(resultCode) | where rc >= 400 and rc < 500 | count`,
+    `requests | extend rc=toint(resultCode) | where rc >= 500 | count`,
+    `dependencies | summarize totalCount=count(), failCount=countif(success==false), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0), p99=round(percentile(duration,99),0) by name, type, target | order by totalCount desc | take 10`,
+    `exceptions | summarize count=count() by type | order by count desc | take 10`,
+    `exceptions | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+  ];
+
+  // Group B: client-based + SNAT + SQL/HTTP timeouts (6 queries → 1 HTTP call)
+  const groupBKqls = [
+    `requests | extend ip=iff(isnotempty(client_IP) and client_IP != "::1", client_IP, tostring(customDimensions["Client IP Address"])) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS") | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`,
+    `exceptions | where outerMessage has_any ("SocketException","No buffer space available","ENOBUFS","actively refused","Connection refused","timed out","ETIMEDOUT","SNAT") | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+    `exceptions | where outerMessage has_any ("timeout","Timeout","timed out","SqlException","SqlTimeout","TaskCanceledException","HttpRequestException","TimeoutException") | where not(outerMessage has_any ("SocketException","ENOBUFS","No buffer space available","actively refused","Connection refused","ETIMEDOUT","SNAT")) | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+  ];
+
+  let urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows;
+  let ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows;
+  let insightResult;
+
+  if (summaryOnly) {
+    // Only fetch summary aggregates needed for collapsed badges (2 HTTP calls)
+    const [[t4xx, t5xx, etRows], ins] = await Promise.all([
+      runBatch([groupAKqls[5], groupAKqls[6], groupAKqls[8]]),
+      runQueryFull(insightKql),
+    ]);
+    total4xxRows = t4xx; total5xxRows = t5xx; errorTypeRows = etRows;
+    insightResult = ins;
+    urlRows = null; failedUrlRows = null; slowUrlRows = null; failed4xxRows = null; failed5xxRows = null;
+    topDepRows = null; errorDetailRows = null;
+    ipRows = null; uaRows = null; botRows = null; hfRows = null; snatDetailRows = null; sqlHttpDetailRows = null;
+  } else {
+    [[urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows], [ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult] = await Promise.all([
+      runBatch(groupAKqls),
+      runBatch(groupBKqls),
+      runQueryFull(insightKql),
+    ]);
+  }
 
   const parseOrErr = (rows, mapper) => Array.isArray(rows) ? rows.map(mapper) : rows;
 
@@ -706,45 +840,19 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     bots:        parseOrErr(botRows,       ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     highFreq:    parseOrErr(hfRows,        ([ts, lastSeen, ip, country, ua, count, rpm]) => ({ timestamp: String(ts), lastSeen: String(lastSeen), ip: String(ip), country: String(country), userAgent: String(ua), count: Number(count), rpm: Number(rpm) })),
     failedUrls:  parseOrErr(failedUrlRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
+    failed4xxUrls: parseOrErr(failed4xxRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
+    failed5xxUrls: parseOrErr(failed5xxRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
     slowUrls:    parseOrErr(slowUrlRows,   ([url, avgMs, p99Ms, maxMs, count]) => ({ url: String(url), avgMs: Number(avgMs), p99Ms: Number(p99Ms), maxMs: Number(maxMs), count: Number(count) })),
+    total4xx: Array.isArray(total4xxRows) && total4xxRows[0] ? Number(total4xxRows[0][0]) || 0 : null,
+    total5xx: Array.isArray(total5xxRows) && total5xxRows[0] ? Number(total5xxRows[0][0]) || 0 : null,
+    snatDetails: Array.isArray(snatDetailRows) ? snatDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
+    sqlHttpDetails: Array.isArray(sqlHttpDetailRows) ? sqlHttpDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
+    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
+    errorTypes: Array.isArray(errorTypeRows) ? errorTypeRows.map(([type, count]) => ({ type: String(type || 'Unknown'), count: Number(count) || 0 })) : null,
+    errorCount: Array.isArray(errorTypeRows) ? errorTypeRows.reduce((s, [, c]) => s + (Number(c) || 0), 0) : null,
+    errorDetails: Array.isArray(errorDetailRows) ? errorDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), client_Browser: String(client_Browser ?? ''), client_OS: String(client_OS ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
     insight,
   };
-}
-
-async function getCpuMemoryFromAppInsights(appId, credential, range, granularity, customStart, customEnd) {
-  try {
-    const aiToken = await credential.getToken('https://api.applicationinsights.io/.default');
-    const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
-    const granMins = granularity === 'PT5M' ? 5 : granularity === 'PT15M' ? 15 : granularity === 'PT1H' ? 60 : 5;
-    const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-    const query = `performanceCounters | where (category == "Processor" and name == "% Processor Time" and instance == "_Total") or (category == "Process" and name == "Working Set") | summarize avgVal=avg(value), maxVal=max(value) by bin(timestamp,${granMins}m), name | project timestamp, name, avgVal, maxVal | order by timestamp asc`;
-    const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
-    });
-    if (!res.ok) return null;
-    const { tables } = await res.json();
-    const rows = tables?.[0]?.rows || [];
-    if (!rows.length) return null;
-    const cpuRows = rows.filter(r => r[1] === '% Processor Time');
-    const memRows = rows.filter(r => r[1] === 'Working Set');
-    if (!cpuRows.length) return null;
-    const toSeries = (arr, divisor = 1) => arr.map(([ts, , avg, max]) => ({
-      t: new Date(ts).toISOString(),
-      v: Math.round(avg / divisor * 10) / 10,
-      m: Math.round(max / divisor * 10) / 10,
-    }));
-    const cpuSeries = toSeries(cpuRows);
-    const memSeries = toSeries(memRows, 1024 * 1024);
-    const avg = arr => arr.reduce((s, p) => s + p.v, 0) / arr.length;
-    const max = arr => Math.max(...arr.map(p => p.m));
-    return {
-      cpu: { avg: Math.round(avg(cpuSeries) * 10) / 10, max: Math.round(max(cpuSeries) * 10) / 10, series: cpuSeries },
-      memory: memSeries.length ? { avg: Math.round(avg(memSeries) * 10) / 10, max: Math.round(max(memSeries) * 10) / 10, series: memSeries } : null,
-      memUnit: memSeries.length ? 'MB' : null,
-    };
-  } catch { return null; }
 }
 
 async function fetchAppMetrics(client, token, credential, app, subscriptionId, range, customStart, customEnd, granularityOverride) {
@@ -759,11 +867,11 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
   // Resolve plan (needed for metricsResId) and aiAppId in parallel
   const [planResult, aiAppId] = await Promise.all([
     isAppService ? getPlanInfo(token, resId).catch(() => null) : Promise.resolve(null),
-    isAppService
-      ? (app.appInsightsAppId
-          ? Promise.resolve(app.appInsightsAppId)
-          : findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null))
-      : Promise.resolve(null),
+    app.appInsightsAppId
+      ? Promise.resolve(app.appInsightsAppId)
+      : isAppService
+        ? findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null)
+        : Promise.resolve(null),
   ]);
 
   const plan = planResult;
@@ -783,11 +891,11 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     cpu, { metric: memory, unit: memUnit },
     instances, availability, responseTime, requests, failedRequests, failedRequestsSeries,
     instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries,
-    aiFailedByInstance, failedDependencies,
+    aiFailedByInstance, caTimeSeries,
   ] = await Promise.all([
     queryMetric(client, metricsResId, 'CpuPercentage', range, gran, customStart, customEnd),
     fetchMemory(),
-    isAppService ? getInstances(token, resId) : getReplicas(token, resId),
+    isAppService ? getInstances(token, resId, range, gran, customStart, customEnd) : getReplicas(token, resId),
     getAvailability(client, token, resId, app.type, range, gran, customStart, customEnd, aiAppId, credential),
     isAppService ? getResponseTime(client, resId, range, gran, customStart, customEnd) : Promise.resolve(null),
     isAppService ? queryCountMetrics(client, resId, ['Requests'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
@@ -795,11 +903,11 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     isAppService ? queryFailedRequestsSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? getInstanceHealthSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? getInstanceProbeSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    aiAppId ? getRequestInsights(aiAppId, credential, range, customStart, customEnd) : Promise.resolve(null),
+    aiAppId ? getRequestInsights(aiAppId, credential, range, customStart, customEnd, true) : Promise.resolve(null),
     isAppService ? queryCountSeries(client, resId, 'Http4xx', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? queryCountSeries(client, resId, 'Requests', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getFailedRequestsByInstance(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    aiAppId ? getFailedDependencies(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    (!isAppService && aiAppId) ? getContainerAppTimeSeries(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
   ]);
 
   // Collapse aiFailedByInstance into {t, count}[] — sum across instances per minute bucket
@@ -822,11 +930,17 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     if (instanceHealthSeries && instanceHealthSeries.length) return instanceHealthSeries;
     if (aiFailedByInstance && aiFailedByInstance.length) {
       const instMap = new Map();
+      const instRole = new Map();
       for (const row of aiFailedByInstance) {
         if (!instMap.has(row.instance)) instMap.set(row.instance, []);
         instMap.get(row.instance).push({ t: row.t, v: row.healthPct });
+        if (row.roleName && !instRole.has(row.instance)) instRole.set(row.instance, row.roleName);
       }
-      return Array.from(instMap.entries()).map(([name, series]) => ({ name, series }));
+      return Array.from(instMap.entries()).map(([name, series]) => ({
+        name,
+        roleName: instRole.get(name) ?? null,
+        series,
+      }));
     }
     return null;
   })();
@@ -848,6 +962,112 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     };
   }
 
+  // Supplement ARM instances with any instance names only in instanceHealthSeries
+  // (ARM only returns currently running VMs; Azure Monitor retains historical per-instance data)
+  if (effectiveInstanceHealth && instances) {
+    const knownNames = new Map(instances.map((i, idx) => [i.name.toLowerCase(), idx]));
+    for (const s of effectiveInstanceHealth) {
+      const n = s.name;
+      if (!n || n === 'unknown') continue;
+      const vals = s.series.map(p => p.v).filter(v => v != null);
+      const healthPct = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10 : null;
+      const existingIdx = knownNames.get(n.toLowerCase());
+      if (existingIdx !== undefined) {
+        if (instances[existingIdx].healthPct === null && healthPct !== null) {
+          instances[existingIdx].healthPct = healthPct;
+          instances[existingIdx].healthStatus = healthPct >= 90 ? 'Healthy' : healthPct >= 50 ? 'Degraded' : 'Unhealthy';
+        }
+      } else {
+        instances.push({
+          name: n,
+          zone: '',
+          healthStatus: healthPct != null ? (healthPct >= 90 ? 'Healthy' : healthPct >= 50 ? 'Degraded' : 'Unhealthy') : 'Unknown',
+          healthPct,
+        });
+        knownNames.set(n.toLowerCase(), instances.length - 1);
+      }
+    }
+  }
+
+  // Fetch API instances + health series + App Insights if apiName configured
+  let apiInstances = null;
+  let apiInstanceHealthSeries = null;
+  let apiRequestInsights = null;
+  let apiFailedDependencies = null;
+  let apiAppInsightsConfigured = false;
+  if (app.apiName) {
+    const apiResId = resourceId(subscriptionId, {
+      type: app.apiType || 'appservice',
+      resourceGroup: app.resourceGroup,
+      name: app.apiName,
+    });
+
+    const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
+    // Resolve apiAiAppId in parallel with instances + health
+    const [apiInst, apiHealth, apiAiAppId] = await Promise.all([
+      apiIsContainerApp ? getReplicas(token, apiResId) : getInstances(token, apiResId, range, gran, customStart, customEnd).catch(() => null),
+      apiIsContainerApp ? Promise.resolve(null) : getInstanceHealthSeries(client, apiResId, range, gran, customStart, customEnd).catch(() => null),
+      app.apiInsightsAppId
+        ? Promise.resolve(app.apiInsightsAppId)
+        : (apiIsContainerApp ? Promise.resolve(null) : findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null)),
+    ]);
+    apiInstances = apiInst;
+    apiInstanceHealthSeries = apiHealth;
+
+    // Supplement API instances with historical entries from apiInstanceHealthSeries
+    if (apiInstanceHealthSeries && apiInstances) {
+      const knownApi = new Map(apiInstances.map((i, idx) => [i.name.toLowerCase(), idx]));
+      for (const s of apiInstanceHealthSeries) {
+        const n = s.name;
+        if (!n || n === 'unknown') continue;
+        const vals = s.series.map(p => p.v).filter(v => v != null);
+        const healthPct = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10 : null;
+        const existingIdx = knownApi.get(n.toLowerCase());
+        if (existingIdx !== undefined) {
+          // Backfill healthPct from series data when ARM returned null (no HealthCheckStatus metric)
+          if (apiInstances[existingIdx].healthPct === null && healthPct !== null) {
+            apiInstances[existingIdx].healthPct = healthPct;
+            apiInstances[existingIdx].healthStatus = healthPct >= 90 ? 'Healthy' : healthPct >= 50 ? 'Degraded' : 'Unhealthy';
+          }
+        } else {
+          apiInstances.push({
+            name: n, zone: '',
+            healthStatus: healthPct != null ? (healthPct >= 90 ? 'Healthy' : healthPct >= 50 ? 'Degraded' : 'Unhealthy') : 'Unknown',
+            healthPct,
+          });
+          knownApi.set(n.toLowerCase(), apiInstances.length - 1);
+        }
+      }
+    }
+
+    // Fetch API App Insights data
+    if (apiAiAppId) {
+      apiAppInsightsConfigured = true;
+      const [apiRI, apiAiFBI] = await Promise.all([
+        getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, true).catch(() => null),
+        getFailedRequestsByInstance(apiAiAppId, credential, range, customStart, customEnd).catch(() => null),
+      ]);
+      apiRequestInsights = apiRI;
+      apiFailedDependencies = null;
+
+      // Enrich apiInstanceHealthSeries with AI fallback if Azure Monitor returned nothing
+      if (!apiInstanceHealthSeries?.length && apiAiFBI?.length) {
+        const instMap = new Map();
+        const instRole = new Map();
+        for (const row of apiAiFBI) {
+          if (!instMap.has(row.instance)) instMap.set(row.instance, []);
+          instMap.get(row.instance).push({ t: row.t, v: row.healthPct });
+          if (row.roleName && !instRole.has(row.instance)) instRole.set(row.instance, row.roleName);
+        }
+        apiInstanceHealthSeries = Array.from(instMap.entries()).map(([name, series]) => ({
+          name, roleName: instRole.get(name) ?? null, series,
+        }));
+      }
+    }
+  }
+
+  const caInsight = !isAppService ? (requestInsights?.insight ?? null) : null;
+
   return {
     label: app.name,
     type: app.type,
@@ -857,19 +1077,52 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     memUnit,
     plan,
     instances,
-    responseTime,
+    apiInstances,
+    responseTime: isAppService ? responseTime : (caTimeSeries?.responseTime ?? null),
     availability: refinedAvailability,
-    requests,
-    failedRequests,
+    requests: isAppService ? requests : (caInsight?.totalRequests != null ? { total: caInsight.totalRequests } : null),
+    failedRequests: isAppService ? failedRequests : (caInsight?.failedRequests != null ? { total: caInsight.failedRequests } : null),
     failedRequestsSeries: effectiveFailedSeries,
-    http4xxSeries: http4xxSeries ?? null,
-    requestsSeries: requestSeries,
+    http4xxSeries: isAppService ? (http4xxSeries ?? null) : (caTimeSeries?.http4xxSeries ?? null),
+    requestsSeries: isAppService ? requestSeries : (caTimeSeries?.requestsSeries ?? null),
     instanceHealthSeries: effectiveInstanceHealth,
+    apiInstanceHealthSeries: apiInstanceHealthSeries ?? null,
     instanceProbeSeries: (instanceProbeSeries && instanceProbeSeries.length) ? instanceProbeSeries : null,
     requestInsights,
-    failedDependencies: failedDependencies ?? null,
+    failedDependencies: null,
     appInsightsConfigured: !!aiAppId,
+    apiRequestInsights: apiRequestInsights ?? null,
+    apiFailedDependencies: apiFailedDependencies ?? null,
+    apiAppInsightsConfigured,
   };
+}
+
+// ─── On-demand detail fetch ───────────────────────────────────────────────────
+
+async function fetchAppDetailsData(app, subscriptionId, credential, range, customStart, customEnd) {
+  const isAppService = app.type === 'appservice';
+  const token = await getToken(credential);
+
+  const aiAppId = app.appInsightsAppId ||
+    (isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null) : null);
+
+  let apiAiAppId = null;
+  if (app.apiName) {
+    const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
+    apiAiAppId = app.apiInsightsAppId ||
+      (!apiIsContainerApp && isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null) : null);
+  }
+
+  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, failedDependencies: null, apiFailedDependencies: null };
+
+  const [requestInsights, apiRequestInsights, failedDependencies, apiFailedDependencies] = await Promise.all([
+    getRequestInsights(aiAppId, credential, range, customStart, customEnd, false).catch(() => null),
+    apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false).catch(() => null) : Promise.resolve(null),
+    getFailedDependencies(aiAppId, credential, range, customStart, customEnd).catch(() => null),
+    apiAiAppId ? getFailedDependencies(apiAiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+  ]);
+
+  return { requestInsights, apiRequestInsights, failedDependencies: failedDependencies ?? null, apiFailedDependencies: apiFailedDependencies ?? null };
 }
 
 // ─── Detector KQL helpers ─────────────────────────────────────────────────────
@@ -965,9 +1218,17 @@ const handler = (_mainWindow) => {
     const results = {};
     await Promise.all(
       appKeys.map(async (key) => {
+        const cacheKey = `${key}:${customStart ?? range}:${customEnd ?? ''}:${granularity ?? ''}`;
+        const cached = getCached(cacheKey);
+        if (cached) {
+          results[key] = cached;
+          _event.sender.send('azure-metrics:partial', { key, result: cached });
+          return;
+        }
+
         const app = appsMap[key];
         if (!app) {
-          results[key] = {
+          const errorResult = {
             label: key,
             type: 'appservice',
             cpu: { avg: 0, max: 0, series: [] },
@@ -976,12 +1237,17 @@ const handler = (_mainWindow) => {
             memUnit: '%',
             error: `App "${key}" not found in configuration.`,
           };
+          results[key] = errorResult;
+          _event.sender.send('azure-metrics:partial', { key, result: errorResult });
           return;
         }
         try {
-          results[key] = await fetchAppMetrics(client, token, cred, app, config.subscriptionId, range, customStart, customEnd, granularity);
+          const result = await fetchAppMetrics(client, token, cred, app, config.subscriptionId, range, customStart, customEnd, granularity);
+          setCached(cacheKey, result);
+          results[key] = result;
+          _event.sender.send('azure-metrics:partial', { key, result });
         } catch (err) {
-          results[key] = {
+          const errorResult = {
             label: app.name,
             type: app.type || 'appservice',
             cpu: { avg: 0, max: 0, series: [] },
@@ -990,10 +1256,29 @@ const handler = (_mainWindow) => {
             memUnit: '%',
             error: err.message || String(err),
           };
+          results[key] = errorResult;
+          _event.sender.send('azure-metrics:partial', { key, result: errorResult });
         }
       })
     );
     return results;
+  });
+
+  ipcMain.handle('azure-metrics:fetch-app-details', async (_event, { appKey, range, config, customStart, customEnd }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { error: 'No config' };
+    const cacheKey = `${appKey}:details:${customStart ?? range}:${customEnd ?? ''}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { error: `App "${appKey}" not found` };
+    try {
+      const cred = new DefaultAzureCredential();
+      const result = await fetchAppDetailsData(app, config.subscriptionId, cred, range, customStart, customEnd);
+      setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { error: err.message || String(err) };
+    }
   });
 
   ipcMain.handle('azure-metrics:fetch-detectors', async (_event, { appInsightsAppId, startIso, endIso }) => {

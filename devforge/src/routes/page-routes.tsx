@@ -1,19 +1,18 @@
 import type { Page } from "@/types/pages.types";
 import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages } from "lucide-react";
-import { SiAmazonelasticache, SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
+import { SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
 import { AiOutlineTranslation, AiOutlineFileImage } from "react-icons/ai";
 import { TbActivity } from "react-icons/tb";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
 import PageSpeedResultPage from "@/pages/pagespeedResultPage";
-import MEDUCachePage from "@/pages/meduCachePage";
 import CSSAuditPage from "@/pages/cssAuditPage";
 import ImageToSvgConverter from "@/components/converters/img-to-svg-converter";
 import ReactCheatsheetPage from "@/pages/reactCheatsheetPage";
 import BlazorCheatsheetPage from "@/pages/blazorCheatsheetPage";
 import TimeConverterPage from "@/pages/timeConverterPage";
-import AzureDashboardPage from "@/pages/azureDashboardPage";
+import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 
 export const pages: Page[] = [
     {
@@ -38,13 +37,7 @@ export const pages: Page[] = [
         title: "App Health Check",
         url: "#",
         icon: TbActivity,
-        component: AzureDashboardPage
-    },
-    {
-        title: "MEDU Cache",
-        url: "#",
-        icon: SiAmazonelasticache,
-        component: MEDUCachePage
+        component: AppHealthCheckPage
     },
     {
         title: "CSS Audit",

@@ -62,13 +62,6 @@ app.whenReady().then(() => {
     }
 
     try {
-        require('./ipc/azure-capture.cjs')(mainWindow);
-        console.log('✅ azure-capture handlers registered');
-    } catch (err) {
-        console.error('❌ Failed to load azure-capture.cjs:', err);
-    }
-
-    try {
         require('./ipc/azure-metrics.cjs')(mainWindow);
         console.log('✅ azure-metrics handlers registered');
     } catch (err) {
@@ -76,10 +69,17 @@ app.whenReady().then(() => {
     }
 
     try {
-        require('./ipc/downtime-report.cjs')(mainWindow);
-        console.log('✅ downtime-report handlers registered');
+        require('./ipc/incident-report.cjs')(mainWindow);
+        console.log('✅ incident-report handlers registered');
     } catch (err) {
-        console.error('❌ Failed to load downtime-report.cjs:', err);
+        console.error('❌ Failed to load incident-report.cjs:', err);
+    }
+
+    try {
+        require('./ipc/pagespeed-insight.cjs')(mainWindow);
+        console.log('✅ pagespeed-insight handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load pagespeed-insight.cjs:', err);
     }
 
     if (!isDev) autoUpdater.checkForUpdatesAndNotify();

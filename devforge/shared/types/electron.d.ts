@@ -12,16 +12,31 @@ export interface IElectronAPI {
     // Azure Monitor Metrics  (new)
     azureMetrics: IAzureMetricsAPI;
 
-    // Downtime Report
-    downtimeReport: {
+    // PageSpeed AI Insights
+    pagespeedInsight: {
+        generate: (payload: {
+            desktop?: { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: string | null; auditEnd: string | null };
+            mobile?:  { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: string | null; auditEnd: string | null };
+        }) => Promise<{ success: boolean; path?: string; error?: string }>;
+    };
+
+    // Incident Report
+    incidentReport: {
         generate: (opts: {
             startMs: number;
             endMs: number;
             subscriptionId: string;
             resourceGroup: string;
             appName: string;
-            anthropicApiKey?: string;
-        }) => Promise<{ success: boolean; path?: string; aiUsed?: boolean; error?: string }>;
+            perIncident?: boolean;
+        }) => Promise<{ success: boolean; path?: string; error?: string }>;
+        fetchData: (opts: {
+            startMs: number;
+            endMs: number;
+            subscriptionId: string;
+            resourceGroup: string;
+            appName: string;
+        }) => Promise<unknown>;
     };
 }
 

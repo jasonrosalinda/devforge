@@ -5,7 +5,7 @@ import { Button, Input } from "@/components/ui";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from "@/components/ui/drawer";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSet, FieldTitle } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
-import { Activity, Cog, Key, Link, Table2, Trash2, Wrench } from "lucide-react";
+import { Activity, Cog, Link, Table2, Trash2, Wrench } from "lucide-react";
 import { Item, ItemActions, ItemContent, ItemTitle, } from "@/components/ui/item"
 import { Switch } from "../ui/switch";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../ui/accordion";
@@ -44,11 +44,8 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing }: { conf
         });
     };
 
-    const onApiKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        onSetConfigState({
-            ...config,
-            apiKey: e.target.value,
-        });
+    const onConcurrencyChange = (value: string) => {
+        onSetConfigState({ ...config, concurrency: Number(value) as 1 | 2 | 3 });
     };
 
     const onAddUrl = () => {
@@ -213,36 +210,19 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing }: { conf
                                             <Switch id="switch-browser-mode" checked={config.browserMode} onCheckedChange={onBrowserModeChange} />
                                         </Field>
                                     </FieldLabel>
-                                    {config.browserMode ? (
-                                        <>
-                                            <FieldLabel htmlFor="switch-visitMode-mode" className="my-3">
-                                                <Field orientation="horizontal">
-                                                    <FieldContent>
-                                                        <FieldTitle>Cold Start</FieldTitle>
-                                                        <FieldDescription className="text-xs text-muted-foreground">
-                                                            Cold Start: Browser is launched fresh for each audit. <br />
-                                                            Warm Start: Browser is reused for subsequent audits.
-                                                        </FieldDescription>
-                                                    </FieldContent>
-                                                    <Switch id="switch-visitMode-mode" checked={config.visitMode === "cold"} onCheckedChange={(e) => onVisitModeChange(e)} />
-                                                </Field>
-
-                                            </FieldLabel>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <FieldLabel>
-                                                <Field>
-                                                    <FieldContent>
-                                                        <FieldTitle>API Key</FieldTitle>
-                                                        <FieldDescription className="text-xs text-muted-foreground">
-                                                            Get your API key from <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Google PageSpeed Insights API</a>
-                                                        </FieldDescription>
-                                                    </FieldContent>
-                                                    <Input id="input-api-key" value={config.apiKey} onChange={onApiKeyChange} />
-                                                </Field>
-                                            </FieldLabel>
-                                        </>
+                                    {config.browserMode && (
+                                        <FieldLabel htmlFor="switch-visitMode-mode" className="my-3">
+                                            <Field orientation="horizontal">
+                                                <FieldContent>
+                                                    <FieldTitle>Cold Start</FieldTitle>
+                                                    <FieldDescription className="text-xs text-muted-foreground">
+                                                        Cold Start: Browser is launched fresh for each audit. <br />
+                                                        Warm Start: Browser is reused for subsequent audits.
+                                                    </FieldDescription>
+                                                </FieldContent>
+                                                <Switch id="switch-visitMode-mode" checked={config.visitMode === "cold"} onCheckedChange={(e) => onVisitModeChange(e)} />
+                                            </Field>
+                                        </FieldLabel>
                                     )}
                                     <FieldLabel htmlFor="switch-runMode-mode" className="my-3">
                                         <Field orientation="horizontal">
@@ -255,6 +235,28 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing }: { conf
                                             <Switch id="switch-runMode-mode" checked={config.runMode === "average"} onCheckedChange={(e) => onRunModeChange(e)} />
                                         </Field>
                                     </FieldLabel>
+                                    {!config.browserMode && (
+                                        <FieldLabel htmlFor="select-concurrency" className="my-3">
+                                            <Field orientation="horizontal">
+                                                <FieldContent>
+                                                    <FieldTitle>Parallel URLs</FieldTitle>
+                                                    <FieldDescription className="text-xs text-muted-foreground">
+                                                        Audit multiple URLs simultaneously. API mode only.
+                                                    </FieldDescription>
+                                                </FieldContent>
+                                                <select
+                                                    id="select-concurrency"
+                                                    value={config.concurrency}
+                                                    onChange={(e) => onConcurrencyChange(e.target.value)}
+                                                    className="rounded border border-input bg-background px-2 py-1 text-sm"
+                                                >
+                                                    <option value={1}>1 (safe)</option>
+                                                    <option value={2}>2</option>
+                                                    <option value={3}>3 (fastest)</option>
+                                                </select>
+                                            </Field>
+                                        </FieldLabel>
+                                    )}
                                 </AccordionContent>
                             </AccordionItem>
 

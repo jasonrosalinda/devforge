@@ -22,6 +22,7 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         showTBT: true,
         showFCP: true,
         showWarnings: false,
+        concurrency: 1,
     };
 }
 
@@ -97,11 +98,19 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
         return `${(value / 1000).toFixed(1)} s`;
     };
 
+    const isRunError = (r: PageSpeedInsightResult): boolean => {
+        const err = r.errorResponse;
+        if (!err) return false;
+        if (err.code !== 0) return true;
+        const msg = err.message;
+        return Array.isArray(msg) ? msg.some(m => m.length > 0) : msg.length > 0;
+    };
+
     const avgMetric = (
         key: keyof Pick<PageSpeedInsightResult,
             'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint'>
     ): PageSpeedMetrics => {
-        const valid = results.filter(r => r[key]?.numericValue != null);
+        const valid = results.filter(r => !isRunError(r) && r[key]?.numericValue != null);
 
         if (valid.length === 0) {
             return results[0]![key];
@@ -149,6 +158,16 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
 
     if (warnings.length > 0) result.runWarnings = warnings;
     if (errors.length > 0) result.errorResponse = { code: 0, message: errors };
+
+    // Preserve qualitative fields from last non-error result (can't be meaningfully averaged)
+    const lastGood = [...results].reverse().find(r => !isRunError(r));
+    if (lastGood) {
+        result.interactive = lastGood.interactive;
+        result.opportunities = lastGood.opportunities;
+        result.performanceScore = lastGood.performanceScore;
+        result.lighthouseVersion = lastGood.lighthouseVersion;
+        result.fetchTime = lastGood.fetchTime;
+    }
 
     return result;
 }

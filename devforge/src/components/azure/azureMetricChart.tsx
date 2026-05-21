@@ -14,12 +14,18 @@ interface DowntimeInterval {
   end: number;
 }
 
+interface InstanceSeries {
+  name: string;
+  series: Array<{ t: string; v: number }>;
+}
+
 interface CombinedChartProps {
   cpu: MetricSeries;
   memory: MetricSeries;
   downtimeIntervals?: DowntimeInterval[];
-  availabilitySeries?: Array<{ t: string; v: number }> | undefined;
-  instanceHealthSeries?: Array<{ name: string; series: Array<{ t: string; v: number }> }> | null;
+  availabilitySeries?: Array<{ t: string; v: number }>;
+  instanceHealthSeries?: InstanceSeries[] | null;
+  apiInstanceHealthSeries?: InstanceSeries[] | null;
   loading?: boolean;
   height?: number;
 }
@@ -51,7 +57,11 @@ function formatTick(isoStr: string, spanMs: number): string {
   return `${get('hour')}:${get('minute')}`;
 }
 
-export function CombinedChart({ cpu, memory, downtimeIntervals = [], availabilitySeries, instanceHealthSeries, loading = false, height = 200 }: CombinedChartProps) {
+export function CombinedChart({
+  cpu, memory, downtimeIntervals = [], availabilitySeries,
+  instanceHealthSeries, apiInstanceHealthSeries,
+  loading = false, height = 200,
+}: CombinedChartProps) {
   if (loading) {
     return (
       <div style={{
@@ -64,37 +74,60 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], availabilit
     );
   }
 
-  const instances = instanceHealthSeries ?? [];
-  const instKeys = instances.map((_, i) => `inst_${i}`);
+  // Combine FE and API instances; shared instances (same name) shown once without prefix
+  type ChartInst = { key: string; label: string; map: Map<string, number>; colorIdx: number };
+  const allInst: ChartInst[] = [];
+  const feInst = instanceHealthSeries ?? [];
+  const apiInst = apiInstanceHealthSeries ?? [];
+  const hasApi = apiInst.length > 0;
+  const apiNames = new Set(apiInst.map(i => i.name.toLowerCase()));
+  const feNames  = new Set(feInst.map(i => i.name.toLowerCase()));
 
-  // Build time-indexed map for instance series
-  const instMaps = instances.map(inst => {
-    const m = new Map<string, number>();
-    for (const p of inst.series) m.set(p.t, p.v);
-    return m;
+  feInst.forEach((inst, i) => {
+    const key = `fe_${i}`;
+    const map = new Map<string, number>();
+    for (const p of inst.series) map.set(p.t, p.v);
+    const shared = hasApi && apiNames.has(inst.name.toLowerCase());
+    const label = shared
+      ? inst.name
+      : inst.roleName
+        ? `${inst.roleName}: ${inst.name}`
+        : hasApi ? `FE: ${inst.name}` : `${inst.name} health`;
+    allInst.push({ key, label, map, colorIdx: i });
+  });
+  apiInst.forEach((inst, i) => {
+    if (feNames.has(inst.name.toLowerCase())) return; // skip shared — already added via FE
+    const key = `api_${i}`;
+    const map = new Map<string, number>();
+    for (const p of inst.series) map.set(p.t, p.v);
+    const label = inst.roleName ? `${inst.roleName}: ${inst.name}` : `API: ${inst.name}`;
+    allInst.push({ key, label, map, colorIdx: feInst.length + i });
   });
 
   const merged = cpu.series.map((p, i) => {
-    const row: Record<string, number | string | undefined> = {
+    const row: Record<string, number | string> = {
       t: p.t,
       cpuAvg: p.v,
       cpuMax: p.m,
       memAvg: memory.series[i]?.v ?? 0,
       memMax: memory.series[i]?.m ?? 0,
-      avail: availabilitySeries?.[i]?.v ?? undefined,
     };
-    for (let j = 0; j < instances.length; j++) {
-      row[instKeys[j]] = instMaps[j].get(p.t);
+    const av = availabilitySeries?.[i]?.v;
+    if (av != null) row.avail = av;
+    for (const inst of allInst) {
+      const v = inst.map.get(p.t);
+      if (v != null) row[inst.key] = v;
     }
     return row;
   });
 
-  const spanMs = merged.length > 1
-    ? new Date(merged[merged.length - 1].t as string).getTime() - new Date(merged[0].t as string).getTime()
+  const first = merged[0]?.t as string | undefined;
+  const last  = merged[merged.length - 1]?.t as string | undefined;
+  const spanMs = first && last
+    ? new Date(last).getTime() - new Date(first).getTime()
     : 0;
 
   const hasAvail = (availabilitySeries?.length ?? 0) > 0;
-  const hasInstances = instances.length > 0;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -114,21 +147,21 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], availabilit
               <stop offset="95%" stopColor={CHART_COLORS.avail} stopOpacity={0} />
             </linearGradient>
           )}
-          {hasInstances && instances.map((_, i) => (
-            <linearGradient key={i} id={`gInst${i}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%"  stopColor={INSTANCE_PALETTE[i % INSTANCE_PALETTE.length]} stopOpacity={0.12} />
-              <stop offset="95%" stopColor={INSTANCE_PALETTE[i % INSTANCE_PALETTE.length]} stopOpacity={0} />
+          {allInst.map((inst, i) => (
+            <linearGradient key={i} id={`gInst_${inst.key}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor={INSTANCE_PALETTE[inst.colorIdx % INSTANCE_PALETTE.length]} stopOpacity={0.12} />
+              <stop offset="95%" stopColor={INSTANCE_PALETTE[inst.colorIdx % INSTANCE_PALETTE.length]} stopOpacity={0} />
             </linearGradient>
           ))}
         </defs>
 
-        <XAxis dataKey="t" tickFormatter={(v) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
-        <YAxis domain={[0, 100]} tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v) => `${v}%`} />
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
+        <YAxis domain={[0, 100]} tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v: number) => `${v}%`} />
         <Tooltip
           contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
           labelStyle={{ color: '#8b9ab3' }}
-          formatter={(val: number, name: string) => [`${val.toFixed(1)}%`, name]}
-          labelFormatter={(label) => new Date(label).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT'}
+          formatter={(val: unknown, name: unknown) => [`${Number(val).toFixed(1)}%`, String(name)]}
+          labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT'}
         />
         {downtimeIntervals.map((iv, i) => (
           <ReferenceArea
@@ -148,14 +181,14 @@ export function CombinedChart({ cpu, memory, downtimeIntervals = [], availabilit
         {hasAvail && (
           <Area type="monotone" dataKey="avail" name="Availability" stroke={CHART_COLORS.avail} fill="url(#gAvail)" strokeWidth={2} dot={false} connectNulls={false} />
         )}
-        {hasInstances && instances.map((inst, i) => (
+        {allInst.map(inst => (
           <Area
-            key={instKeys[i]}
+            key={inst.key}
             type="monotone"
-            dataKey={instKeys[i]}
-            name={`${inst.name} health`}
-            stroke={INSTANCE_PALETTE[i % INSTANCE_PALETTE.length]}
-            fill={`url(#gInst${i})`}
+            dataKey={inst.key}
+            name={inst.label}
+            stroke={INSTANCE_PALETTE[inst.colorIdx % INSTANCE_PALETTE.length] ?? '#38bdf8'}
+            fill={`url(#gInst_${inst.key})`}
             strokeWidth={1}
             strokeDasharray="4 2"
             dot={false}

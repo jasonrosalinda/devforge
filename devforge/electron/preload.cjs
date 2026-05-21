@@ -8,37 +8,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     clearLighthouseCache: () =>
         ipcRenderer.invoke('clear-lighthouse-cache'),
 
-    azure: {
-        saveAuth: (cfg) => ipcRenderer.invoke('azure:save-auth', cfg),
-        authExists: () => ipcRenderer.invoke('azure:auth-exists'),
-        capture: (cfg) => ipcRenderer.invoke('azure:capture', cfg),
-        getSessions: () => ipcRenderer.invoke('azure:get-sessions'),
-        getTiles: (session) => ipcRenderer.invoke('azure:get-tiles', session),
-        clearSessions: () => ipcRenderer.invoke('azure:clear-sessions'),
-        getSettings: () => ipcRenderer.invoke('azure:get-settings'),
-        saveSettings: (cfg) => ipcRenderer.invoke('azure:save-settings', cfg),
-
-        onLog: (cb) => {
-            const fn = (_e, msg) => cb(msg);
-            ipcRenderer.on('azure:log', fn);
-            return () => ipcRenderer.removeListener('azure:log', fn);
-        },
-
-        onDone: (cb) => {
-            const fn = (_e, result) => cb(result);
-            ipcRenderer.once('azure:done', fn);
-            return () => ipcRenderer.removeListener('azure:done', fn);
-        },
-    },
-
     azureMetrics: {
         checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
+        fetchAppDetails: (opts) => ipcRenderer.invoke('azure-metrics:fetch-app-details', opts),
         fetchDetectors: (opts) => ipcRenderer.invoke('azure-metrics:fetch-detectors', opts),
+        onPartial: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('azure-metrics:partial', fn);
+            return () => ipcRenderer.removeListener('azure-metrics:partial', fn);
+        },
     },
 
-    downtimeReport: {
-        generate: (opts) => ipcRenderer.invoke('downtime-report:generate', opts),
+    incidentReport: {
+        generate: (opts) => ipcRenderer.invoke('incident-report:generate', opts),
+        fetchData: (opts) => ipcRenderer.invoke('incident-report:fetchData', opts),
+    },
+
+    pagespeedInsight: {
+        generate: (payload) => ipcRenderer.invoke('pagespeed-insight:generate', payload),
     },
 
 });

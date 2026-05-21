@@ -11,9 +11,10 @@ const RUN_MODE_COUNT: Record<'single' | 'average', number> = {
 };
 
 class GoogleApiService {
-  private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  private async request<T>(endpoint: string, options?: RequestInit, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
+      signal,
       headers: {
         'Content-Type': 'application/json',
         ...options?.headers,
@@ -33,6 +34,7 @@ class GoogleApiService {
     apiKey: string,
     strategy: PageSpeedStrategy,
     runMode: 'single' | 'average' = 'single',
+    signal?: AbortSignal,
   ): Promise<PageSpeedInsightResult> {
     const numRuns = RUN_MODE_COUNT[runMode];
     const endpoint = `/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&key=${apiKey}&strategy=${strategy}&category=performance&locale=en`;
@@ -40,16 +42,23 @@ class GoogleApiService {
     const results: PageSpeedInsightResult[] = [];
 
     for (let run = 1; run <= numRuns; run++) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       try {
-        const data = await this.request<PageSpeedApiResponse>(endpoint, { method: 'GET' });
+        const data = await this.request<PageSpeedApiResponse>(endpoint, { method: 'GET' }, signal);
         console.log(`[PageSpeed] result for ${url} run ${run} (${formatMs(data.lighthouseResult?.timing?.total ?? 0)}):`, data);
         const result = parseToPageSpeedInsightResult(
           url,
           data.lighthouseResult?.audits ?? {},
           data.lighthouseResult?.runWarnings,
+          {
+            performanceScore: Math.round((data.lighthouseResult?.categories?.performance?.score ?? 0) * 100),
+            lighthouseVersion: data.lighthouseResult?.lighthouseVersion,
+            fetchTime: data.lighthouseResult?.fetchTime,
+          }
         );
         results.push(result);
       } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
         console.error(`[PageSpeed] error for ${url} run ${run}:`, error);
         results.push(buildErrorPageSpeedInsightResult(url, error));
       }

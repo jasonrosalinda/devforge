@@ -1,7 +1,7 @@
 {
   "name": "devforge",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -38,7 +38,6 @@
     "chrome-launcher": "^1.2.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
     "html2canvas": "^1.4.1",
     "lighthouse": "^13.0.3",

@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
-import { Copy, ChevronDown, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Copy, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal } from 'lucide-react';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
 import type { AppMetrics, MetricSeries } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
@@ -9,150 +10,6 @@ import { useCopyElementAsImage } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 
 type Status = 'healthy' | 'warning' | 'critical';
-
-const stripQs = (name: string) => name.split('?')[0];
-
-type TimelineEvent = { t: number; label: string; color: string; icon: string; isMarker?: boolean };
-
-type FailedDep = { t: string; name: string; type: string; target: string; failCount: number; avgDuration: number };
-type ProbeSeries = Array<{ name: string; series: Array<{ t: string; v: number }> }>;
-
-function buildTimeline(
-  cpu: MetricSeries,
-  memory: MetricSeries,
-  instanceHealthSeries: Array<{ name: string; series: Array<{ t: string; v: number }> }>,
-  ivStart: number,
-  ivEnd: number,
-  failedDependencies?: FailedDep[] | null,
-  instanceProbeSeries?: ProbeSeries | null,
-): TimelineEvent[] {
-  const events: TimelineEvent[] = [];
-  const DEP_WINDOW = 2 * 60 * 1000;
-
-  const nearestVal = (series: MetricSeries['series'], t: number) => {
-    let best: { t: string; v: number; m: number } | null = null;
-    let bestDiff = Infinity;
-    for (const p of series) {
-      const diff = Math.abs(new Date(p.t).getTime() - t);
-      if (diff < bestDiff) { bestDiff = diff; best = p; }
-    }
-    return best;
-  };
-
-  const baselineCpu = cpu.series.filter(p => new Date(p.t).getTime() < ivStart).at(-1);
-  const baselineMem = memory.series.filter(p => new Date(p.t).getTime() < ivStart).at(-1);
-  if (baselineCpu) {
-    events.push({ t: new Date(baselineCpu.t).getTime(), label: `CPU ${baselineCpu.v.toFixed(1)}% · Mem ${(baselineMem?.v ?? 0).toFixed(1)}%`, color: '#484f58', icon: '◦' });
-  }
-
-  events.push({ t: ivStart, label: 'Incident start', color: '#f85149', icon: '▼', isMarker: true });
-
-  const cpuDuring = cpu.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-  if (cpuDuring.length) {
-    const peak = cpuDuring.reduce((max, p) => p.v > max.v ? p : max);
-    if (peak.v > 70) events.push({ t: new Date(peak.t).getTime(), label: `CPU peak: ${peak.v.toFixed(1)}%`, color: peak.v > 90 ? '#f85149' : '#d29922', icon: '↑' });
-  }
-
-  const memDuring = memory.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-  if (memDuring.length) {
-    const peak = memDuring.reduce((max, p) => p.v > max.v ? p : max);
-    if (peak.v > 80) events.push({ t: new Date(peak.t).getTime(), label: `Mem peak: ${peak.v.toFixed(1)}%`, color: peak.v > 95 ? '#f85149' : '#d29922', icon: '↑' });
-  }
-
-  // Failed dependencies near incident — group by method+domain
-  // Data is pre-scoped to incident window via timespan param; no timestamp filter needed
-  const nearDeps = failedDependencies ?? [];
-  const depDomainKey = (name: string): string => {
-    const m = name.match(/^(GET|POST|PUT|DELETE|PATCH)\s+(.+)/i);
-    const method = m ? (m[1] ?? '').toUpperCase() : '';
-    const raw = m ? (m[2] ?? name) : name;
-    try { const u = new URL(raw); return `${method} ${u.hostname}`.trim(); } catch { return (method + ' ' + raw.split('?')[0]).trim(); }
-  };
-  const depGroups = new Map<string, { domain: string; type: string; count: number; t: number; endpoints: Set<string> }>();
-  for (const d of nearDeps) {
-    const k = depDomainKey(d.name) + '||' + d.type;
-    const prev = depGroups.get(k);
-    if (!prev) depGroups.set(k, { domain: depDomainKey(d.name), type: d.type, count: d.failCount, t: ivStart, endpoints: new Set([d.name]) });
-    else { prev.count += d.failCount; prev.endpoints.add(d.name); }
-  }
-  const normDepType = (raw: string): string => {
-    const t = raw.toLowerCase();
-    if (t.includes('sql') || t.includes('sqlclient'))           return 'SQL';
-    if (t.includes('redis') || t.includes('stackexchange'))     return 'Redis';
-    if (t.includes('servicebus') || t.includes('service bus'))  return 'Service Bus';
-    if (t.includes('eventhub') || t.includes('event hub'))      return 'Event Hub';
-    if (t.includes('blob') || t.includes('storage'))            return 'Blob Storage';
-    if (t.includes('cosmosdb') || t.includes('cosmos'))         return 'CosmosDB';
-    if (t.includes('grpc'))                                     return 'gRPC';
-    if (t.includes('http'))                                     return 'HTTP';
-    if (t.includes('queue'))                                     return 'Queue';
-    if (t.includes('table'))                                     return 'Table Storage';
-    return raw || 'Unknown';
-  };
-  const topDeps = Array.from(depGroups.values()).sort((a, b) => b.count - a.count).slice(0, 5);
-  for (const dep of topDeps) {
-    const endpointStr = dep.endpoints.size > 1 ? ` (${dep.endpoints.size} endpoints)` : '';
-    const typeLabel = normDepType(dep.type);
-    events.push({ t: dep.t, label: `Dep failed [${typeLabel}]: ${dep.domain}${endpointStr} × ${dep.count}`, color: '#a371f7', icon: '⚡' });
-  }
-
-  // Collect drop timestamps to detect simultaneous drops
-  const dropTimestamps: number[] = [];
-  for (const inst of instanceHealthSeries) {
-    const during = inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-    const firstDrop = during.find(p => p.v < 50);
-    if (firstDrop) dropTimestamps.push(new Date(firstDrop.t).getTime());
-  }
-  const simultaneousThresholdMs = 60 * 1000;
-  const allSimultaneous = dropTimestamps.length > 1 &&
-    Math.max(...dropTimestamps) - Math.min(...dropTimestamps) <= simultaneousThresholdMs;
-
-  for (const inst of instanceHealthSeries) {
-    const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
-    const during = inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-    const firstDrop = during.find(p => p.v < 50);
-    if (firstDrop) {
-      const dropT = new Date(firstDrop.t).getTime();
-
-      // Diagnose cause at drop moment
-      const cpuAtDrop = nearestVal(cpu.series, dropT);
-      const memAtDrop = nearestVal(memory.series, dropT);
-      const probeInst = (instanceProbeSeries ?? []).find(p => p.name === inst.name);
-      const probeFailed = probeInst?.series.some(p => { const t = new Date(p.t).getTime(); return t >= dropT - 60000 && t <= dropT + 60000 && p.v < 100; });
-
-      let cause = '';
-      if (allSimultaneous && instanceHealthSeries.length > 1) {
-        cause = 'simultaneous — platform/deploy';
-      } else if (nearDeps.length > 0 && (cpuAtDrop?.v ?? 0) < 90 && (memAtDrop?.v ?? 0) < 90) {
-        cause = 'dependency failure';
-      } else if ((memAtDrop?.v ?? 0) >= 90) {
-        cause = `OOM risk (Mem ${memAtDrop!.v.toFixed(0)}%)`;
-      } else if ((cpuAtDrop?.v ?? 0) >= 95) {
-        cause = `CPU exhaustion (CPU ${cpuAtDrop!.v.toFixed(0)}%)`;
-      } else if (probeFailed) {
-        cause = 'health probe failure';
-      }
-
-      const causeStr = cause ? ` — ${cause}` : '';
-      events.push({ t: dropT, label: `${shortName}: health → ${firstDrop.v.toFixed(0)}%${causeStr}`, color: '#f85149', icon: '↓' });
-
-      const dropIdx = during.indexOf(firstDrop);
-      const recovery = during.slice(dropIdx + 1).find(p => p.v > 80);
-      if (recovery) events.push({ t: new Date(recovery.t).getTime(), label: `${shortName}: recovered → ${recovery.v.toFixed(0)}%`, color: '#3fb950', icon: '↑' });
-    }
-  }
-
-  events.push({ t: ivEnd, label: 'Incident end', color: '#3fb950', icon: '▲', isMarker: true });
-
-  const recoveryCpu = cpu.series.find(p => new Date(p.t).getTime() > ivEnd);
-  const recoveryMem = memory.series.find(p => new Date(p.t).getTime() > ivEnd);
-  if (recoveryCpu) {
-    events.push({ t: new Date(recoveryCpu.t).getTime(), label: `CPU ${recoveryCpu.v.toFixed(1)}% · Mem ${(recoveryMem?.v ?? 0).toFixed(1)}%`, color: '#484f58', icon: '◦' });
-  }
-
-  return events.sort((a, b) => a.t - b.t);
-}
-
 export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP99?: number): Status {
   if (cpuAvg > 90 || memAvg > 95 || (cpuP99 ?? 0) >= 100 || (memP99 ?? 0) >= 100) return 'critical';
   if (cpuAvg > 70 || memAvg > 80  || (cpuP99 ?? 0) > 85  || (memP99 ?? 0) > 90)  return 'warning';
@@ -175,6 +32,9 @@ interface AzureAppCardProps {
   appKey: string;
   metrics: AppMetrics;
   loading: boolean;
+  detailsLoading?: boolean;
+  detailsLoaded?: boolean;
+  onRequestDetails?: () => void;
   azureSettings: AzureSettings;
   uptimeRobotApiKey?: string | undefined;
   uptimeRobotMonitorIds?: string[] | undefined;
@@ -187,66 +47,84 @@ function SkeletonBlock({ className }: { className?: string }) {
   return <div className={`animate-pulse rounded bg-muted ${className ?? ''}`} />;
 }
 
-export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
+export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
   const { elementRef: cardRef, copyAsImage, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     fileNamePrefix: `azure-${appKey}-${Date.now()}`,
     backgroundColor: '#09090b',
   });
-  const [urExpanded, setUrExpanded] = useState(false);
-  type IncidentPopup = {
-    date: string; timeRange: string; dur: string; reasons: string[]; causeLabel: string | null; causeColor: string;
-    cpu: MetricSeries; memory: MetricSeries;
-    instanceHealthSeries: Array<{ name: string; series: Array<{ t: string; v: number }> }>;
-    ivStart: number; ivEnd: number;
-  };
-  const [selectedIncident, setSelectedIncident] = useState<IncidentPopup | null>(null);
-  const [popupChartLoading, setPopupChartLoading] = useState(false);
-  const reportActionsRef = useRef<{ copy: () => void; pdf: () => void; downloadMd: () => void } | null>(null); // downloadMd = copyMd internally
-  const [timelineOpen, setTimelineOpen] = useState(false);
-  const [highFreqOpen, setHighFreqOpen] = useState(false);
-  const [depsOpen, setDepsOpen] = useState(false);
-  const [instOpen, setInstOpen] = useState(false);
-  const [probesOpen, setProbesOpen] = useState(false);
-  const [trafficOpen, setTrafficOpen] = useState(false);
-  type HighFreqEntry = { timestamp: string; lastSeen?: string; ip: string; country: string; userAgent: string; count: number; rpm: number };
-  type PopupChartData = {
-    cpu: MetricSeries; memory: MetricSeries;
-    instanceHealthSeries: Array<{ name: string; series: Array<{ t: string; v: number }> }>;
-    failedDependencies?: FailedDep[] | null;
-    instanceProbeSeries?: ProbeSeries | null;
-    highFreq?: HighFreqEntry[] | null;
-    requestsSeries?: Array<{ t: string; count: number }> | null;
-    failedRequestsSeries?: Array<{ t: string; count: number }> | null;
-    http4xxSeries?: Array<{ t: string; count: number }> | null;
-    responseTime?: { avg: number; max: number; p99?: number; series?: Array<{ t: string; avg: number }> } | null;
-    requests?: { total: number } | null;
-    failedRequests?: { total: number } | null;
-    requestInsights?: AppMetrics['requestInsights'];
-  };
-  const [popupChartData, setPopupChartData] = useState<PopupChartData | null>(null);
-  const [detectorData, setDetectorData] = useState<import('@shared/types/azureMetrics.types').DetectorAnalysisResult | null>(null);
-  const [detectorLoading, setDetectorLoading] = useState(false);
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
+  const [urExpanded, setUrExpanded] = useState(false);
   const [requestsExpanded, setRequestsExpanded] = useState(false);
+  const [depsExpanded, setDepsExpanded] = useState(false);
+  const [errorsExpanded, setErrorsExpanded] = useState(false);
   const [availExpanded, setAvailExpanded] = useState(false);
-  const [responseExpanded, setResponseExpanded] = useState(false);
-  const [insightExpanded, setInsightExpanded] = useState(false);
-  const [showInsight, setShowInsight] = useState(true);
-  const [failedDepsInsightOpen, setFailedDepsInsightOpen] = useState(false);
-  const [failedReqInsightOpen, setFailedReqInsightOpen] = useState(false);
-  const [socketExInsightOpen, setSocketExInsightOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
-  const [mdCopied, setMdCopied] = useState(false);
-  const [textCopied, setTextCopied] = useState(false);
-  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'failed'>('requests');
+  const [visibleBlocks, setVisibleBlocks] = useState({
+    cpu: true, memory: true, response: true, requests: true,
+    dependencies: true, exceptions: true, instances: true, uptimerobot: true,
+  });
+  const toggleBlock = (key: keyof typeof visibleBlocks) =>
+    setVisibleBlocks(prev => ({ ...prev, [key]: !prev[key] }));
+  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'http4xx' | 'http5xx' | 'bots'>('requests');
+  const [requestsSource, setRequestsSource] = useState<'fe' | 'api'>('fe');
+  const [errTab, setErrTab] = useState<'types' | 'socket' | 'sqlhttp'>('types');
+  const [selectedErrType, setSelectedErrType] = useState<string | null>(null);
+  const [exceptionsSource, setExceptionsSource] = useState<'fe' | 'api'>('fe');
+  const [depsTab, setDepsTab] = useState<'topDeps' | 'failedDeps'>('topDeps');
+  const [incidentReportLoading, setIncidentReportLoading] = useState(false);
+  const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
+
+
+  const handleIncidentReport = useCallback(async () => {
+    const appCfg = azureSettings?.apps?.find((a) => a.name === appKey);
+    setIncidentReportLoading(true);
+    setIncidentReportError(null);
+    try {
+      const effectiveStart = rangeStart ? new Date(rangeStart).getTime() : Date.now() - 24 * 3600_000;
+      const effectiveEnd   = rangeEnd   ? new Date(rangeEnd).getTime()   : Date.now();
+      const uptimeRobotIncidents = urMonitors.flatMap(mon =>
+        (mon.logs ?? [])
+          .filter(l => l.type === 1)
+          .filter(l => {
+            const logStart = l.datetime * 1000;
+            const logEnd   = (l.datetime + l.duration) * 1000;
+            return logEnd >= effectiveStart && logStart <= effectiveEnd;
+          })
+          .map(l => ({
+            monitor:  mon.friendly_name || mon.url,
+            start:    l.datetime * 1000,
+            end:      (l.datetime + l.duration) * 1000,
+            duration: l.duration,
+            reason:   l.reason?.detail ?? '',
+          }))
+      );
+      const result = await (window.electronAPI as any).incidentReport.generate({
+        subscriptionId: azureSettings.subscriptionId,
+        resourceGroup: appCfg?.resourceGroup,
+        appName: appKey,
+        appType: appCfg?.type ?? 'appservice',
+        appInsightsAppId: appCfg?.appInsightsAppId,
+        apiName: appCfg?.apiName,
+        apiInsightsAppId: appCfg?.apiInsightsAppId,
+        apiType: appCfg?.apiType,
+        startMs: effectiveStart,
+        endMs: effectiveEnd,
+        uptimeRobotIncidents,
+      });
+      if (!result.success) setIncidentReportError(result.error ?? 'Unknown error');
+    } catch (e: any) {
+      setIncidentReportError(e?.message ?? 'Unknown error');
+    } finally {
+      setIncidentReportLoading(false);
+    }
+  }, [appKey, azureSettings, rangeStart, rangeEnd]);
 
   // PT1M data fetched separately for the incidents panel — avoids dashboard-interval gaps
   const [incidentDetailMetrics, setIncidentDetailMetrics] = useState<AppMetrics | null>(null);
   const [incidentDetailLoading, setIncidentDetailLoading] = useState(false);
 
   useEffect(() => {
-    if (!urExpanded) return;
-    if (!rangeStart || !rangeEnd) return;
+    if (!urExpanded || !rangeStart || !rangeEnd) return;
     setIncidentDetailLoading(true);
     setIncidentDetailMetrics(null);
     window.electronAPI.azureMetrics.fetch({
@@ -298,6 +176,12 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
     : null;
 
   const typeLabel = metrics.type === 'appservice' ? 'App Service' : 'Container App';
+  const appConfig = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey) ?? null;
+  const resourceGroup = appConfig?.resourceGroup ?? null;
+  const hasApi = !!(appConfig?.apiName);
+  const hasDb = !!(appConfig?.dbName);
+  const feHasInsights = !!(appConfig?.appInsightsAppId);
+  const apiHasInsights = !!(appConfig?.apiInsightsAppId);
 
   const SGT = { timeZone: 'Asia/Singapore' } as const;
   const fmtShort = (d: Date) => d.toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT';
@@ -320,12 +204,6 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
     dependency_failure: '#a371f7',
     outage:             'hsl(var(--destructive))',
   };
-  const CAUSE_DETAIL: Record<string, { what: string; why: string; signals: string }> = {
-    instance_crash:     { what: 'One or more instances stopped serving requests', why: 'Instance-level failure — crash, OOM, or unhealthy container restart', signals: 'Instance health dropped below 50% while other instances remained healthy' },
-    full_outage:        { what: 'All instances simultaneously stopped serving requests', why: 'Platform-wide failure or deployment gone wrong affecting every instance', signals: 'All instances showed degraded health during the incident window' },
-    dependency_failure: { what: 'App instances healthy but requests failing', why: 'External dependency (database, API, service bus) unavailable or timing out', signals: 'Instance health normal — failures originated outside the app process' },
-    outage:             { what: 'Confirmed outage — cause undetermined', why: 'All 4 conditions met but no clear signal points to a specific root cause', signals: 'Availability drop + 5xx spike + probe failure all confirmed' },
-  };
 
   return (
     <>
@@ -343,43 +221,75 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             )}
             <span className="relative inline-flex w-2.5 h-2.5 rounded-full" style={{ backgroundColor: statusColor }} />
           </span>
-          <h2 className="font-bold text-base m-0">{metrics.label}</h2>
+          <h2 className="font-bold text-base m-0">{resourceGroup || metrics.label}</h2>
           <span className="text-xs text-muted-foreground">
             {typeLabel}{planMeta ? ` · ${planMeta}` : ''}
           </span>
-          {metrics.appInsightsConfigured && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ background: 'rgba(88,166,255,0.12)', color: '#58a6ff', border: '1px solid rgba(88,166,255,0.3)' }}>
-              App Insights
+          {([
+            { tag: 'FE',  show: true,   ai: feHasInsights },
+            { tag: 'API', show: hasApi,  ai: apiHasInsights },
+            { tag: 'DB',  show: hasDb,   ai: false },
+          ] as const).filter(t => t.show).map(({ tag, ai }) => (
+            <span key={tag} className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{
+              background: ai ? 'rgba(88,166,255,0.12)' : 'rgba(255,255,255,0.06)',
+              color:      ai ? '#58a6ff'               : '#8b9ab3',
+              border:     `1px solid ${ai ? 'rgba(88,166,255,0.3)' : 'rgba(255,255,255,0.1)'}`,
+            }}>
+              {tag}
             </span>
-          )}
+          ))}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {seriesStart && seriesEnd && (
             <span className="text-[10px] text-muted-foreground">{seriesStart} → {seriesEnd}</span>
           )}
-          {metrics.appInsightsConfigured && (
-            <div
-              data-html2canvas-ignore="true"
-              title={showInsight ? 'Hide Insight block' : 'Show Insight block'}
-              style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}
-              onClick={() => setShowInsight(v => !v)}
-            >
-              <span className="text-[10px] text-muted-foreground">Insight</span>
-              <div style={{
-                position: 'relative', width: 28, height: 15, borderRadius: 8,
-                background: showInsight ? 'hsl(var(--primary))' : 'hsl(var(--muted))',
-                border: `1px solid ${showInsight ? 'hsl(var(--primary))' : 'hsl(var(--border))'}`,
-                transition: 'background 0.2s, border-color 0.2s',
-              }}>
-                <div style={{
-                  position: 'absolute', top: 2, left: showInsight ? 13 : 2,
-                  width: 9, height: 9, borderRadius: '50%',
-                  background: showInsight ? 'hsl(var(--primary-foreground))' : 'hsl(var(--muted-foreground))',
-                  transition: 'left 0.2s, background 0.2s',
-                }} />
-              </div>
-            </div>
-          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" title="Toggle visible blocks" data-html2canvas-ignore="true">
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44" data-html2canvas-ignore="true">
+              <DropdownMenuLabel className="text-xs">Visible blocks</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {([
+                { key: 'cpu',          label: 'CPU' },
+                { key: 'memory',       label: 'Memory' },
+                { key: 'response',     label: 'Response' },
+                { key: 'requests',     label: 'Requests' },
+                { key: 'dependencies', label: 'Dependencies' },
+                { key: 'exceptions',   label: 'Exceptions' },
+                { key: 'instances',    label: 'Instances' },
+                { key: 'uptimerobot',  label: 'UptimeRobot' },
+              ] as const).map(({ key, label }) => (
+                <DropdownMenuCheckboxItem
+                  key={key}
+                  className="text-xs"
+                  checked={visibleBlocks[key]}
+                  onCheckedChange={() => toggleBlock(key)}
+                >{label}</DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            onClick={() => handleIncidentReport()}
+            disabled={incidentReportLoading}
+            title={incidentReportLoading ? 'Generating incident report…' : 'Download Incident Report (Markdown — feed to AI agent)'}
+            data-html2canvas-ignore="true"
+            style={undefined}
+          >
+            <Sparkles
+              className="w-3.5 h-3.5"
+              style={incidentReportLoading ? {
+                color: '#d29922',
+                filter: 'drop-shadow(0 0 6px #d29922)',
+                animation: 'sparkle-glow 1.2s ease-in-out infinite',
+              } : undefined}
+            />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -400,14 +310,20 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
           {metrics.error}
         </div>
       )}
-
+      {incidentReportError && (
+        <div className="mx-4 mb-2 px-3 py-2 rounded-md text-xs border border-destructive/30 bg-destructive/10 text-destructive flex items-center justify-between">
+          <span>Incident report failed: {incidentReportError}</span>
+          <button onClick={() => setIncidentReportError(null)} className="ml-2 hover:opacity-70">✕</button>
+        </div>
+      )}
       {/* Chart — edge to edge */}
       <CombinedChart
         cpu={metrics.cpu}
         memory={metrics.memory}
         downtimeIntervals={downtimeIntervals}
-        availabilitySeries={metrics.availability?.series}
-        instanceHealthSeries={metrics.instanceHealthSeries ?? null}
+        availabilitySeries={undefined}
+        instanceHealthSeries={null}
+        apiInstanceHealthSeries={null}
         loading={false}
       />
 
@@ -426,190 +342,586 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td className="text-muted-foreground font-bold">CPU</td>
-              <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{(+metrics.cpu.avg).toFixed(2)}%</td>
-              <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.p99).toFixed(2)}%</td>
-              <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.max).toFixed(2)}%</td>
-            </tr>
-            <tr>
-              <td className="text-muted-foreground font-bold">Memory</td>
-              <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{(+metrics.memory.avg).toFixed(2)}{metrics.memUnit}</td>
-              <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.p99).toFixed(2)}{metrics.memUnit}</td>
-              <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</td>
-            </tr>
-            {metrics.responseTime != null && (() => {
-              const slowUrls = Array.isArray(metrics.requestInsights?.slowUrls) ? metrics.requestInsights!.slowUrls : [];
-              const hasSlow = slowUrls.length > 0;
-              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : ms >= 1000 ? `${(ms/1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-              return (
-                <>
-                  <tr
-                    style={{ cursor: hasSlow ? 'pointer' : 'default' }}
-                    onClick={() => hasSlow && setResponseExpanded(v => !v)}
-                    onMouseEnter={e => hasSlow && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold">
-                      Response{hasSlow && (responseExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
-                    </td>
-                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
-                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—'}</td>
-                    <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
-                  </tr>
-                  {responseExpanded && slowUrls.map((u, i) => {
-                    const avgColor = u.avgMs >= 5000 ? 'hsl(var(--destructive))' : u.avgMs >= 2000 ? '#d29922' : '#58a6ff';
-                    const p99Color = u.p99Ms >= 5000 ? 'hsl(var(--destructive))' : u.p99Ms >= 2000 ? '#d29922' : '#58a6ff';
-                    const maxColor = u.maxMs >= 10000 ? 'hsl(var(--destructive))' : u.maxMs >= 5000 ? '#d29922' : '#484f58';
-                    return (
-                      <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={u.url}>{u.url}</td>
-                        <td className="text-right tabular-nums" style={{ color: avgColor, whiteSpace: 'nowrap' }}>{fmtMs(u.avgMs)}</td>
-                        <td className="text-right tabular-nums" style={{ color: p99Color, whiteSpace: 'nowrap' }}>{u.p99Ms != null ? fmtMs(u.p99Ms) : '—'}</td>
-                        <td className="text-right tabular-nums" style={{ color: maxColor, whiteSpace: 'nowrap' }}>{fmtMs(u.maxMs)}</td>
-                      </tr>
-                    );
-                  })}
-                </>
-              );
-            })()}
-            {metrics.requests != null && (
+            {visibleBlocks.cpu && (
+              <tr>
+                <td className="text-muted-foreground font-bold">CPU</td>
+                <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{(+metrics.cpu.avg).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.p99).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.max).toFixed(2)}%</td>
+              </tr>
+            )}
+            {visibleBlocks.memory && (
+              <tr>
+                <td className="text-muted-foreground font-bold">Memory</td>
+                <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{(+metrics.memory.avg).toFixed(2)}{metrics.memUnit}</td>
+                <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.p99).toFixed(2)}{metrics.memUnit}</td>
+                <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</td>
+              </tr>
+            )}
+            {visibleBlocks.response && metrics.responseTime != null && (
+              <tr>
+                <td className="text-muted-foreground font-bold">Response</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—'}</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
+              </tr>
+            )}
+            {visibleBlocks.requests && metrics.requests != null && (
               <>
                 <tr
                   style={{ cursor: 'pointer' }}
-                  onClick={() => setRequestsExpanded(v => !v)}
+                  onClick={() => { setRequestsExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; }); setRequestsSource('fe'); }}
                   onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
                   <td className="text-muted-foreground font-bold">
                     Requests{requestsExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                   </td>
-                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    {spanMinutes > 0 && (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                        {metrics.failedRequests != null && (
-                          <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
-                            {(metrics.failedRequests.total / spanMinutes).toFixed(1)}
+                  {(() => {
+                    const ai = metrics.requestInsights;
+                    const total4xx = ai?.total4xx ?? (metrics.http4xxSeries ?? []).reduce((a, p) => a + (p.count ?? 0), 0);
+                    const total5xx = ai?.total5xx ?? (metrics.failedRequestsSeries ?? []).reduce((a, p) => a + (p.count ?? 0), 0);
+                    const reqTotal = ai?.insight?.totalRequests ?? metrics.requests?.total ?? 0;
+                    const sep = <span style={{ color: '#484f58' }}>/</span>;
+                    return (
+                      <>
+                        <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                          {spanMinutes > 0 && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                              <span style={{ color: total4xx > 0 ? '#f97316' : '#3fb950' }}>{(total4xx / spanMinutes).toFixed(1)}</span>
+                              {sep}
+                              <span style={{ color: total5xx > 0 ? '#f85149' : '#3fb950' }}>{(total5xx / spanMinutes).toFixed(1)}</span>
+                              {sep}
+                              <span style={{ color: '#58a6ff' }}>{(reqTotal / spanMinutes).toFixed(1)}</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-right text-muted-foreground">—</td>
+                        <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <span style={{ color: total4xx > 0 ? '#f97316' : '#3fb950' }}>{total4xx.toLocaleString()}</span>
+                            {sep}
+                            <span style={{ color: total5xx > 0 ? '#f85149' : '#3fb950' }}>{total5xx.toLocaleString()}</span>
+                            {sep}
+                            <span style={{ color: '#58a6ff' }}>{reqTotal.toLocaleString()}</span>
                           </span>
-                        )}
-                        {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
-                        <span style={{ color: '#58a6ff' }}>{(metrics.requests.total / spanMinutes).toFixed(1)} rpm</span>
-                      </span>
-                    )}
-                  </td>
-                  <td className="text-right text-muted-foreground">—</td>
-                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                      {metrics.failedRequests != null && (
-                        <span style={{ color: metrics.failedRequests.total > 0 ? '#f85149' : '#3fb950' }}>
-                          {metrics.failedRequests.total.toLocaleString()}
-                        </span>
-                      )}
-                      {metrics.failedRequests != null && <span style={{ color: '#484f58' }}>/</span>}
-                      <span style={{ color: '#58a6ff' }}>{metrics.requests.total.toLocaleString()}</span>
-                    </span>
-                  </td>
+                        </td>
+                      </>
+                    );
+                  })()}
                 </tr>
                 {requestsExpanded && (
-                  <tr>
-                    <td colSpan={4} className="pb-1">
-                      {!metrics.requestInsights
-                        ? <span className="text-[10px] text-muted-foreground italic">Requires App Insights Application ID in settings</span>
-                        : metrics.requestInsights.error
-                          ? <span className="text-[10px] text-destructive">{metrics.requestInsights.error}</span>
-                          : (
-                            <div className="flex flex-col gap-1 pt-1">
-                              {/* Tab buttons */}
-                              <div className="flex gap-0.5 flex-wrap">
-                                {(['requests', 'highfreq', 'failed'] as const).map(t => {
-                                  const labels: Record<string, string> = { requests: 'Requests', highfreq: 'High Freq', failed: 'Failed' };
-                                  return (
-                                    <button
-                                      key={t}
-                                      onClick={() => setRequestsTab(t)}
-                                      style={{
-                                        background: requestsTab === t ? '#58a6ff22' : 'none',
-                                        border: `1px solid ${requestsTab === t ? '#58a6ff66' : 'transparent'}`,
-                                        color: requestsTab === t ? '#58a6ff' : 'var(--muted-foreground)',
-                                        borderRadius: 4,
-                                        padding: '1px 6px',
-                                        fontSize: 9,
-                                        cursor: 'pointer',
-                                        fontWeight: requestsTab === t ? 600 : 400,
-                                      }}
-                                    >
-                                      {labels[t]}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-
-                              {/* Requests tab */}
-                              {requestsTab === 'requests' && (
-                                !Array.isArray(metrics.requestInsights.urls) || metrics.requestInsights.urls.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.urls.map((u, i) => (
-                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                              )}
-
-                              {/* High Frequency tab */}
-                              {requestsTab === 'highfreq' && (
-                                !Array.isArray(metrics.requestInsights.highFreq) || metrics.requestInsights.highFreq.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.highFreq.map((u, i) => {
-                                      const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-                                      const start = new Date(u.timestamp);
-                                      const end = new Date(start.getTime() + 10 * 60 * 1000);
-                                      const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
-                                      const textColor = isDowntime ? '#c0392b' : undefined;
+                  <>
+                    <tr>
+                      <td colSpan={4} className="pb-1">
+                        {detailsLoading && !detailsLoaded
+                          ? <span className="text-[10px] text-muted-foreground italic">Loading details…</span>
+                          : !metrics.requestInsights
+                          ? <span className="text-[10px] text-muted-foreground italic">Requires App Insights Application ID in settings</span>
+                          : metrics.requestInsights.error
+                            ? <span className="text-[10px] text-destructive">{metrics.requestInsights.error}</span>
+                            : (() => {
+                              const ri = requestsSource === 'api' && metrics.apiRequestInsights
+                                ? metrics.apiRequestInsights
+                                : metrics.requestInsights;
+                              return (
+                                <div className="flex flex-col gap-1 pt-1">
+                                  {/* FE / API source toggle */}
+                                  {metrics.apiRequestInsights && (
+                                    <div className="flex gap-0.5 mb-0.5">
+                                      {(['fe', 'api'] as const).map(src => (
+                                        <button
+                                          key={src}
+                                          onClick={() => setRequestsSource(src)}
+                                          style={{
+                                            background: requestsSource === src ? '#58a6ff22' : 'none',
+                                            border: `1px solid ${requestsSource === src ? '#58a6ff66' : 'transparent'}`,
+                                            color: requestsSource === src ? '#58a6ff' : 'var(--muted-foreground)',
+                                            borderRadius: 4, padding: '1px 8px', fontSize: 9,
+                                            cursor: 'pointer', fontWeight: requestsSource === src ? 600 : 400,
+                                          }}
+                                        >{src === 'fe' ? 'FE' : 'API'}</button>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {/* Tab buttons */}
+                                  <div className="flex gap-0.5 flex-wrap">
+                                    {(['highfreq', 'http4xx', 'http5xx', 'requests', 'bots'] as const).map(t => {
+                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'Bots' };
+                                      const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
+                                      const c = colors[t];
                                       return (
-                                        <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                          <div className="flex flex-col min-w-0 flex-1">
-                                            <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
-                                            <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
-                                          </div>
-                                          <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
-                                        </div>
+                                        <button
+                                          key={t}
+                                          onClick={() => setRequestsTab(t)}
+                                          style={{
+                                            background: requestsTab === t ? `${c}22` : 'none',
+                                            border: `1px solid ${requestsTab === t ? `${c}66` : 'transparent'}`,
+                                            color: requestsTab === t ? c : 'var(--muted-foreground)',
+                                            borderRadius: 4, padding: '1px 6px', fontSize: 9,
+                                            cursor: 'pointer', fontWeight: requestsTab === t ? 600 : 400,
+                                          }}
+                                        >{labels[t]}</button>
                                       );
                                     })}
                                   </div>
-                              )}
 
-                              {/* Failed Requests tab */}
-                              {requestsTab === 'failed' && (
-                                !Array.isArray(metrics.requestInsights.failedUrls) || metrics.requestInsights.failedUrls.length === 0
-                                  ? <span className="text-[10px] text-muted-foreground italic">No failed request data</span>
-                                  : <div className="flex flex-col gap-0.5">
-                                    {metrics.requestInsights.failedUrls.map((u, i) => (
-                                      <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                        <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                        <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.count.toLocaleString()} failed</span>
+                                  {/* Requests tab */}
+                                  {requestsTab === 'requests' && (
+                                    !Array.isArray(ri.urls) || ri.urls.length === 0
+                                      ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
+                                      : <div className="flex flex-col gap-0.5">
+                                        {ri.urls.map((u, i) => (
+                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
+                                          </div>
+                                        ))}
                                       </div>
-                                    ))}
-                                  </div>
-                              )}
+                                  )}
 
-                            </div>
-                          )
-                      }
-                    </td>
-                  </tr>
+                                  {/* High Frequency tab */}
+                                  {requestsTab === 'highfreq' && (
+                                    !Array.isArray(ri.highFreq) || ri.highFreq.length === 0
+                                      ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
+                                      : <div className="flex flex-col gap-0.5">
+                                        {ri.highFreq.map((u, i) => {
+                                          const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+                                          const start = new Date(u.timestamp);
+                                          const end = new Date(start.getTime() + 10 * 60 * 1000);
+                                          const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
+                                          const textColor = isDowntime ? '#c0392b' : undefined;
+                                          return (
+                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                              <div className="flex flex-col min-w-0 flex-1">
+                                                <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
+                                                <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
+                                              </div>
+                                              <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                  )}
+
+                                  {/* HTTP 4xx tab */}
+                                  {requestsTab === 'http4xx' && (
+                                    !Array.isArray(ri.failed4xxUrls) || ri.failed4xxUrls.length === 0
+                                      ? <span className="text-[10px] text-muted-foreground italic">No HTTP 4xx data</span>
+                                      : <div className="flex flex-col gap-0.5">
+                                        {ri.failed4xxUrls.map((u, i) => (
+                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#f97316' }}>{u.count.toLocaleString()}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                  )}
+
+                                  {/* HTTP 5xx tab */}
+                                  {requestsTab === 'http5xx' && (
+                                    !Array.isArray(ri.failed5xxUrls) || ri.failed5xxUrls.length === 0
+                                      ? <span className="text-[10px] text-muted-foreground italic">No HTTP 5xx data</span>
+                                      : <div className="flex flex-col gap-0.5">
+                                        {ri.failed5xxUrls.map((u, i) => (
+                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.count.toLocaleString()}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                  )}
+
+                                  {/* Bots tab */}
+                                  {requestsTab === 'bots' && (
+                                    !Array.isArray(ri.bots) || ri.bots.length === 0
+                                      ? <span className="text-[10px] text-muted-foreground italic">No bot traffic detected</span>
+                                      : <div className="flex flex-col gap-0.5">
+                                        {ri.bots.slice(0, 10).map((b, i) => (
+                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
+                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={b.userAgent}>{b.userAgent}</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#3fb950' }}>{b.rpm} rpm</span>
+                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{b.count.toLocaleString()}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                  )}
+                                </div>
+                              );
+                            })()
+                        }
+                      </td>
+                    </tr>
+                  </>
                 )}
               </>
             )}
-            {metrics.availability != null && (() => {
-              const availColor = metrics.availability.pct >= 99 ? '#3fb950' : metrics.availability.pct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
-              const instances = metrics.instances ?? [];
-              const hasInstances = instances.length > 0;
+            {visibleBlocks.dependencies && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
+              const insight = metrics.requestInsights.insight;
+              if (!insight) return null;
+              const depP99      = insight.dependencyP99 ?? 0;
+              const depTotal    = insight.totalDependencies ?? 0;
+              const depFailRate = insight.dependencyFailureRate ?? 0;
+              const topDeps     = metrics.requestInsights.topDependencies ?? [];
+              const failedDeps  = metrics.failedDependencies ?? [];
+              const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || insight.totalDependencies > 0 || insight.failedDependencies > 0;
+              return (
+                <>
+                  <tr
+                    style={{ cursor: hasDetail ? 'pointer' : 'default' }}
+                    onClick={() => hasDetail && setDepsExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                    onMouseEnter={e => hasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold">
+                      Dependencies
+                      {hasDetail && (depsExpanded
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums text-muted-foreground">—</td>
+                    <td className="text-right tabular-nums" style={{ color: depP99 > 5000 ? '#f85149' : depP99 > 1000 ? '#d29922' : '#58a6ff' }}>
+                      {depP99 > 0 ? `${Math.round(depP99).toLocaleString()}ms` : '—'}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {depTotal > 0 ? (() => { const c = depFailRate > 5 ? '#f85149' : depFailRate > 0 ? '#d29922' : '#3fb950'; return insight.failedDependencies > 0
+  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{insight.failedDependencies.toLocaleString()} ({depFailRate.toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {depTotal.toLocaleString()}</span></>
+  : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>; })() : '—'}
+                    </td>
+                  </tr>
+                  {depsExpanded && hasDetail && (
+                    <>
+                      {detailsLoading && !detailsLoaded && (
+                        <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
+                      )}
+                      {(!detailsLoading || detailsLoaded) && <tr>
+                        <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
+                          <div className="flex gap-0.5">
+                            {([
+                              { key: 'topDeps',    label: 'Top Deps',    color: '#58a6ff' },
+                              { key: 'failedDeps', label: 'Failed Deps', color: '#f85149' },
+                            ] as const).map(t => (
+                              <button
+                                key={t.key}
+                                onClick={e => { e.stopPropagation(); setDepsTab(t.key); }}
+                                style={{
+                                  background: depsTab === t.key ? `${t.color}22` : 'none',
+                                  border: `1px solid ${depsTab === t.key ? `${t.color}66` : 'transparent'}`,
+                                  color: depsTab === t.key ? t.color : 'var(--muted-foreground)',
+                                  borderRadius: 4, padding: '1px 6px', fontSize: 9,
+                                  cursor: 'pointer', fontWeight: depsTab === t.key ? 600 : 400,
+                                }}
+                              >{t.label}</button>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>}
+                      {detailsLoaded && depsTab === 'topDeps' && (
+                        topDeps.length === 0
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No dependency data</td></tr>
+                          : topDeps.map((d, i) => (
+                            <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
+                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                              <td className="text-right tabular-nums text-muted-foreground">—</td>
+                              <td className="text-right tabular-nums" style={{ color: d.p99 > 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                              <td className="text-right tabular-nums">
+                                {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r > 0.05 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
+  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
+  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                      {detailsLoaded && depsTab === 'failedDeps' && (
+                        failedDeps.length === 0
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed dependencies</td></tr>
+                          : failedDeps.slice(0, 10).map((d, i) => (
+                            <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
+                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                              <td className="text-right tabular-nums text-muted-foreground">—</td>
+                              <td className="text-right tabular-nums" style={{ color: d.p99 > 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                              <td className="text-right tabular-nums">
+                                {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r > 0.05 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
+  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
+  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </>
+                  )}
+                </>
+              );
+            })()}
+            {visibleBlocks.exceptions && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
+              const errorCount   = metrics.requestInsights.errorCount ?? 0;
+              const socketEx     = metrics.requestInsights.insight?.socketExceptions ?? 0;
+              const errorTypes   = metrics.requestInsights.errorTypes ?? [];
+              const snatList     = metrics.requestInsights.snatIndicators ?? [];
+              const errorDetails = metrics.requestInsights.errorDetails ?? [];
+              const hasDetail    = errorTypes.length > 0 || snatList.length > 0;
+              if (errorCount === 0 && !hasDetail) return null;
+              const errColor = errorCount === 0 ? '#3fb950' : errorCount <= 10 ? '#d29922' : '#f85149';
+              const sockColor = socketEx === 0 ? '#484f58' : socketEx <= 5 ? '#d29922' : '#f85149';
+              return (
+                <>
+                  <tr
+                    style={{ cursor: hasDetail ? 'pointer' : 'default' }}
+                    onClick={() => { if (hasDetail) { setErrorsExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; }); setSelectedErrType(null); setExceptionsSource('fe'); } }}
+                    onMouseEnter={e => hasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold">
+                      Exceptions
+                      {hasDetail && (errorsExpanded
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums text-muted-foreground">—</td>
+                    <td className="text-right tabular-nums text-muted-foreground">—</td>
+                    <td className="text-right tabular-nums">
+                      <span style={{ color: sockColor }}>{socketEx.toLocaleString()}</span>
+                      <span style={{ color: '#484f58' }}> / </span>
+                      <span style={{ color: errColor }}>{errorCount.toLocaleString()}</span>
+                    </td>
+                  </tr>
+                  {errorsExpanded && hasDetail && detailsLoading && !detailsLoaded && (
+                    <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
+                  )}
+                  {errorsExpanded && hasDetail && (!detailsLoading || detailsLoaded) && (() => {
+                    const eri = exceptionsSource === 'api' && metrics.apiRequestInsights
+                      ? metrics.apiRequestInsights
+                      : metrics.requestInsights!;
+                    const eriTypes   = eri.errorTypes   ?? [];
+                    const eriSnat    = eri.snatDetails   ?? [];
+                    const eriSqlHttp = eri.sqlHttpDetails ?? [];
+                    const eriDetails = eri.errorDetails  ?? [];
+                    const hasApiExc  = !!(metrics.apiRequestInsights?.errorTypes?.length || metrics.apiRequestInsights?.snatDetails?.length || metrics.apiRequestInsights?.sqlHttpDetails?.length);
+                    const getMeaningfulFrame = (raw: string) => {
+                      try {
+                        const frames = JSON.parse(raw) as Array<{ assembly?: string; fileName?: string; line?: number; method?: string }>;
+                        return frames.find(f => {
+                          const asm = f.assembly ?? '';
+                          return asm && !asm.startsWith('System.') && !asm.startsWith('Microsoft.') && !asm.startsWith('mscorlib') && !asm.startsWith('netstandard');
+                        }) ?? frames[0] ?? null;
+                      } catch { return null; }
+                    };
+                    const renderDetailSubRows = (rows: typeof eriDetails, accentColor: string) => {
+                      if (rows.length === 0) return null;
+                      const byType = rows.reduce<Map<string, typeof eriDetails>>(
+                        (m, d) => { const k = d.type || 'Unknown'; m.set(k, [...(m.get(k) ?? []), d]); return m; },
+                        new Map()
+                      );
+                      return Array.from(byType.entries()).map(([typ, recs], ti) => {
+                        const grouped = recs.reduce<Map<string, { d: typeof recs[0]; count: number }>>(
+                          (map, d) => {
+                            const key = d.operation_Name || '(unknown path)';
+                            const ex = map.get(key);
+                            if (ex) ex.count++;
+                            else map.set(key, { d, count: 1 });
+                            return map;
+                          },
+                          new Map()
+                        );
+                        return (
+                          <React.Fragment key={ti}>
+                            <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
+                              <td colSpan={3} className="truncate" style={{ color: accentColor, paddingLeft: 20, maxWidth: 0, fontWeight: 500 }} title={typ}>{typ}</td>
+                              <td className="text-right tabular-nums" style={{ color: recs.length > 10 ? '#f85149' : recs.length > 3 ? '#d29922' : '#484f58' }}>{recs.length.toLocaleString()}</td>
+                            </tr>
+                            {Array.from(grouped.values()).map(({ d, count }, j) => {
+                              const frame = d.parsedStack ? getMeaningfulFrame(d.parsedStack) : null;
+                              return (
+                                <tr key={j} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', fontSize: 9, background: `${accentColor}08` }}>
+                                  <td colSpan={4} style={{ paddingLeft: 32, paddingTop: 4, paddingBottom: 4 }}>
+                                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                          <span style={{ color: 'var(--muted-foreground)' }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
+                                          {d.method && <span style={{ color: accentColor }} title="Method">{d.method}</span>}
+                                        </div>
+                                        {(d.innermostType || d.innermostMethod) && (
+                                          <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                            {d.innermostType && <span title="Innermost type">{d.innermostType}</span>}
+                                            {d.innermostMethod && <span style={{ color: accentColor, opacity: 0.7 }} title="Innermost method">{d.innermostMethod}</span>}
+                                          </div>
+                                        )}
+                                        {frame && (
+                                          <div style={{ color: '#3fb950', fontFamily: 'monospace' }} title="Most meaningful stack frame">
+                                            {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
+                                          </div>
+                                        )}
+                                      </div>
+                                      {count > 1 && <span style={{ color: accentColor, fontWeight: 600, flexShrink: 0, marginTop: 1 }}>Ã—{count}</span>}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </React.Fragment>
+                        );
+                      });
+                    };
+                    return (
+                    <>
+                      <tr>
+                        <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
+                          <div className="flex flex-col gap-1">
+                            {hasApiExc && (
+                              <div className="flex gap-0.5">
+                                {(['fe', 'api'] as const).map(src => (
+                                  <button
+                                    key={src}
+                                    onClick={e => { e.stopPropagation(); setExceptionsSource(src); setSelectedErrType(null); }}
+                                    style={{
+                                      background: exceptionsSource === src ? '#f8514922' : 'none',
+                                      border: `1px solid ${exceptionsSource === src ? '#f8514966' : 'transparent'}`,
+                                      color: exceptionsSource === src ? '#f85149' : 'var(--muted-foreground)',
+                                      borderRadius: 4, padding: '1px 8px', fontSize: 9,
+                                      cursor: 'pointer', fontWeight: exceptionsSource === src ? 600 : 400,
+                                    }}
+                                  >{src === 'fe' ? 'FE' : 'API'}</button>
+                                ))}
+                              </div>
+                            )}
+                            <div className="flex gap-0.5">
+                              {([
+                                { key: 'types',  label: 'By Type',       color: '#f85149' },
+                                { key: 'socket', label: 'SNAT / Socket',  color: '#a371f7' },
+                                { key: 'sqlhttp', label: 'SQL / HTTP',    color: '#d29922' },
+                              ] as const).map(t => (
+                                <button
+                                  key={t.key}
+                                  onClick={e => { e.stopPropagation(); setErrTab(t.key); setSelectedErrType(null); }}
+                                  style={{
+                                    background: errTab === t.key ? `${t.color}22` : 'none',
+                                    border: `1px solid ${errTab === t.key ? `${t.color}66` : 'transparent'}`,
+                                    color: errTab === t.key ? t.color : 'var(--muted-foreground)',
+                                    borderRadius: 4, padding: '1px 6px', fontSize: 9,
+                                    cursor: 'pointer', fontWeight: errTab === t.key ? 600 : 400,
+                                  }}
+                                >{t.label}</button>
+                              ))}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                      {errTab === 'types' && (
+                        eriTypes.length === 0
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No exception type data</td></tr>
+                          : eriTypes.map((e, i) => {
+                            const isSelected = selectedErrType === e.type;
+                            const filtered = eriDetails.filter(d => d.type === e.type);
+                            return (
+                              <React.Fragment key={i}>
+                                <tr
+                                  style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10, cursor: eriDetails.length > 0 ? 'pointer' : 'default', background: isSelected ? 'rgba(248,81,73,0.06)' : 'transparent' }}
+                                  onClick={e2 => { e2.stopPropagation(); setSelectedErrType(prev => prev === e.type ? null : e.type); }}
+                                  onMouseEnter={ev => { if (errorDetails.length > 0) ev.currentTarget.style.background = isSelected ? 'rgba(248,81,73,0.1)' : 'rgba(255,255,255,0.02)'; }}
+                                  onMouseLeave={ev => { ev.currentTarget.style.background = isSelected ? 'rgba(248,81,73,0.06)' : 'transparent'; }}
+                                >
+                                  <td colSpan={3} className="truncate" style={{ color: isSelected ? '#f85149' : 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={e.type}>
+                                    {eriDetails.length > 0 && (isSelected
+                                      ? <ChevronDown size={9} style={{ marginRight: 3, display: 'inline', verticalAlign: 'middle', flexShrink: 0 }} />
+                                      : <ChevronRight size={9} style={{ marginRight: 3, display: 'inline', verticalAlign: 'middle', flexShrink: 0 }} />
+                                    )}
+                                    {e.type}
+                                  </td>
+                                  <td className="text-right tabular-nums" style={{ color: e.count > 10 ? '#f85149' : e.count > 3 ? '#d29922' : '#484f58' }}>{e.count.toLocaleString()}</td>
+                                </tr>
+                                {isSelected && filtered.length === 0 && (
+                                  <tr style={{ fontSize: 9 }}>
+                                    <td colSpan={4} style={{ paddingLeft: 32, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No detail records available</td>
+                                  </tr>
+                                )}
+                                {isSelected && (() => {
+                                  const grouped = filtered.reduce<Map<string, { d: typeof filtered[0]; count: number }>>(
+                                    (map, d) => {
+                                      const key = d.operation_Name || '(unknown path)';
+                                      const existing = map.get(key);
+                                      if (existing) existing.count++;
+                                      else map.set(key, { d, count: 1 });
+                                      return map;
+                                    },
+                                    new Map()
+                                  );
+                                  return Array.from(grouped.values()).map(({ d, count }, j) => {
+                                    const frame = d.parsedStack ? getMeaningfulFrame(d.parsedStack) : null;
+                                    return (
+                                      <tr key={j} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', fontSize: 9, background: 'rgba(248,81,73,0.03)' }}>
+                                        <td colSpan={4} style={{ paddingLeft: 32, paddingTop: 4, paddingBottom: 4 }}>
+                                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                                            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                              {/* Path + method */}
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <span style={{ color: 'var(--muted-foreground)' }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
+                                                {d.method && <span style={{ color: '#a371f7' }} title="Method">{d.method}</span>}
+                                              </div>
+                                              {/* Innermost cause */}
+                                              {(d.innermostType || d.innermostMethod) && (
+                                                <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                                  {d.innermostType && <span title="Innermost type">{d.innermostType}</span>}
+                                                  {d.innermostMethod && <span style={{ color: '#a371f7' }} title="Innermost method">{d.innermostMethod}</span>}
+                                                </div>
+                                              )}
+                                              {/* Stack frame */}
+                                              {frame && (
+                                                <div style={{ color: '#3fb950', fontFamily: 'monospace' }} title="Most meaningful stack frame">
+                                                  {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
+                                                </div>
+                                              )}
+                                            </div>
+                                            {count > 1 && <span style={{ color: '#f85149', fontWeight: 600, flexShrink: 0, marginTop: 1 }}>Ã—{count}</span>}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    );
+                                  });
+                                })()}
+                              </React.Fragment>
+                            );
+                          })
+                      )}
+                      {errTab === 'socket' && (
+                        eriSnat.length === 0
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No SNAT / Socket exceptions detected</td></tr>
+                          : renderDetailSubRows(eriSnat, '#a371f7')
+                      )}
+                      {errTab === 'sqlhttp' && (
+                        eriSqlHttp.length === 0
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No SQL / HTTP timeout exceptions detected</td></tr>
+                          : renderDetailSubRows(eriSqlHttp, '#d29922')
+                      )}
+                    </>
+                    );
+                  })()}
+                </>
+              );
+            })()}
+            {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
+              const availPct = metrics.availability?.pct ?? null;
+              const availColor = availPct == null ? 'var(--muted-foreground)' : availPct >= 99 ? '#3fb950' : availPct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
+              const feInstances = metrics.instances ?? [];
+              const apiInstances = metrics.apiInstances ?? [];
+              const feNames = new Set(feInstances.map(i => i.name.toLowerCase()));
+              const apiNames = new Set(apiInstances.map(i => i.name.toLowerCase()));
+              const allInstances = [
+                ...feInstances.map(i => ({ ...i, role: apiNames.has(i.name.toLowerCase()) ? 'both' : 'fe' as const })),
+                ...apiInstances
+                  .filter(i => !feNames.has(i.name.toLowerCase()))
+                  .map(i => ({ ...i, role: 'api' as const })),
+              ];
+              const hasInstances = allInstances.length > 0;
+              const allSeriesVals = (metrics.instanceHealthSeries ?? []).flatMap(s => s.series.map(p => p.v));
+              const instAvgHealth = allSeriesVals.length ? allSeriesVals.reduce((s, v) => s + v, 0) / allSeriesVals.length : null;
+              const instMinHealth = allSeriesVals.length ? Math.min(...allSeriesVals) : null;
+              const healthColor = (v: number | null) => v == null ? 'var(--muted-foreground)' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : '#f85149';
+
               return (
                 <>
                   <tr
@@ -619,31 +931,76 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      Availability{hasInstances && (availExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
+                      Instances{hasInstances && (availExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
-                    <td className="text-right" colSpan={3} style={{ color: availColor }}>{metrics.availability.pct.toFixed(2)}%</td>
+                    <td className="text-right tabular-nums" style={{ color: instAvgHealth != null ? healthColor(instAvgHealth) : 'var(--muted-foreground)' }}>
+                      {instAvgHealth != null ? `${instAvgHealth.toFixed(2)}%` : '—'}
+                    </td>
+                    <td className="text-right text-muted-foreground">—</td>
+                    <td className="text-right tabular-nums" style={{ color: instMinHealth != null ? healthColor(instMinHealth) : 'var(--muted-foreground)' }}>
+                      {instMinHealth != null ? `${instMinHealth.toFixed(2)}% - min` : '—'}
+                    </td>
                   </tr>
-                  {availExpanded && instances.map((inst, i) => {
-                    const series = (metrics.instanceHealthSeries ?? []).find(s => s.name === inst.name);
-                    const vals = series?.series.map(p => p.v) ?? [];
-                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-                    const min = vals.length ? Math.min(...vals) : null;
-                    const avgColor = avg == null ? '#8b9ab3' : avg >= 99 ? '#3fb950' : avg >= 90 ? '#d29922' : 'hsl(var(--destructive))';
-                    const minColor = min == null ? '#484f58' : min >= 99 ? '#3fb950' : min >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+                  {availExpanded && allInstances.map((inst, i) => {
+                    const shortInstName = inst.name.split('_').slice(-1)[0] || inst.name;
+                    const instHealthSeries = metrics.instanceHealthSeries ?? [];
+                    const apiHealthSeries = metrics.apiInstanceHealthSeries ?? [];
+                    const apiOnly = inst.role === 'api';
+                    const activeSeries = apiOnly ? apiHealthSeries : instHealthSeries;
+                    const preSeriesIdx = activeSeries.findIndex(
+                      s => s.name === inst.name ||
+                           s.name.toLowerCase() === inst.name.toLowerCase() ||
+                           s.name.toLowerCase().includes(shortInstName.toLowerCase()) ||
+                           inst.name.toLowerCase().includes(s.name.toLowerCase())
+                    );
+                    const preVals = preSeriesIdx >= 0 ? (activeSeries[preSeriesIdx]?.series.map(p => p.v) ?? []) : [];
+                    const apiOnlyIdx = apiOnly
+                      ? apiInstances.filter(a => !feNames.has(a.name.toLowerCase())).findIndex(a => a.name === inst.name)
+                      : -1;
+                    const seriesIdx = preSeriesIdx;
+                    const series = seriesIdx >= 0 ? activeSeries[seriesIdx] : undefined;
+                    const colorIdx = apiOnly
+                      ? (feInstances.length + (apiOnlyIdx >= 0 ? apiOnlyIdx : i)) % INSTANCE_PALETTE.length
+                      : seriesIdx >= 0 ? seriesIdx % INSTANCE_PALETTE.length : i % INSTANCE_PALETTE.length;
+                    const instanceColor = INSTANCE_PALETTE[colorIdx];
+                    const vals = preVals;
+                    // For API instances with no metric data, derive a fallback from ARM healthStatus
+                    const statusFallback = (apiOnly && inst.healthPct === null && !vals.length)
+                      ? (inst.healthStatus === 'Healthy' ? 100 : inst.healthStatus === 'Degraded' ? 70 : inst.healthStatus === 'Stopped' ? 0 : null)
+                      : null;
+                    const fallbackPct = inst.healthPct ?? statusFallback;
+                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
+                    const latest = vals.length ? vals[vals.length - 1] : fallbackPct;
+                    const minVal = vals.length ? Math.min(...vals) : fallbackPct;
+                    if (avg === null && latest === null && minVal === null) return null;
+                    const hc = (v: number | null) => v == null ? '#8b9ab3' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+                    const avgColor = hc(avg);
                     const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
+                    // roleName from App Insights overrides ARM-based role detection
+                    const seriesRoleName = series?.roleName ?? null;
+                    const effectiveRole = seriesRoleName
+                      ? (seriesRoleName === appConfig?.apiName ? 'api' : 'fe')
+                      : inst.role;
                     return (
                       <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td className="text-muted-foreground truncate max-w-0" style={{ paddingLeft: 20 }} title={inst.name}>{shortName}</td>
+                        <td className="truncate max-w-0" style={{ paddingLeft: 20, color: instanceColor }} title={inst.name}>
+                          {shortName}
+                          {seriesRoleName && (
+                            <span style={{ marginLeft: 5, fontSize: 9, color: '#484f58', fontWeight: 600, letterSpacing: '0.04em' }}>
+                              {seriesRoleName}
+                            </span>
+                          )}
+                        </td>
                         <td className="text-right tabular-nums" style={{ color: avgColor }}>{avg != null ? `${avg.toFixed(2)}%` : '—'}</td>
-                        <td className="text-right tabular-nums text-muted-foreground">—</td>
-                        <td className="text-right tabular-nums" style={{ color: minColor }}>{min != null ? `${min.toFixed(2)}% min` : '—'}</td>
+                        <td className="text-right tabular-nums" style={{ color: hc(latest) }}>{latest != null ? `${latest.toFixed(2)}%` : '—'}</td>
+                        <td className="text-right tabular-nums" style={{ color: hc(minVal) }}>{minVal != null ? `${minVal.toFixed(2)}% - min` : '—'}</td>
                       </tr>
                     );
                   })}
                 </>
               );
             })()}
-            {urMonitors.length > 0 && (() => {
+            {visibleBlocks.uptimerobot && urMonitors.length > 0 && (() => {
               const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
               const totalIncidents = downLogs.length;
               const totalDownSec = downLogs.reduce((s, l) => s + l.duration, 0);
@@ -655,13 +1012,13 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
               return (
                 <>
                   <tr
-                    onClick={() => setUrExpanded(v => !v)}
-                    style={{ cursor: 'pointer' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onClick={() => totalIncidents > 0 && setUrExpanded(v => !v)}
+                    style={{ cursor: totalIncidents > 0 ? 'pointer' : 'default' }}
+                    onMouseEnter={e => totalIncidents > 0 && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      UptimeRobot{urExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                      UptimeRobot{totalIncidents > 0 && (urExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
                     <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap' }}>
                       <span style={{ color: incidentColor }}>{totalIncidents} incident{totalIncidents !== 1 ? 's' : ''}</span>
@@ -672,11 +1029,11 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                       {uptimePct != null ? `${uptimePct.toFixed(2)}% uptime` : '—'}
                     </td>
                   </tr>
-                  {urExpanded && (
+                  {totalIncidents > 0 && urExpanded && (
                     <tr>
                       <td colSpan={4} style={{ padding: 0 }}>
                         <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                          {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
+                          {(urLoading || (incidentDetailLoading && totalIncidents > 0)) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
                           {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
                           {!urLoading && urMonitors.length === 0 && !urError && (
                             <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3', fontStyle: 'italic' }}>No monitors found</div>
@@ -755,7 +1112,7 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                       <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>After (5min)</td>
                                     </tr>
                                     <tr style={{ color: '#484f58', fontWeight: 700 }}>
-                                      {['Instances','Req','CPU','Mem','Instances','Req','CPU','Mem','Instances','Req','CPU','Mem'].map((h, i) => (
+                                      {['Instances','RPM','CPU','Mem','Instances','RPM','CPU','Mem','Instances','RPM','CPU','Mem'].map((h, i) => (
                                         <td key={i} style={{ padding: '2px 6px', textAlign: i % 4 !== 0 ? 'right' : undefined, ...(i === 4 ? { borderLeft: '1px solid rgba(255,255,255,0.06)' } : {}), ...(i === 7 ? { borderRight: '1px solid rgba(255,255,255,0.06)' } : {}) }}>{h}</td>
                                       ))}
                                     </tr>
@@ -783,6 +1140,10 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                       const failBefore = sumInRangeUr(failSeries, ivStart - PRE, PRE_END);
                                       const failDuring = sumDuringUr(failSeries, ivStart, ivEnd);
                                       const failAfter  = sumInRangeUr(failSeries, ivEnd, ivEnd + PRE);
+                                      const duringMin = Math.max(1, (ivEnd - ivStart) / 60000);
+                                      const reqBeforeRPM = reqBefore > 0 ? Math.round(reqBefore / 4 * 10) / 10 : 0;
+                                      const reqDuringRPM = reqDuring > 0 ? Math.round(reqDuring / duringMin * 10) / 10 : 0;
+                                      const reqAfterRPM  = reqAfter  > 0 ? Math.round(reqAfter  / 5 * 10) / 10 : 0;
                                       const cpuColor = cpuDuring > 90 ? 'hsl(var(--destructive))' : cpuDuring > 70 ? '#d29922' : muted;
                                       const memColor = memDuring == null ? muted : memDuring > 95 ? 'hsl(var(--destructive))' : memDuring > 80 ? '#d29922' : muted;
                                       const urCause = (() => {
@@ -805,37 +1166,8 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                       const instBefore = instSnapsInRange(ivStart - PRE, PRE_END);
                                       const instDuring = instSnapsInRange(ivStart, ivEnd);
                                       const instAfter  = instSnapsInRange(ivEnd, ivEnd + PRE);
-                                      const openPopup = () => {
-                                        const instSeries = iMet.instanceHealthSeries ?? [];
-                                        const filteredCpu = cpuSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
-                                        const filteredMem = memSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
-                                        const filteredInst = instSeries.map(inst => ({ name: inst.name, series: inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; }) }));
-                                        const cpuVals = filteredCpu.map(p => p.v);
-                                        const memVals = filteredMem.map(p => p.v);
-                                        const cpuSorted = [...cpuVals].sort((a, b) => a - b);
-                                        const memSorted = [...memVals].sort((a, b) => a - b);
-                                        const pct99 = (s: number[]) => s.length ? s[Math.ceil(s.length * 0.99) - 1] : 0;
-                                        const cpuMetric: MetricSeries = { avg: cpuVals.length ? Math.round(cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length * 10) / 10 : 0, max: cpuVals.length ? Math.max(...cpuVals) : 0, p99: Math.round(pct99(cpuSorted) * 100) / 100, series: filteredCpu };
-                                        const memMetric: MetricSeries = { avg: memVals.length ? Math.round(memVals.reduce((a, b) => a + b, 0) / memVals.length * 10) / 10 : 0, max: memVals.length ? Math.max(...memVals) : 0, p99: Math.round(pct99(memSorted) * 100) / 100, series: filteredMem };
-                                        setSelectedIncident({ date: dateKey, timeRange: `${startLabel} → ${endLabel}`, dur, reasons, causeLabel: urCause ? (CAUSE_LABEL[urCause] ?? null) : null, causeColor: urCauseColor, cpu: cpuMetric, memory: memMetric, instanceHealthSeries: filteredInst, ivStart, ivEnd });
-                                        setPopupChartData(null); setDetectorData(null); setTimelineOpen(false); setHighFreqOpen(false); setDepsOpen(false); setInstOpen(false); setProbesOpen(false); setTrafficOpen(false);
-                                        setPopupChartLoading(true);
-                                        window.electronAPI.azureMetrics.fetch({ appKeys: [appKey], range: 'custom', config: azureSettings, customStart: new Date(ivStart - PRE).toISOString(), customEnd: new Date(ivEnd).toISOString(), granularity: 'PT1M' })
-                                          .then(data => { const m = data[appKey]; if (m) setPopupChartData({ cpu: m.cpu, memory: m.memory, instanceHealthSeries: m.instanceHealthSeries ?? [], failedDependencies: m.failedDependencies ?? null, instanceProbeSeries: m.instanceProbeSeries ?? null, highFreq: m.requestInsights?.highFreq ?? null, requestsSeries: m.requestsSeries ?? null, failedRequestsSeries: m.failedRequestsSeries ?? null, http4xxSeries: m.http4xxSeries ?? null, responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max, p99: m.responseTime.p99, series: m.responseTime.series } : null, requests: m.requests ?? null, failedRequests: m.failedRequests ?? null, requestInsights: m.requestInsights ?? null }); })
-                                          .catch(() => {}).finally(() => setPopupChartLoading(false));
-                                        const aiAppId = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey)?.appInsightsAppId ?? null;
-                                        if (metrics.appInsightsConfigured && aiAppId) {
-                                          setDetectorLoading(true);
-                                          window.electronAPI.azureMetrics.fetchDetectors({ appInsightsAppId: aiAppId, startIso: new Date(ivStart - PRE).toISOString(), endIso: new Date(ivEnd).toISOString() })
-                                            .then(r => setDetectorData(r))
-                                            .catch((e: Error) => setDetectorData({ categories: [], error: e.message }))
-                                            .finally(() => setDetectorLoading(false));
-                                        }
-                                      };
                                       return (
-                                        <tr key={logKey} onClick={openPopup} style={{ cursor: 'pointer', borderTop: '1px solid rgba(255,255,255,0.04)' }}
-                                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
-                                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                                        <tr key={logKey} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                                           <td style={{ padding: '4px 10px', color: muted, whiteSpace: 'nowrap' }}>{startLabel} → {endLabel}</td>
                                           <td style={{ padding: '4px 6px', color: '#d29922', whiteSpace: 'nowrap' }}>{dur}</td>
                                           <td style={{ padding: '4px 6px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -847,15 +1179,15 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                                             <span style={{ color: '#58a6ff' }}>{url}</span>
                                           </td>
                                           <td style={{ padding: '4px 6px' }}>{instBefore.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instBefore.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqBefore > 0 ? <><span style={{ color: failBefore > 0 ? '#d29922' : '#484f58' }}>{failBefore.toLocaleString()}</span><span> / </span><span>{reqBefore.toLocaleString()}</span></> : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqBefore > 0 ? reqBeforeRPM : '—'}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuBefore != null ? `${cpuBefore.toFixed(1)}%` : '—'}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memBefore != null ? `${memBefore.toFixed(1)}%` : '—'}</td>
                                           <td style={{ padding: '4px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>{instDuring.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instDuring.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; const hc = (inst.avg ?? 100) < 50 ? 'hsl(var(--destructive))' : (inst.avg ?? 100) < 90 ? '#d29922' : '#3fb950'; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: hc }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>{reqDuring > 0 ? <><span style={{ color: failDuring > 0 ? 'hsl(var(--destructive))' : muted }}>{failDuring.toLocaleString()}</span><span style={{ color: '#484f58' }}> / </span><span style={{ color: muted }}>{reqDuring.toLocaleString()}</span></> : <span style={{ color: '#484f58' }}>—</span>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: muted }}>{reqDuring > 0 ? reqDuringRPM : <span style={{ color: '#484f58' }}>—</span>}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: cpuColor, whiteSpace: 'nowrap' }}>{cpuDuring.toFixed(1)}%</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: memColor, whiteSpace: 'nowrap', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{memDuring != null ? `${memDuring.toFixed(1)}%` : '—'}</td>
                                           <td style={{ padding: '4px 6px' }}>{instAfter.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instAfter.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqAfter > 0 ? <><span style={{ color: failAfter > 0 ? '#d29922' : '#484f58' }}>{failAfter.toLocaleString()}</span><span> / </span><span>{reqAfter.toLocaleString()}</span></> : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqAfter > 0 ? reqAfterRPM : '—'}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuAfter != null ? `${cpuAfter.toFixed(1)}%` : '—'}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memAfter != null ? `${memAfter.toFixed(1)}%` : '—'}</td>
                                         </tr>
@@ -873,1871 +1205,17 @@ export function AzureAppCard({ appKey, metrics, loading, azureSettings, uptimeRo
                 </>
               );
             })()}
-            {showInsight && metrics.requestInsights?.insight && (() => {
-              const ins = metrics.requestInsights!.insight!;
-              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms/60000).toFixed(1)}m` : ms >= 1000 ? `${(ms/1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
-              const fmtPct = (v: number) => `${v.toFixed(1)}%`;
-              return (
-                <>
-                  <tr
-                    style={{ borderTop: '1px solid rgba(255,255,255,0.06)', cursor: 'pointer' }}
-                    onClick={() => setInsightExpanded(v => !v)}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold" style={{ paddingTop: 6, verticalAlign: 'top' }}>
-                      Insight{insightExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
-                    </td>
-                    <td colSpan={3} style={{ paddingTop: 6, fontSize: 10, lineHeight: 1.5, textAlign: 'right', color: (() => { const prefix = ins.summary.split(':')[0].trim(); return prefix === 'Critical' ? '#f85149' : prefix === 'High' ? '#f85149' : prefix === 'Elevated' ? '#d29922' : prefix === 'Warning' ? '#d29922' : prefix === 'Info' ? '#58a6ff' : '#8b9ab3'; })() }}>{ins.summary}</td>
-                  </tr>
-                  {insightExpanded && (
-                    <tr>
-                      <td colSpan={4} style={{ paddingBottom: 8, paddingLeft: 12 }}>
-                        {(() => {
-                          const grouped = new Map<string, { name: string; type: string; count: number; totalCount: number; p95: number; p99: number }>();
-                          for (const d of metrics.failedDependencies ?? []) {
-                            const baseName = stripQs(d.name);
-                            const k = baseName + '||' + d.type;
-                            const prev = grouped.get(k);
-                            if (!prev) grouped.set(k, { name: baseName, type: d.type, count: d.failCount, totalCount: d.totalCount, p95: d.p95, p99: d.p99 });
-                            else { prev.count += d.failCount; prev.totalCount += d.totalCount; prev.p95 = Math.max(prev.p95, d.p95); prev.p99 = Math.max(prev.p99, d.p99); }
-                          }
-                          const topFailedDeps = Array.from(grouped.values()).sort((a, b) => b.count - a.count).slice(0, 10);
-                          return (
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9, paddingTop: 4 }}>
-                          <thead>
-                            <tr style={{ color: '#484f58', fontWeight: 700 }}>
-                              <td style={{ padding: '0 12px 3px 8px' }}>Metric</td>
-                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Total</td>
-                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Failed</td>
-                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>Failure Rate</td>
-                              <td style={{ paddingBottom: 3, paddingRight: 12, textAlign: 'right' }}>P95</td>
-                              <td style={{ padding: '0 8px 3px 0', textAlign: 'right' }}>P99</td>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr
-                              style={{ borderTop: '1px solid rgba(255,255,255,0.04)', cursor: topFailedDeps.length > 0 ? 'pointer' : 'default' }}
-                              onClick={() => topFailedDeps.length > 0 && setFailedDepsInsightOpen(v => !v)}
-                              onMouseEnter={e => topFailedDeps.length > 0 && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                            >
-                              <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>
-                                Dependencies{topFailedDeps.length > 0 && (failedDepsInsightOpen ? <ChevronDown size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} /> : <ChevronRight size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} />)}
-                              </td>
-                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{ins.totalDependencies.toLocaleString()}</td>
-                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.failedDependencies > 0 ? '#f85149' : '#484f58' }}>{ins.failedDependencies.toLocaleString()}</td>
-                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.dependencyFailureRate > 10 ? '#f85149' : ins.dependencyFailureRate > 5 ? '#d29922' : '#3fb950' }}>{fmtPct(ins.dependencyFailureRate)}</td>
-                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{fmtMs(ins.dependencyP95)}</td>
-                              <td style={{ padding: '4px 8px 4px 0', textAlign: 'right', color: ins.dependencyP99 > 15000 ? '#f85149' : ins.dependencyP99 > 8000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.dependencyP99)}</td>
-                            </tr>
-                            {failedDepsInsightOpen && topFailedDeps.map((d, i) => (
-                              <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(255,255,255,0.01)' }}>
-                                <td style={{ padding: '3px 12px 3px 20px', color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${d.name} · ${d.type}`}>{d.name}</td>
-                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{d.totalCount.toLocaleString()}</td>
-                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#f85149', whiteSpace: 'nowrap' }}>{d.count.toLocaleString()}</td>
-                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: d.totalCount > 0 ? (d.count / d.totalCount * 100 > 10 ? '#f85149' : d.count / d.totalCount * 100 > 5 ? '#d29922' : '#3fb950') : '#484f58', whiteSpace: 'nowrap' }}>{d.totalCount > 0 ? fmtPct(d.count / d.totalCount * 100) : '—'}</td>
-                                <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(d.p95)}</td>
-                                <td style={{ padding: '3px 8px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(d.p99)}</td>
-                              </tr>
-                            ))}
-                            {(() => {
-                              const topFailedReqs = [...(metrics.requestInsights?.failedUrls ?? [])].sort((a, b) => b.count - a.count).slice(0, 10);
-                              return (
-                                <>
-                                  <tr
-                                    style={{ borderTop: '1px solid rgba(255,255,255,0.04)', cursor: topFailedReqs.length > 0 ? 'pointer' : 'default' }}
-                                    onClick={() => topFailedReqs.length > 0 && setFailedReqInsightOpen(v => !v)}
-                                    onMouseEnter={e => topFailedReqs.length > 0 && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                                  >
-                                    <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>
-                                      Requests{topFailedReqs.length > 0 && (failedReqInsightOpen ? <ChevronDown size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} /> : <ChevronRight size={9} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle', color: '#484f58' }} />)}
-                                    </td>
-                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: '#484f58' }}>{ins.totalRequests.toLocaleString()}</td>
-                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.failedRequests > 0 ? '#f85149' : '#484f58' }}>{ins.failedRequests.toLocaleString()}</td>
-                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.requestFailureRate > 20 ? '#f85149' : ins.requestFailureRate > 5 ? '#d29922' : '#3fb950' }}>{fmtPct(ins.requestFailureRate)}</td>
-                                    <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.requestP95 > 3000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.requestP95)}</td>
-                                    <td style={{ padding: '4px 8px 4px 0', textAlign: 'right', color: ins.requestP99 > 60000 ? '#f85149' : ins.requestP99 > 30000 ? '#d29922' : '#484f58' }}>{fmtMs(ins.requestP99)}</td>
-                                  </tr>
-                                  {failedReqInsightOpen && topFailedReqs.map((r, i) => (
-                                    <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(255,255,255,0.01)' }}>
-                                      <td style={{ padding: '3px 12px 3px 20px', color: '#484f58', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.url}>{r.url}</td>
-                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{r.totalCount.toLocaleString()}</td>
-                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#f85149', whiteSpace: 'nowrap' }}>{r.count.toLocaleString()}</td>
-                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: r.totalCount > 0 ? (r.count / r.totalCount * 100 > 20 ? '#f85149' : r.count / r.totalCount * 100 > 5 ? '#d29922' : '#3fb950') : '#484f58', whiteSpace: 'nowrap' }}>{r.totalCount > 0 ? fmtPct(r.count / r.totalCount * 100) : '—'}</td>
-                                      <td style={{ padding: '3px 12px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(r.p95)}</td>
-                                      <td style={{ padding: '3px 8px 3px 0', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{fmtMs(r.p99)}</td>
-                                    </tr>
-                                  ))}
-                                </>
-                              );
-                            })()}
-                            <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                              <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3' }}>Socket Exceptions</td>
-                              <td style={{ padding: '4px 12px 4px 0', textAlign: 'right', color: ins.socketExceptions > 0 ? '#f85149' : '#484f58' }}>{ins.socketExceptions.toLocaleString()}</td>
-                              <td colSpan={4} />
-                            </tr>
-                          </tbody>
-                        </table>
-                        );
-                        })()}
-                        {ins.socketExceptions > 0 && (
-                          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                            <div
-                              style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', marginBottom: socketExInsightOpen ? 6 : 0 }}
-                              onClick={() => setSocketExInsightOpen(v => !v)}
-                            >
-                              {socketExInsightOpen ? <ChevronDown size={10} style={{ color: '#484f58' }} /> : <ChevronRight size={10} style={{ color: '#484f58' }} />}
-                              <span style={{ fontSize: 9, color: '#484f58', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                                Socket Exceptions
-                              </span>
-                            </div>
-                            {socketExInsightOpen && (
-                              <div style={{ paddingLeft: 8, paddingTop: 4 }}>
-                                <div style={{ fontSize: 9, color: '#8b9ab3', marginBottom: 4 }}>
-                                  <span style={{ color: '#f85149', fontWeight: 700 }}>{ins.socketExceptions.toLocaleString()}</span> socket exception{ins.socketExceptions !== 1 ? 's' : ''} detected in the selected time range.
-                                </div>
-                                <div style={{ fontSize: 9, color: '#484f58', lineHeight: 1.5 }}>
-                                  Socket exceptions indicate SNAT port exhaustion or connection pool saturation. Individual records are not tracked — check Azure SNAT metrics and connection pool configuration for root cause.
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                          <div
-                            style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', marginBottom: legendOpen ? 6 : 0 }}
-                            onClick={() => setLegendOpen(v => !v)}
-                          >
-                            {legendOpen ? <ChevronDown size={10} style={{ color: '#484f58' }} /> : <ChevronRight size={10} style={{ color: '#484f58' }} />}
-                            <span style={{ fontSize: 9, color: '#484f58', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Detection Legend</span>
-                          </div>
-                          {legendOpen && <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
-                            <thead>
-                              <tr style={{ color: '#484f58', fontWeight: 700 }}>
-                                <td style={{ padding: '0 12px 6px 8px' }}>Condition</td>
-                                <td style={{ padding: '0 12px 6px 8px', whiteSpace: 'nowrap' }}>Threshold</td>
-                                <td style={{ padding: '0 8px 6px 8px' }}>Diagnosis</td>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {[
-                                { cond: 'Dependency Failure Rate > 15% + Dependency P99 > 15s + Socket Exceptions > 0', label: 'Critical', color: '#f85149', diag: 'SNAT/socket exhaustion' },
-                                { cond: 'Dependency Failure Rate > 10% + Socket Exceptions > 0',                        label: 'High',     color: '#f85149', diag: 'Socket pressure + fast-fail rejections' },
-                                { cond: 'Dependency Failure Rate > 15% + Dependency P99 > 10s',                         label: 'High',     color: '#f85149', diag: 'Slow & failing dependencies' },
-                                { cond: 'Dependency Failure Rate > 10% + Dependency P99 > 8s',                          label: 'Elevated', color: '#d29922', diag: 'Intermittent dep unresponsiveness' },
-                                { cond: 'Request P99 > 60s + Request Failure Rate < 5%',                                label: 'Warning',  color: '#d29922', diag: 'Extreme latency, resource saturation' },
-                                { cond: 'Request P99 > 30s',                                                            label: 'Warning',  color: '#d29922', diag: 'Severe tail latency / intermittent outage' },
-                                { cond: 'Dependency Failure Rate > 5% + Dependency P95 > 5s',                           label: 'Warning',  color: '#d29922', diag: 'Partial dep degradation (slow + failing)' },
-                                { cond: 'Dependency Failure Rate > 5%',                                                 label: 'Warning',  color: '#d29922', diag: 'Fast-fail rejections (quota/circuit-breaker)' },
-                                { cond: 'Request P95 > 3s + Request Failure Rate < 2%',                                 label: 'Info',     color: '#58a6ff', diag: 'Load pressure, latency climbing' },
-                                { cond: 'Request Failure Rate > 20%',                                                   label: 'Critical', color: '#f85149', diag: 'Major application failure' },
-                                { cond: 'Request Failure Rate > 5%',                                                    label: 'Warning',  color: '#d29922', diag: 'Elevated request error rate' },
-                              ].map((r, i) => (
-                                <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                                  <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>{r.cond}</td>
-                                  <td style={{ padding: '4px 12px 4px 8px', color: r.color, whiteSpace: 'nowrap', fontWeight: 600 }}>{r.label}</td>
-                                  <td style={{ padding: '4px 8px 4px 8px', color: '#8b9ab3' }}>{r.diag}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </>
-              );
-            })()}
           </tbody>
         </table>
         </div>
         )}
 
 
-        {false && (
-          <div className="rounded-md border border-border overflow-hidden">
-            <div>
-                {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading…'}</div>}
-                {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
-                {!urLoading && urMonitors.length === 0 && !urError && (
-                  <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3', fontStyle: 'italic' }}>No monitors found</div>
-                )}
-                {(() => {
-                  const muted = '#8b9ab3';
-                  // Use PT1M dataset for incident rows to avoid coarse-interval data gaps
-                  const iMet = incidentDetailMetrics ?? metrics;
-                  const cpuSeries = iMet.cpu.series;
-                  const memSeries = iMet.memory.series;
-                  const reqSeries = iMet.requestsSeries ?? [];
-                  const failSeries: Array<{ t: string; count: number }> = (() => {
-                    const m = new Map<string, number>();
-                    for (const s of [...(iMet.failedRequestsSeries ?? []), ...(iMet.http4xxSeries ?? [])]) {
-                      m.set(s.t, (m.get(s.t) ?? 0) + s.count);
-                    }
-                    return Array.from(m.entries()).map(([t, count]) => ({ t, count }));
-                  })();
-                  function maxInRangeUr(series: Array<{ t: string; v: number }>, start: number, end: number) {
-                    const vals = series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; }).map(s => s.v);
-                    return vals.length ? Math.max(...vals) : null;
-                  }
-                  // For coarse-granularity data (e.g. PT15M), a short incident may contain no data points.
-                  // Look back up to 1 hour before ivStart to catch the bucket that covers the incident.
-                  function maxDuringUr(series: Array<{ t: string; v: number }>, ivStart: number, ivEnd: number) {
-                    const strict = maxInRangeUr(series, ivStart, ivEnd);
-                    if (strict !== null) return strict;
-                    const BUCKET_BACK = 60 * 60 * 1000;
-                    return maxInRangeUr(series, ivStart - BUCKET_BACK, ivEnd);
-                  }
-                  function sumInRangeUr(series: Array<{ t: string; count: number }>, start: number, end: number) {
-                    return series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; }).reduce((acc, s) => acc + s.count, 0);
-                  }
-                  function sumDuringUr(series: Array<{ t: string; count: number }>, ivStart: number, ivEnd: number) {
-                    const strict = sumInRangeUr(series, ivStart, ivEnd);
-                    if (strict > 0) return strict;
-                    const BUCKET_BACK = 60 * 60 * 1000;
-                    return sumInRangeUr(series, ivStart - BUCKET_BACK, ivEnd);
-                  }
-                  function instSnapsInRange(start: number, end: number) {
-                    return (iMet.instanceHealthSeries ?? []).map(inst => {
-                      const pts = inst.series.filter(s => { const t = new Date(s.t).getTime(); return t >= start && t <= end; });
-                      const avg = pts.length ? Math.round(pts.reduce((a, s) => a + s.v, 0) / pts.length * 10) / 10 : null;
-                      const min = pts.length ? Math.min(...pts.map(s => s.v)) : null;
-                      return { name: inst.name, avg, min };
-                    }).filter(s => s.avg != null);
-                  }
-                  // Flatten all down logs, sort by start time asc for merging
-                  const rawLogs = urMonitors.flatMap(mon =>
-                    (mon.logs ?? []).filter(l => l.type === 1).map(log => ({ log, mon }))
-                  ).sort((a, b) => a.log.datetime - b.log.datetime);
-
-                  if (rawLogs.length === 0 && urMonitors.length > 0 && !incidentDetailLoading) {
-                    return <div style={{ padding: '5px 10px', fontSize: 10, color: muted, fontStyle: 'italic' }}>No downtime recorded</div>;
-                  }
-
-                  // All down logs — each shown individually, sorted desc
-                  type FlatIncident = { ivStart: number; ivEnd: number; url: string; reason: string };
-                  const flat: FlatIncident[] = rawLogs.map(({ log, mon }) => ({
-                    ivStart: log.datetime * 1000,
-                    ivEnd:   (log.datetime + log.duration) * 1000,
-                    url:     mon.url || mon.friendly_name,
-                    reason:  log.reason?.detail ?? '',
-                  })).sort((a, b) => b.ivStart - a.ivStart);
-
-                  // Group by date in SGT
-                  const byDate = new Map<string, FlatIncident[]>();
-                  flat.forEach(inc => {
-                    const dateKey = new Date(inc.ivStart).toLocaleDateString('en-GB', { ...SGT, day: '2-digit', month: 'short', year: 'numeric' });
-                    if (!byDate.has(dateKey)) byDate.set(dateKey, []);
-                    byDate.get(dateKey)!.push(inc);
-                  });
-
-                  return Array.from(byDate.entries()).map(([dateKey, incidents]) => (
-                    <div key={dateKey} className="scrollable-content" style={{ maxHeight: 200, overflowY: 'auto' }}>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                        <thead>
-                          <tr>
-                            <td colSpan={16} style={{ padding: '3px 10px', fontSize: 9, fontWeight: 700, color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)', borderTop: '1px solid rgba(255,255,255,0.04)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                              {dateKey}
-                            </td>
-                          </tr>
-                          <tr style={{ color: '#484f58', fontWeight: 700 }}>
-                            <td rowSpan={2} style={{ padding: '3px 10px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Time (SGT)</td>
-                            <td rowSpan={2} style={{ padding: '3px 6px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Dur</td>
-                            <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Cause</td>
-                            <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Monitored</td>
-                            <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>Before (5min)</td>
-                            <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#8b9ab3', borderBottom: '1px solid rgba(255,255,255,0.04)', borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>During</td>
-                            <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>After (5min)</td>
-                          </tr>
-                          <tr style={{ color: '#484f58', fontWeight: 700 }}>
-                            <td style={{ padding: '2px 6px' }}>Instances</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>Req</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>CPU</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>Mem</td>
-                            <td style={{ padding: '2px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>Instances</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>Req</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>CPU</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right', borderRight: '1px solid rgba(255,255,255,0.06)' }}>Mem</td>
-                            <td style={{ padding: '2px 6px' }}>Instances</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>Req</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>CPU</td>
-                            <td style={{ padding: '2px 6px', textAlign: 'right' }}>Mem</td>
-                          </tr>
-                        </thead>
-                        <tbody>
-                      {incidents.map((inc, i) => {
-                            const { ivStart, ivEnd, url, reason } = inc;
-                            const reasons = reason ? [reason] : [];
-                            const urls = [url];
-                            const logKey = `${dateKey}-${i}`;
-                            const durSecs = Math.round((ivEnd - ivStart) / 1000);
-                            const dur = durSecs >= 3600
-                              ? `${Math.floor(durSecs / 3600)}h ${Math.floor((durSecs % 3600) / 60)}m ${durSecs % 60}s`
-                              : durSecs >= 60
-                              ? `${Math.floor(durSecs / 60)}m ${durSecs % 60}s`
-                              : `${durSecs}s`;
-                            const startLabel = new Date(ivStart).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                            const endLabel   = new Date(ivEnd).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                            const PRE = 5 * 60 * 1000;
-                            const PRE_END = ivStart - 60 * 1000; // before window ends 1min before incident
-                            const cpuBefore  = maxInRangeUr(cpuSeries, ivStart - PRE, PRE_END);
-                            const cpuDuring  = maxDuringUr(cpuSeries, ivStart, ivEnd) ?? iMet.cpu.avg;
-                            const cpuAfter   = maxInRangeUr(cpuSeries, ivEnd, ivEnd + PRE);
-                            const memBefore  = maxInRangeUr(memSeries, ivStart - PRE, PRE_END);
-                            const memDuring  = maxDuringUr(memSeries, ivStart, ivEnd) ?? (iMet.memUnit !== 'MB' ? iMet.memory.avg : null);
-                            const memAfter   = maxInRangeUr(memSeries, ivEnd, ivEnd + PRE);
-                            const reqBefore  = sumInRangeUr(reqSeries,  ivStart - PRE, PRE_END);
-                            const reqDuring  = sumDuringUr(reqSeries,  ivStart, ivEnd);
-                            const reqAfter   = sumInRangeUr(reqSeries,  ivEnd, ivEnd + PRE);
-                            const failBefore = sumInRangeUr(failSeries, ivStart - PRE, PRE_END);
-                            const failDuring = sumDuringUr(failSeries, ivStart, ivEnd);
-                            const failAfter  = sumInRangeUr(failSeries, ivEnd, ivEnd + PRE);
-                            const failSum = failDuring;
-                            const cpuColor = cpuDuring > 90 ? 'hsl(var(--destructive))' : cpuDuring > 70 ? '#d29922' : muted;
-                            const memColor = memDuring == null ? muted : memDuring > 95 ? 'hsl(var(--destructive))' : memDuring > 80 ? '#d29922' : muted;
-
-                            // Classify cause using Azure metrics
-                            const urCause = (() => {
-                              if (failSum === 0) return null;
-                              const availPts = (iMet.availability?.series ?? []).filter(s => { const t = new Date(s.t).getTime(); return t >= ivStart && t <= ivEnd; });
-                              const availAvg = availPts.length ? availPts.reduce((a, s) => a + s.v, 0) / availPts.length : null;
-                              if (availAvg !== null && availAvg >= 100) return null;
-                              const instHealthVals = (iMet.instanceHealthSeries ?? []).map(inst => {
-                                const pts = inst.series.filter(s => { const t = new Date(s.t).getTime(); return t >= ivStart && t <= ivEnd; });
-                                return pts.length ? pts.reduce((a, s) => a + s.v, 0) / pts.length : null;
-                              }).filter((v): v is number => v !== null);
-                              if (instHealthVals.length === 0) return 'outage';
-                              const total = instHealthVals.length;
-                              const affected = instHealthVals.filter(v => v < 50).length;
-                              if (affected === 0) return 'dependency_failure';
-                              if (affected < total) return 'instance_crash';
-                              return 'full_outage';
-                            })();
-                            const urCauseColor = CAUSE_COLOR[urCause ?? ''] ?? muted;
-
-                            const instBefore = instSnapsInRange(ivStart - PRE, PRE_END);
-                            const instDuring = instSnapsInRange(ivStart, ivEnd);
-                            const instAfter  = instSnapsInRange(ivEnd, ivEnd + PRE);
-                            const openPopup = () => {
-                              const instSeries = iMet.instanceHealthSeries ?? [];
-                              const filteredCpu = cpuSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
-                              const filteredMem = memSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; });
-                              const filteredInst = instSeries.map(inst => ({
-                                name: inst.name,
-                                series: inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivEnd + PRE; }),
-                              }));
-                              const cpuVals = filteredCpu.map(p => p.v);
-                              const memVals = filteredMem.map(p => p.v);
-                              const cpuMetric: MetricSeries = {
-                                avg: cpuVals.length ? Math.round(cpuVals.reduce((a, b) => a + b, 0) / cpuVals.length * 10) / 10 : 0,
-                                max: cpuVals.length ? Math.max(...cpuVals) : 0,
-                                series: filteredCpu,
-                              };
-                              const memMetric: MetricSeries = {
-                                avg: memVals.length ? Math.round(memVals.reduce((a, b) => a + b, 0) / memVals.length * 10) / 10 : 0,
-                                max: memVals.length ? Math.max(...memVals) : 0,
-                                series: filteredMem,
-                              };
-                              setSelectedIncident({ date: dateKey, timeRange: `${startLabel} → ${endLabel}`, dur, reasons, causeLabel: urCause ? (CAUSE_LABEL[urCause] ?? null) : null, causeColor: urCauseColor, cpu: cpuMetric, memory: memMetric, instanceHealthSeries: filteredInst, ivStart, ivEnd });
-                              setPopupChartData(null);
-                              setDetectorData(null);
-                              setTimelineOpen(false);
-                              setHighFreqOpen(false);
-                              setDepsOpen(false);
-                              setInstOpen(false);
-                              setProbesOpen(false);
-                              setTrafficOpen(false);
-                              setPopupChartLoading(true);
-                              window.electronAPI.azureMetrics.fetch({
-                                appKeys: [appKey],
-                                range: 'custom',
-                                config: azureSettings,
-                                customStart: new Date(ivStart - PRE).toISOString(),
-                                customEnd: new Date(ivEnd).toISOString(),
-                                granularity: 'PT1M',
-                              }).then(data => {
-                                const m = data[appKey];
-                                if (m) setPopupChartData({
-                                  cpu: m.cpu, memory: m.memory,
-                                  instanceHealthSeries: m.instanceHealthSeries ?? [],
-                                  failedDependencies: m.failedDependencies ?? null,
-                                  instanceProbeSeries: m.instanceProbeSeries ?? null,
-                                  highFreq: m.requestInsights?.highFreq ?? null,
-                                  requestsSeries: m.requestsSeries ?? null,
-                                  failedRequestsSeries: m.failedRequestsSeries ?? null,
-                                  http4xxSeries: m.http4xxSeries ?? null,
-                                  responseTime: m.responseTime ? { avg: m.responseTime.avg, max: m.responseTime.max, p99: m.responseTime.p99, series: m.responseTime.series } : null,
-                                  requests: m.requests ?? null,
-                                  failedRequests: m.failedRequests ?? null,
-                                  requestInsights: m.requestInsights ?? null,
-                                });
-                              }).catch(() => {}).finally(() => setPopupChartLoading(false));
-                              const aiAppId2 = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey)?.appInsightsAppId ?? null;
-                              if (metrics.appInsightsConfigured && aiAppId2) {
-                                setDetectorLoading(true);
-                                window.electronAPI.azureMetrics.fetchDetectors({ appInsightsAppId: aiAppId2, startIso: new Date(ivStart - PRE).toISOString(), endIso: new Date(ivEnd).toISOString() })
-                                  .then(r => setDetectorData(r))
-                                  .catch((e: Error) => setDetectorData({ categories: [], error: e.message }))
-                                  .finally(() => setDetectorLoading(false));
-                              }
-                            };
-                            return (
-                              <tr key={logKey} onClick={openPopup} style={{ cursor: 'pointer', borderTop: '1px solid rgba(255,255,255,0.04)' }}
-                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)') }
-                                onMouseLeave={e => (e.currentTarget.style.background = 'transparent') }>
-                                <td style={{ padding: '4px 10px', color: muted, whiteSpace: 'nowrap' }}>{startLabel} → {endLabel}</td>
-                                <td style={{ padding: '4px 6px', color: '#d29922', whiteSpace: 'nowrap' }}>{dur}</td>
-                                <td style={{ padding: '4px 6px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {urCause
-                                    ? <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.04em', padding: '1px 4px', borderRadius: 3, background: `${urCauseColor}22`, border: `1px solid ${urCauseColor}55`, color: urCauseColor, whiteSpace: 'nowrap' }}>
-                                        {CAUSE_LABEL[urCause]}
-                                      </span>
-                                    : reasons.length > 0
-                                      ? <span style={{ color: muted }}>{reasons.join(' · ')}</span>
-                                      : <span style={{ color: '#484f58' }}>—</span>}
-                                </td>
-                                <td style={{ padding: '4px 6px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  <span style={{ color: '#58a6ff' }}>{url}</span>
-                                </td>
-                                {/* Before: Inst | Req | CPU | Mem */}
-                                <td style={{ padding: '4px 6px' }}>
-                                  {instBefore.length === 0 ? <span style={{ color: '#484f58' }}>—</span> :
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                      {instBefore.map((inst, ii) => {
-                                        const lineColor = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length];
-                                        return (
-                                          <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}>
-                                            <span style={{ color: lineColor, flexShrink: 0 }}>●</span>
-                                            <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{inst.avg}% / {inst.min}%</span>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>
-                                  {reqBefore > 0 ? <><span style={{ color: failBefore > 0 ? '#d29922' : '#484f58' }}>{failBefore.toLocaleString()}</span><span> / </span><span>{reqBefore.toLocaleString()}</span></> : '—'}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuBefore != null ? `${cpuBefore.toFixed(1)}%` : '—'}</td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memBefore != null ? `${memBefore.toFixed(1)}%` : '—'}</td>
-                                {/* During: Inst | Req | CPU | Mem */}
-                                <td style={{ padding: '4px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
-                                  {instDuring.length === 0 ? <span style={{ color: '#484f58' }}>—</span> :
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                      {instDuring.map((inst, ii) => {
-                                        const lineColor = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length];
-                                        const hc = (inst.avg ?? 100) < 50 ? 'hsl(var(--destructive))' : (inst.avg ?? 100) < 90 ? '#d29922' : '#3fb950';
-                                        return (
-                                          <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}>
-                                            <span style={{ color: lineColor, flexShrink: 0 }}>●</span>
-                                            <span style={{ color: hc, whiteSpace: 'nowrap' }}>{inst.avg}% / {inst.min}%</span>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                  {reqDuring > 0 ? <><span style={{ color: failDuring > 0 ? 'hsl(var(--destructive))' : muted }}>{failDuring.toLocaleString()}</span><span style={{ color: '#484f58' }}> / </span><span style={{ color: muted }}>{reqDuring.toLocaleString()}</span></> : <span style={{ color: '#484f58' }}>—</span>}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: cpuColor, whiteSpace: 'nowrap' }}>{cpuDuring.toFixed(1)}%</td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: memColor, whiteSpace: 'nowrap', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{memDuring != null ? `${memDuring.toFixed(1)}%` : '—'}</td>
-                                {/* After: Inst | Req | CPU | Mem */}
-                                <td style={{ padding: '4px 6px' }}>
-                                  {instAfter.length === 0 ? <span style={{ color: '#484f58' }}>—</span> :
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                      {instAfter.map((inst, ii) => {
-                                        const lineColor = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length];
-                                        return (
-                                          <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}>
-                                            <span style={{ color: lineColor, flexShrink: 0 }}>●</span>
-                                            <span style={{ color: '#484f58', whiteSpace: 'nowrap' }}>{inst.avg}% / {inst.min}%</span>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>
-                                  {reqAfter > 0 ? <><span style={{ color: failAfter > 0 ? '#d29922' : '#484f58' }}>{failAfter.toLocaleString()}</span><span> / </span><span>{reqAfter.toLocaleString()}</span></> : '—'}
-                                </td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuAfter != null ? `${cpuAfter.toFixed(1)}%` : '—'}</td>
-                                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memAfter != null ? `${memAfter.toFixed(1)}%` : '—'}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  ));
-                })()}
-              </div>
-          </div>
-        )}
       </div>
 
     </Card>
     </div>
 
-    {selectedIncident && (
-      <div
-        style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px' }}
-        onClick={() => { setSelectedIncident(null); setPopupChartData(null); setDetectorData(null); setDetectorLoading(false); }}
-      >
-        <div
-          style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: '0', minWidth: 480, maxWidth: 700, width: '90vw', display: 'flex', flexDirection: 'column', fontSize: 12, maxHeight: '90vh' }}
-          onClick={e => e.stopPropagation()}
-        >
-          {/* ── Header ── */}
-          <div style={{ background: '#0d1117', borderBottom: '1px solid #21262d', padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {/* Row 1: title + actions + close */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', letterSpacing: '0.08em', textTransform: 'uppercase', flex: 1 }}>Incident Report</span>
-              <button
-                onClick={() => reportActionsRef.current?.copy()}
-                disabled={popupChartLoading || detectorLoading}
-                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: `1px solid ${textCopied ? '#3fb95055' : '#30363d'}`, background: textCopied ? '#3fb95011' : '#161b22', color: textCopied ? '#3fb950' : (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600, transition: 'all 0.2s ease' }}
-              >{textCopied ? '✓ Copied!' : 'Copy Text'}</button>
-              <button
-                onClick={() => reportActionsRef.current?.pdf()}
-                disabled={popupChartLoading || detectorLoading}
-                style={{ fontSize: 10, padding: '3px 10px', borderRadius: 5, border: '1px solid #30363d', background: '#161b22', color: (popupChartLoading || detectorLoading) ? '#484f58' : '#8b9ab3', cursor: (popupChartLoading || detectorLoading) ? 'not-allowed' : 'pointer', fontWeight: 600 }}
-              >Export PDF</button>
-              <button onClick={() => { setSelectedIncident(null); setPopupChartData(null); setDetectorData(null); setDetectorLoading(false); reportActionsRef.current = null; }} style={{ background: 'none', border: 'none', color: '#8b9ab3', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}>✕</button>
-            </div>
-            {/* Row 2: date · time → time · duration · severity · type */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 10, color: '#8b9ab3', fontWeight: 600 }}>{selectedIncident.date}</span>
-              <span style={{ color: '#30363d' }}>·</span>
-              <span style={{ fontSize: 11, color: '#e6edf3', fontWeight: 700 }}>{selectedIncident.timeRange} SGT</span>
-              <span style={{ color: '#30363d' }}>·</span>
-              <span style={{ fontSize: 11, color: '#d29922', fontWeight: 600 }}>{selectedIncident.dur}</span>
-              {(selectedIncident.causeLabel || selectedIncident.reasons.length > 0) && (<>
-                <span style={{ color: '#30363d' }}>·</span>
-                {selectedIncident.causeLabel
-                  ? <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', padding: '2px 7px', borderRadius: 3, background: `${selectedIncident.causeColor}22`, border: `1px solid ${selectedIncident.causeColor}55`, color: selectedIncident.causeColor }}>{selectedIncident.causeLabel}</span>
-                  : <span style={{ fontSize: 10, color: '#8b9ab3' }}>{selectedIncident.reasons.join(' · ')}</span>}
-              </>)}
-            </div>
-          </div>
-          <div className="table-scroll-area" style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', flex: 1 }}>
-          {popupChartLoading && (
-            <div className="animate-pulse" style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
-              <div style={{ height: 10, width: 120, borderRadius: 4, background: 'rgba(255,255,255,0.08)' }} />
-              {[100, 80, 90, 75, 60, 50].map((w, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8 }}>
-                  <div style={{ height: 9, flex: 1, borderRadius: 3, background: 'rgba(255,255,255,0.05)' }} />
-                  <div style={{ height: 9, width: `${w * 0.4}px`, borderRadius: 3, background: 'rgba(255,255,255,0.05)' }} />
-                  <div style={{ height: 9, width: `${w * 0.3}px`, borderRadius: 3, background: 'rgba(255,255,255,0.07)' }} />
-                </div>
-              ))}
-              <div style={{ height: 10, width: 140, borderRadius: 4, background: 'rgba(255,255,255,0.08)', marginTop: 6 }} />
-              {[90, 70, 55].map((w, i) => (
-                <div key={i} style={{ height: 9, width: `${w}%`, borderRadius: 3, background: 'rgba(255,255,255,0.05)' }} />
-              ))}
-              <div style={{ height: 10, width: 160, borderRadius: 4, background: 'rgba(255,255,255,0.08)', marginTop: 6 }} />
-              {[85, 65, 75, 50, 60].map((w, i) => (
-                <div key={i} style={{ height: 9, width: `${w}%`, borderRadius: 3, background: 'rgba(255,255,255,0.05)' }} />
-              ))}
-            </div>
-          )}
-          {/* ── Metrics Snapshot ── */}
-          {false && (() => {
-            const si = selectedIncident; if (!si) return null;
-            const chartCpu = popupChartData?.cpu ?? si.cpu;
-            const chartMem = popupChartData?.memory ?? si.memory;
-            const { ivStart, ivEnd } = si;
-            const PRE = 5 * 60 * 1000;
-            const inRange = (series: Array<{ t: string; v: number }>, s: number, e: number) =>
-              series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.v);
-            const inRangeC = (series: Array<{ t: string; count: number }>, s: number, e: number) =>
-              series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).reduce((a, p) => a + p.count, 0);
-            const avg = (v: number[]) => v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null;
-            const maxV = (v: number[]) => v.length ? +Math.max(...v).toFixed(1) : null;
-            const cpuBefore = inRange(chartCpu.series, ivStart - PRE, ivStart);
-            const cpuDuring = inRange(chartCpu.series, ivStart, ivEnd);
-            const memBefore = inRange(chartMem.series, ivStart - PRE, ivStart);
-            const memDuring = inRange(chartMem.series, ivStart, ivEnd);
-            const reqSeries = popupChartData?.requestsSeries ?? metrics.requestsSeries ?? [];
-            const failSeries = (() => {
-              const m = new Map<string, number>();
-              const src = [
-                ...(popupChartData?.failedRequestsSeries ?? metrics.failedRequestsSeries ?? []),
-                ...(popupChartData?.http4xxSeries ?? metrics.http4xxSeries ?? []),
-              ];
-              for (const s of src) m.set(s.t, (m.get(s.t) ?? 0) + s.count);
-              return Array.from(m.entries()).map(([t, count]) => ({ t, count }));
-            })();
-            const reqBefore = inRangeC(reqSeries, ivStart - PRE, ivStart);
-            const reqDuring = inRangeC(reqSeries, ivStart, ivEnd);
-            const failBefore = inRangeC(failSeries, ivStart - PRE, ivStart);
-            const failDuring = inRangeC(failSeries, ivStart, ivEnd);
-            const availPts = (metrics.availability?.series ?? []).filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-            const availDuring = availPts.length ? +(availPts.reduce((a, p) => a + p.v, 0) / availPts.length).toFixed(1) : null;
-            const dim = '#484f58';
-            const cpuCol = (v: number | null) => !v ? dim : v > 90 ? 'hsl(var(--destructive))' : v > 70 ? '#d29922' : '#3fb950';
-            const memCol = (v: number | null) => !v ? dim : v > 95 ? 'hsl(var(--destructive))' : v > 80 ? '#d29922' : '#3fb950';
-            const SRow = ({ label, before, during, bc, dc }: { label: string; before: string | null; during: string | null; bc?: string; dc?: string }) => (
-              <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>{label}</td>
-                <td style={{ padding: '3px 8px', textAlign: 'right', color: bc ?? '#8b9ab3', fontSize: 10, fontVariantNumeric: 'tabular-nums' }}>{before ?? '—'}</td>
-                <td style={{ padding: '3px 0', textAlign: 'right', color: dc ?? '#e6edf3', fontSize: 10, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{during ?? '—'}</td>
-              </tr>
-            );
-            return (
-              <div style={{ marginTop: 2, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: dim, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 4 }}>Metrics Snapshot</div>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ color: dim }}>
-                      <th style={{ textAlign: 'left', padding: '2px 0', fontWeight: 700, fontSize: 9 }} />
-                      <th style={{ textAlign: 'right', padding: '2px 8px', fontWeight: 700, fontSize: 9 }}>Before (5m)</th>
-                      <th style={{ textAlign: 'right', padding: '2px 0', fontWeight: 700, fontSize: 9, color: '#8b9ab3' }}>During</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <SRow label="CPU avg" before={avg(cpuBefore) != null ? `${avg(cpuBefore)}%` : null} during={avg(cpuDuring) != null ? `${avg(cpuDuring)}%` : null} bc={dim} dc={cpuCol(avg(cpuDuring))} />
-                    <SRow label="CPU max" before={maxV(cpuBefore) != null ? `${maxV(cpuBefore)}%` : null} during={maxV(cpuDuring) != null ? `${maxV(cpuDuring)}%` : null} bc={dim} dc={cpuCol(maxV(cpuDuring))} />
-                    <SRow label="Mem avg" before={avg(memBefore) != null ? `${avg(memBefore)}%` : null} during={avg(memDuring) != null ? `${avg(memDuring)}%` : null} bc={dim} dc={memCol(avg(memDuring))} />
-                    <SRow label="Mem max" before={maxV(memBefore) != null ? `${maxV(memBefore)}%` : null} during={maxV(memDuring) != null ? `${maxV(memDuring)}%` : null} bc={dim} dc={memCol(maxV(memDuring))} />
-                    {(reqBefore > 0 || reqDuring > 0) && <SRow label="Requests" before={reqBefore > 0 ? reqBefore.toLocaleString() : '0'} during={reqDuring > 0 ? reqDuring.toLocaleString() : '0'} bc={dim} dc='#58a6ff' />}
-                    {(failBefore > 0 || failDuring > 0) && <SRow label="Failed req" before={failBefore.toLocaleString()} during={failDuring.toLocaleString()} bc={failBefore > 0 ? '#d29922' : dim} dc={failDuring === 0 ? '#3fb950' : failDuring / (reqDuring || 1) > 0.1 ? 'hsl(var(--destructive))' : '#d29922'} />}
-                    {availDuring != null && <SRow label="Availability" before={null} during={`${availDuring}%`} dc={availDuring! >= 99 ? '#3fb950' : availDuring! >= 95 ? '#d29922' : 'hsl(var(--destructive))'} />}
-                    {(popupChartData?.responseTime ?? metrics.responseTime) != null && (() => {
-                      const rt = popupChartData?.responseTime ?? metrics.responseTime!;
-                      return <SRow label="Response time" before={null} during={`avg ${rt.avg}s · max ${rt.max}s`} dc='#58a6ff' />;
-                    })()}
-                  </tbody>
-                </table>
-              </div>
-            );
-          })()}
-
-          {/* ── Failed Dependencies ── */}
-          {false && (() => {
-            const deps = popupChartData?.failedDependencies ?? metrics.failedDependencies;
-            if (!deps?.length) return null;
-            const grouped = new Map<string, { name: string; type: string; target: string; count: number; totalDur: number; times: number }>();
-            for (const d of deps) {
-              const baseName = stripQs(d.name);
-              const k = baseName + '||' + d.type;
-              const prev = grouped.get(k);
-              if (!prev) grouped.set(k, { name: baseName, type: d.type, target: d.target, count: d.failCount, totalDur: d.avgDuration, times: 1 });
-              else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
-            }
-            const list = Array.from(grouped.values()).sort((a, b) => b.count - a.count);
-            return (
-              <div style={{ marginTop: 2, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button onClick={() => setDepsOpen(v => !v)} style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, color: '#a371f7', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    Failed Dependencies ({list.length})
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{depsOpen ? '▲' : '▼'}</span>
-                </button>
-                {depsOpen && (
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                    <thead>
-                      <tr style={{ color: '#484f58', fontWeight: 700, fontSize: 9 }}>
-                        <th style={{ textAlign: 'left', padding: '2px 0' }}>Name</th>
-                        <th style={{ textAlign: 'left', padding: '2px 8px' }}>Type</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Fails</th>
-                        <th style={{ textAlign: 'right', padding: '2px 0' }}>Avg dur</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {list.map((d, i) => (
-                        <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                          <td style={{ padding: '3px 0', color: '#8b9ab3', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.name}>{d.name}</td>
-                          <td style={{ padding: '3px 8px', color: '#484f58', whiteSpace: 'nowrap' }}>{d.type}</td>
-                          <td style={{ padding: '3px 8px', textAlign: 'right', color: 'hsl(var(--destructive))', fontVariantNumeric: 'tabular-nums' }}>{d.count}</td>
-                          <td style={{ padding: '3px 0', textAlign: 'right', color: '#484f58', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{(() => { const ms = d.totalDur / d.times; return ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`; })()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* ── Instance Health ── */}
-          {false && (() => {
-            const instSeries = popupChartData?.instanceHealthSeries ?? selectedIncident.instanceHealthSeries;
-            if (instSeries.length === 0) return null;
-            const { ivStart, ivEnd } = selectedIncident;
-            const PRE = 5 * 60 * 1000;
-            const instStats = instSeries.map((inst, i) => {
-              const vals = (range: [number, number]) => inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= range[0] && t <= range[1]; }).map(p => p.v);
-              const avg = (v: number[]) => v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null;
-              const minV = (v: number[]) => v.length ? +Math.min(...v).toFixed(1) : null;
-              const before = vals([ivStart - PRE, ivStart]);
-              const during = vals([ivStart, ivEnd]);
-              const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
-              return { name: inst.name, shortName, beforeAvg: avg(before), duringAvg: avg(during), duringMin: minV(during), color: INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3' };
-            });
-            const hCol = (v: number | null) => !v ? '#484f58' : v < 50 ? 'hsl(var(--destructive))' : v < 90 ? '#d29922' : '#3fb950';
-            return (
-              <div style={{ marginTop: 2, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button onClick={() => setInstOpen(v => !v)} style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    Instance Health ({instStats.length})
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{instOpen ? '▲' : '▼'}</span>
-                </button>
-                {instOpen && (
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                    <thead>
-                      <tr style={{ color: '#484f58', fontWeight: 700, fontSize: 9 }}>
-                        <th style={{ textAlign: 'left', padding: '2px 0' }}>Instance</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Before avg</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>During avg</th>
-                        <th style={{ textAlign: 'right', padding: '2px 0' }}>During min</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {instStats.map((inst, i) => (
-                        <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                          <td style={{ padding: '3px 0', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={inst.name}>
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                              <span style={{ color: inst.color, fontSize: 8 }}>●</span>
-                              <span style={{ color: '#8b9ab3' }}>{inst.shortName}</span>
-                            </span>
-                          </td>
-                          <td style={{ padding: '3px 8px', textAlign: 'right', color: '#484f58', fontVariantNumeric: 'tabular-nums' }}>{inst.beforeAvg != null ? `${inst.beforeAvg}%` : '—'}</td>
-                          <td style={{ padding: '3px 8px', textAlign: 'right', color: hCol(inst.duringAvg), fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{inst.duringAvg != null ? `${inst.duringAvg}%` : '—'}</td>
-                          <td style={{ padding: '3px 0', textAlign: 'right', color: hCol(inst.duringMin), fontVariantNumeric: 'tabular-nums' }}>{inst.duringMin != null ? `${inst.duringMin}%` : '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* ── Health Probes ── */}
-          {false && (() => {
-            const probes = popupChartData?.instanceProbeSeries ?? metrics.instanceProbeSeries;
-            if (!probes?.length) return null;
-            const { ivStart, ivEnd } = selectedIncident;
-            const probeStats = probes.map((inst, i) => {
-              const during = inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-              const failures = during.filter(p => p.v < 100).length;
-              const minV = during.length ? +Math.min(...during.map(p => p.v)).toFixed(1) : null;
-              const avgV = during.length ? +(during.reduce((a, p) => a + p.v, 0) / during.length).toFixed(1) : null;
-              const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
-              return { name: inst.name, shortName, failures, total: during.length, minV, avgV, color: INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3' };
-            }).filter(p => p.failures > 0 || p.minV != null);
-            if (probeStats.length === 0) return null;
-            return (
-              <div style={{ marginTop: 2, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button onClick={() => setProbesOpen(v => !v)} style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, color: probeStats.some(p => p.failures > 0) ? '#f85149' : '#484f58', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    Health Probes ({probeStats.length} instances{probeStats.some(p => p.failures > 0) ? ` · ${probeStats.reduce((a, p) => a + p.failures, 0)} failures` : ''})
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{probesOpen ? '▲' : '▼'}</span>
-                </button>
-                {probesOpen && (
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                    <thead>
-                      <tr style={{ color: '#484f58', fontWeight: 700, fontSize: 9 }}>
-                        <th style={{ textAlign: 'left', padding: '2px 0' }}>Instance</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Failures</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Probe avg</th>
-                        <th style={{ textAlign: 'right', padding: '2px 0' }}>Probe min</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {probeStats.map((p, i) => {
-                        const fc = p.failures > 0 ? 'hsl(var(--destructive))' : '#3fb950';
-                        const vc = (v: number | null) => !v ? '#484f58' : v < 50 ? 'hsl(var(--destructive))' : v < 100 ? '#d29922' : '#3fb950';
-                        return (
-                          <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                            <td style={{ padding: '3px 0', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                <span style={{ color: p.color, fontSize: 8 }}>●</span>
-                                <span style={{ color: '#8b9ab3' }}>{p.shortName}</span>
-                              </span>
-                            </td>
-                            <td style={{ padding: '3px 8px', textAlign: 'right', color: fc, fontVariantNumeric: 'tabular-nums' }}>{p.failures} / {p.total}</td>
-                            <td style={{ padding: '3px 8px', textAlign: 'right', color: vc(p.avgV), fontVariantNumeric: 'tabular-nums' }}>{p.avgV != null ? `${p.avgV}%` : '—'}</td>
-                            <td style={{ padding: '3px 0', textAlign: 'right', color: vc(p.minV), fontVariantNumeric: 'tabular-nums', fontWeight: p.failures > 0 ? 700 : 400 }}>{p.minV != null ? `${p.minV}%` : '—'}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* ── Traffic (URLs) ── */}
-          {false && (() => {
-            const ri = popupChartData?.requestInsights;
-            if (!ri) return null;
-            const topUrls = ri.urls ?? [];
-            const failedUrls = ri.failedUrls ?? [];
-            if (topUrls.length === 0 && failedUrls.length === 0) return null;
-            return (
-              <div style={{ marginTop: 2, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button onClick={() => setTrafficOpen(v => !v)} style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, color: '#58a6ff', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    Traffic During Incident
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{trafficOpen ? '▲' : '▼'}</span>
-                </button>
-                {trafficOpen && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 2 }}>
-                    {topUrls.length > 0 && (
-                      <div>
-                        <div style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 3 }}>Top Requests</div>
-                        {topUrls.map((u, i) => (
-                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
-                            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#8b9ab3' }} title={u.url}>{u.url}</span>
-                            <span style={{ flexShrink: 0, color: '#58a6ff', fontVariantNumeric: 'tabular-nums' }}>{u.rpm} rpm</span>
-                            <span style={{ flexShrink: 0, color: '#484f58', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {failedUrls.length > 0 && (
-                      <div>
-                        <div style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 3 }}>Failed Endpoints</div>
-                        {failedUrls.map((u, i) => (
-                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
-                            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#8b9ab3' }} title={u.url}>{u.url}</span>
-                            <span style={{ flexShrink: 0, color: '#484f58', fontVariantNumeric: 'tabular-nums' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                            <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()} failed</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {false && (() => {
-            const hfSource: Array<{ timestamp: string; ip: string; country: string; userAgent: string; count: number; rpm: number }> =
-              (metrics.requestInsights?.highFreq ?? popupChartData?.highFreq ?? []) as Array<{ timestamp: string; ip: string; country: string; userAgent: string; count: number; rpm: number }>;
-            const preIncidentHf = hfSource
-              .filter(h => new Date(h.timestamp).getTime() < selectedIncident.ivStart)
-              .sort((a, b) => b.rpm - a.rpm)
-              .slice(0, 5);
-            if (preIncidentHf.length === 0) return null;
-            return (
-              <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button
-                  onClick={() => setHighFreqOpen(v => !v)}
-                  style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
-                >
-                  <span style={{ fontSize: 9, fontWeight: 700, color: '#d29922', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    High Frequency Traffic (pre-incident · top {preIncidentHf.length})
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{highFreqOpen ? '▲' : '▼'}</span>
-                </button>
-                {highFreqOpen && (
-                  <div style={{ display: 'flex', flexDirection: 'column', marginTop: 4 }}>
-                    {preIncidentHf.map((h, i) => {
-                      const tStart = new Date(h.timestamp);
-                      const tEnd   = new Date(tStart.getTime() + 10 * 60 * 1000);
-                      const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-                      return (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '5px 0', borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 11, color: '#e6edf3', fontWeight: 600 }}>
-                              {h.ip || '(unknown)'}{h.country ? ` - ${h.country}` : ''} · {fmtSgt(tStart)} → {fmtSgt(tEnd)} SGT
-                            </div>
-                            <div style={{ fontSize: 10, color: '#8b9ab3', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {h.userAgent || '(unknown)'}
-                            </div>
-                          </div>
-                          <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, color: '#d29922', whiteSpace: 'nowrap' }}>
-                            {h.rpm} rpm
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-          {false && (() => {
-            const chartCpu   = popupChartData?.cpu   ?? selectedIncident.cpu;
-            const chartMem   = popupChartData?.memory ?? selectedIncident.memory;
-            const chartInst  = popupChartData?.instanceHealthSeries ?? selectedIncident.instanceHealthSeries;
-            const chartDeps  = popupChartData?.failedDependencies ?? metrics.failedDependencies;
-            const chartProbe = popupChartData?.instanceProbeSeries ?? metrics.instanceProbeSeries;
-            const events = buildTimeline(chartCpu, chartMem, chartInst, selectedIncident.ivStart, selectedIncident.ivEnd, chartDeps, chartProbe);
-            if (events.length === 0) return null;
-            return (
-              <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
-                <button
-                  onClick={() => setTimelineOpen(v => !v)}
-                  style={{ width: '100%', background: 'none', border: 'none', padding: '2px 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
-                >
-                  <span style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.06em', textTransform: 'uppercase', flex: 1, textAlign: 'left' }}>
-                    Timeline ({events.length} events)
-                  </span>
-                  <span style={{ fontSize: 9, color: '#484f58' }}>{timelineOpen ? '▲' : '▼'}</span>
-                </button>
-                {timelineOpen && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 2 }}>
-                    {events.map((ev, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 10, ...(ev.isMarker ? { borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 4, marginTop: 2 } : {}) }}>
-                        <span style={{ color: '#484f58', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontSize: 9, minWidth: 60 }}>
-                          {new Date(ev.t).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
-                        <span style={{ color: ev.color, flexShrink: 0, width: 12, textAlign: 'center', fontSize: 9 }}>{ev.icon}</span>
-                        <span style={{ color: ev.color }}>{ev.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {!popupChartLoading && (() => {
-            const { ivStart, ivEnd, causeLabel, causeColor, dur, timeRange, date, reasons } = selectedIncident;
-            const PRE = 5 * 60 * 1000;
-            const sgtTime = (ms: number) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            const sgtFull = (ms: number) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-            const chartCpu  = popupChartData?.cpu   ?? selectedIncident.cpu;
-            const chartMem  = popupChartData?.memory ?? selectedIncident.memory;
-            const chartInst = (popupChartData?.instanceHealthSeries?.length ? popupChartData.instanceHealthSeries : null) ?? selectedIncident.instanceHealthSeries;
-            const chartDeps = (popupChartData?.failedDependencies?.length ? popupChartData.failedDependencies : null) ?? metrics.failedDependencies;
-            const chartProbe = (popupChartData?.instanceProbeSeries?.length ? popupChartData.instanceProbeSeries : null) ?? metrics.instanceProbeSeries;
-            const reqSeries  = popupChartData?.requestsSeries ?? metrics.requestsSeries ?? [];
-            const failSeries = (() => {
-              const m = new Map<string, number>();
-              for (const s of [...(popupChartData?.failedRequestsSeries ?? metrics.failedRequestsSeries ?? []), ...(popupChartData?.http4xxSeries ?? metrics.http4xxSeries ?? [])]) m.set(s.t, (m.get(s.t) ?? 0) + s.count);
-              return Array.from(m.entries()).map(([t, count]) => ({ t, count }));
-            })();
-
-            const inRange  = (series: Array<{ t: string; v: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.v);
-            const inRangeC = (series: Array<{ t: string; count: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).reduce((a, p) => a + p.count, 0);
-            const inRangeCB = (series: Array<{ t: string; count: number }>, s: number, e: number) => series.filter(p => { const t = new Date(p.t).getTime(); return t >= s && t <= e; }).map(p => p.count);
-            const avg  = (v: number[]) => v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null;
-            const maxV = (v: number[]) => v.length ? +Math.max(...v).toFixed(1) : null;
-            const minV = (v: number[]) => v.length ? +Math.min(...v).toFixed(1) : null;
-
-            const p99V = (v: number[]) => { if (!v.length) return null; const s = [...v].sort((a, b) => a - b); return +s[Math.ceil(s.length * 0.99) - 1].toFixed(1); };
-
-            const cpuBefore = inRange(chartCpu.series, ivStart - PRE, ivStart);
-            const cpuDuring = inRange(chartCpu.series, ivStart, ivEnd);
-            const memBefore = inRange(chartMem.series, ivStart - PRE, ivStart);
-            const memDuring = inRange(chartMem.series, ivStart, ivEnd);
-            const reqBefore  = inRangeC(reqSeries,  ivStart - PRE, ivStart);
-            const reqDuring  = inRangeC(reqSeries,  ivStart, ivEnd);
-            const failBefore = inRangeC(failSeries, ivStart - PRE, ivStart);
-            const failDuring = inRangeC(failSeries, ivStart, ivEnd);
-            const availPts   = (metrics.availability?.series ?? []).filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-            const availDuring = availPts.length ? +(availPts.reduce((a, p) => a + p.v, 0) / availPts.length).toFixed(1) : null;
-            const rt = popupChartData?.responseTime ?? metrics.responseTime;
-            const reqSpikePct = reqBefore > 0 ? Math.round((reqDuring - reqBefore) / reqBefore * 100) : null;
-            const reqBucketsBefore = inRangeCB(reqSeries, ivStart - PRE, ivStart);
-            const reqBucketsDuring = inRangeCB(reqSeries, ivStart, ivEnd);
-            const rtSeries = rt?.series ?? [];
-            const rtBucketsBefore = rtSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart - PRE && t <= ivStart; }).map(p => p.avg);
-            const rtBucketsDuring = rtSeries.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; }).map(p => p.avg);
-
-            // Deps grouped
-            const depMap = new Map<string, { name: string; type: string; count: number; totalDur: number; times: number }>();
-            for (const d of chartDeps ?? []) {
-              const baseName = stripQs(d.name);
-              const k = baseName + '||' + d.type;
-              const prev = depMap.get(k);
-              if (!prev) depMap.set(k, { name: baseName, type: d.type, count: d.failCount, totalDur: d.avgDuration, times: 1 });
-              else { prev.count += d.failCount; prev.totalDur += d.avgDuration; prev.times++; }
-            }
-            const deps = Array.from(depMap.values()).sort((a, b) => b.count - a.count).slice(0, 5);
-            const fmtDur = (ms: number) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-
-            // Instance health
-            const instStats = chartInst.map((inst, i) => {
-              const before = inRange(inst.series, ivStart - PRE, ivStart);
-              const during = inRange(inst.series, ivStart, ivEnd);
-              return { name: inst.name, shortName: inst.name.split('_').slice(-2).join('_') || inst.name, beforeAvg: avg(before), duringAvg: avg(during), duringMin: minV(during), color: INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3' };
-            });
-
-            // Probe stats
-            const probeStats = (chartProbe ?? []).map((inst, i) => {
-              const during = inst.series.filter(p => { const t = new Date(p.t).getTime(); return t >= ivStart && t <= ivEnd; });
-              const fails  = during.filter(p => p.v < 100);
-              return { name: inst.name, shortName: inst.name.split('_').slice(-2).join('_') || inst.name, failures: fails.length, total: during.length, minPct: minV(during.map(p => p.v)), avgPct: avg(during.map(p => p.v)), failTimes: fails.map(p => new Date(p.t).getTime()), color: INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3' };
-            });
-
-            const events = buildTimeline(chartCpu, chartMem, chartInst, ivStart, ivEnd, chartDeps, chartProbe);
-
-            // Severity + cause detail lookup
-            const causeKey = Object.keys(CAUSE_LABEL).find(k => CAUSE_LABEL[k] === causeLabel);
-            const causeDetail = causeKey ? CAUSE_DETAIL[causeKey] : null;
-            const severity = causeLabel === 'Full Outage' ? 'CRITICAL' : causeLabel === 'Instance Crash' ? 'HIGH' : causeLabel === 'Dependency Failure' ? 'MEDIUM' : 'UNKNOWN';
-            const severityColor = severity === 'CRITICAL' ? 'hsl(var(--destructive))' : severity === 'HIGH' ? '#f0883e' : severity === 'MEDIUM' ? '#d29922' : '#484f58';
-
-            // Plain English summary
-            const plainEnglish = causeLabel === 'Instance Crash'
-              ? 'One or more application instances became unhealthy while others continued serving traffic. This is consistent with an instance-level failure such as an out-of-memory condition, unhandled exception, or container restart.'
-              : causeLabel === 'Full Outage'
-              ? 'All application instances simultaneously lost health. This pattern is consistent with a platform-level event such as a deployment failure, infrastructure disruption, or a systemic crash affecting the entire app service plan.'
-              : causeLabel === 'Dependency Failure'
-              ? 'Application instances remained healthy but requests failed at an elevated rate. The failure pattern points to an external dependency becoming unavailable or timing out — likely a database, API, or service bus connection.'
-              : reasons.length > 0
-              ? `Uptime monitoring detected a service disruption. Reported reason: ${reasons.join('; ')}.`
-              : 'A service disruption was detected by uptime monitoring. Insufficient telemetry was available to determine the specific root cause.';
-
-            // Contributing factors
-            const factors: string[] = [];
-            const cpuMaxD = maxV(cpuDuring);
-            const memMaxD = maxV(memDuring);
-            if (cpuMaxD && cpuMaxD > 90) factors.push(`CPU exhaustion — peaked at ${cpuMaxD}%`);
-            else if (cpuMaxD && cpuMaxD > 70) factors.push(`Elevated CPU — peaked at ${cpuMaxD}%`);
-            if (memMaxD && memMaxD > 95) factors.push(`Critical memory pressure — peaked at ${memMaxD}%`);
-            else if (memMaxD && memMaxD > 80) factors.push(`Elevated memory — peaked at ${memMaxD}%`);
-            if (deps.length > 0) factors.push(`${deps.length} failed dependenc${deps.length === 1 ? 'y' : 'ies'} — ${deps.slice(0, 2).map(d => d.name.split('/').pop() ?? d.name).join(', ')}`);
-            if (probeStats.some(p => p.failures > 0)) factors.push(`Health probe failures on ${probeStats.filter(p => p.failures > 0).length} instance(s)`);
-            if (reqSpikePct && reqSpikePct > 50) factors.push(`Request spike — ${reqSpikePct}% above baseline`);
-            const firstSig = events.find(e => !e.isMarker && e.t >= ivStart);
-            const hfAll = ((popupChartData?.highFreq?.length ? popupChartData.highFreq : null) ?? (metrics.requestInsights?.highFreq?.length ? metrics.requestInsights.highFreq : null) ?? []) as Array<{ timestamp: string; lastSeen?: string; ip: string; country: string; userAgent: string; count: number; rpm: number }>;
-            const preHfTop5 = hfAll.filter(h => { const t = new Date(h.timestamp).getTime(); return t >= ivStart - PRE && t <= ivEnd; }).sort((a, b) => b.rpm - a.rpm).slice(0, 5);
-
-            // Text export
-            const generateText = () => {
-              const sep = () => '─'.repeat(60);
-              const L: string[] = [];
-              L.push(`INCIDENT REPORT — ${appKey}`);
-              L.push('═'.repeat(60));
-              L.push('');
-              L.push('INCIDENT SUMMARY');
-              L.push(sep());
-              L.push(`App:            ${appKey}`);
-              L.push(`Date:           ${date}`);
-              L.push(`Window (SGT):   ${timeRange}`);
-              L.push(`Duration:       ${dur}`);
-              L.push(`Severity:       ${severity}`);
-              L.push(`Classification: ${causeLabel ?? 'Unknown'}`);
-              L.push('');
-              L.push('1. METRICS SNAPSHOT');
-              L.push(sep());
-              L.push('Metric           Before (5m)    During');
-              const pad = (s: string | null, w = 14) => String(s ?? '—').padEnd(w);
-              L.push(`CPU avg          ${pad(`${avg(cpuBefore) ?? '—'}%`)}${avg(cpuDuring) ?? '—'}%`);
-              L.push(`CPU p99          ${pad(`${p99V(cpuBefore) ?? '—'}%`)}${p99V(cpuDuring) ?? '—'}%`);
-              L.push(`Mem avg          ${pad(`${avg(memBefore) ?? '—'}%`)}${avg(memDuring) ?? '—'}%`);
-              L.push(`Mem p99          ${pad(`${p99V(memBefore) ?? '—'}%`)}${p99V(memDuring) ?? '—'}%`);
-              if (reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0) {
-                L.push(`Req avg          ${pad(`${avg(reqBucketsBefore) ?? '—'}`)}${avg(reqBucketsDuring) ?? '—'}`);
-                L.push(`Req p99          ${pad(`${p99V(reqBucketsBefore) ?? '—'}`)}${p99V(reqBucketsDuring) ?? '—'}`);
-              }
-              if (rt) {
-                L.push(`Resp avg         ${pad(avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—')}${avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—'}`);
-                L.push(`Resp p99         ${pad(p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—')}${p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'}`);
-              }
-              L.push('');
-              L.push('2. ROOT CAUSE ANALYSIS');
-              L.push(sep());
-              L.push(`Primary:      ${(causeLabel ?? reasons.join(', ')) || 'Unknown'}`);
-              if (causeDetail) L.push(`Signals:      ${causeDetail.signals}`);
-              if (factors.length > 0) { L.push(''); L.push('Contributing Factors:'); factors.forEach(f => L.push(`  • ${f}`)); }
-              if (firstSig) { L.push(''); L.push(`First signal: ${sgtTime(firstSig.t)} SGT — ${firstSig.label}`); }
-              if (deps.length > 0) {
-                L.push(''); L.push('3. DEPENDENCY FAILURES'); L.push(sep());
-                deps.forEach(d => L.push(`  [${d.type}] ${d.name}  ×${d.count}  avg ${fmtDur(d.totalDur / d.times)}`));
-              }
-              if (instStats.length > 0) {
-                L.push(''); L.push('4. INSTANCE HEALTH'); L.push(sep());
-                instStats.forEach(i => L.push(`  ${i.shortName}  before ${i.beforeAvg ?? '—'}%  →  during avg ${i.duringAvg ?? '—'}% min ${i.duringMin ?? '—'}%`));
-              }
-              if (probeStats.some(p => p.failures > 0)) {
-                L.push(''); L.push('5. HEALTH PROBES'); L.push(sep());
-                L.push(`Total failures: ${probeStats.reduce((a, p) => a + p.failures, 0)}`);
-                probeStats.filter(p => p.failures > 0).forEach(p => {
-                  L.push(`  ${p.shortName}: ${p.failures}/${p.total} failures  min ${p.minPct ?? '—'}%  avg ${p.avgPct ?? '—'}%`);
-                  p.failTimes.forEach(t => L.push(`    → ${sgtTime(t)} SGT`));
-                });
-              }
-              const ri = popupChartData?.requestInsights;
-              if (reqBefore > 0 || reqDuring > 0 || ri?.urls?.length || ri?.failedUrls?.length) {
-                L.push(''); L.push('6. TRAFFIC ANALYSIS'); L.push(sep());
-                if (reqBefore > 0 || reqDuring > 0) L.push(`  Requests: ${reqBefore.toLocaleString()} before → ${reqDuring.toLocaleString()} during${reqSpikePct != null ? ` (${reqSpikePct > 0 ? '+' : ''}${reqSpikePct}%)` : ''}`);
-                if (failBefore > 0 || failDuring > 0) L.push(`  Failures: ${failBefore.toLocaleString()} before → ${failDuring.toLocaleString()} during`);
-                if (ri?.urls?.length) { L.push('  Top Endpoints:'); ri.urls.slice(0, 5).forEach(u => L.push(`    ${u.rpm} rpm  ${u.count}  ${u.url}`)); }
-                if (ri?.failedUrls?.length) { L.push('  Failed Endpoints:'); ri.failedUrls.slice(0, 5).forEach(u => L.push(`    ${u.count} failed  ${u.url}`)); }
-                if (preHfTop5.length > 0) { L.push('  High Freq (−5min→end):'); preHfTop5.forEach(h => { const fmtTs = (iso: string) => new Date(iso).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' }); const tr = h.lastSeen ? `${fmtTs(h.timestamp)} → ${fmtTs(h.lastSeen)}` : fmtTs(h.timestamp); L.push(`    ${h.ip}  ${h.country ?? ''}  ${tr}  ${h.count.toLocaleString()} reqs  ${h.rpm} rpm  UA: ${h.userAgent || '?'}`); }); }
-              }
-              if (events.length > 0) {
-                L.push(''); L.push('7. TIMELINE'); L.push(sep());
-                events.forEach(e => L.push(`  ${sgtTime(e.t)} SGT  ${e.icon}  ${e.label}`));
-              }
-              if (detectorData && !detectorLoading) {
-                const visDetCats = detectorData.categories.filter(cat => cat.queries.some(q => q.result.rows.length > 0));
-                if (visDetCats.length > 0) {
-                  L.push(''); L.push('8. DETECTOR ANALYSIS'); L.push(sep());
-                  for (const cat of visDetCats) {
-                    L.push(`  [${cat.label}]`);
-                    for (const q of cat.queries.filter(qq => qq.result.rows.length > 0)) {
-                      L.push(`    ${q.name}:`);
-                      if (q.result.error) {
-                        L.push(`      Error: ${q.result.error}`);
-                      } else {
-                        for (const row of q.result.rows.slice(0, 10)) {
-                          L.push(`      ${row.map(v => v == null ? '—' : String(v)).join('  ')}`);
-                        }
-                        if (q.result.rows.length > 10) L.push(`      … +${q.result.rows.length - 10} more`);
-                      }
-                    }
-                  }
-                }
-              }
-              L.push(''); L.push('─'.repeat(60));
-              L.push(`Generated: ${sgtFull(Date.now())} SGT  |  DevForge`);
-              return L.join('\n');
-            };
-
-            const exportPDF = () => {
-              const txt = generateText().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Incident Report — ${appKey}</title><style>body{font-family:'Courier New',monospace;font-size:10px;padding:20px;white-space:pre-wrap;word-break:break-word;color:#000}@media print{body{font-size:9px;padding:10px}}</style></head><body>${txt}</body></html>`;
-              const iframe = document.createElement('iframe');
-              iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none';
-              document.body.appendChild(iframe);
-              iframe.contentDocument!.open();
-              iframe.contentDocument!.write(html);
-              iframe.contentDocument!.close();
-              iframe.contentWindow!.focus();
-              iframe.contentWindow!.print();
-              setTimeout(() => { try { document.body.removeChild(iframe); } catch {} }, 2000);
-            };
-
-            const generateMd = () => {
-              const nl = '\n';
-              const fmtMs = (ms: number) => ms >= 60000 ? `${(ms / 60000).toFixed(1)}m` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-              const tbl = (headers: string[], rows: (string | number | null)[][]) => {
-                if (!rows.length) return '';
-                const escape = (v: string | number | null) => String(v == null ? '—' : v).replace(/\|/g, '\\|');
-                const h = `| ${headers.map(escape).join(' | ')} |`;
-                const sep2 = `| ${headers.map(() => '---').join(' | ')} |`;
-                const body = rows.map(r => `| ${r.map(escape).join(' | ')} |`).join(nl);
-                return [h, sep2, body].join(nl);
-              };
-              const fmtSgtFull = (iso: string) => new Date(iso).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-              const M: string[] = [];
-              const ins2 = metrics.requestInsights?.insight;
-              const ri2 = popupChartData?.requestInsights;
-
-              // Frontmatter
-              M.push('---');
-              M.push(`app: ${appKey}`);
-              M.push(`type: ${metrics.type === 'appservice' ? 'App Service' : 'Container App'}${metrics.plan ? ` · ${metrics.plan.sku} · ${metrics.plan.cores}c` : ''}`);
-              M.push(`incident_date: ${date}`);
-              M.push(`incident_window_sgt: "${timeRange}"`);
-              M.push(`duration: ${dur}`);
-              M.push(`severity: ${severity}`);
-              M.push(`classification: ${causeLabel ?? 'Unknown'}`);
-              M.push(`generated: ${sgtFull(Date.now())} SGT`);
-              M.push('---');
-              M.push('');
-              M.push(`# Incident Report — ${appKey}`);
-              M.push('');
-              M.push('> Incident telemetry from Azure Monitor and App Insights.');
-              M.push('> Feed this file with the project codebase to an AI assistant for root cause analysis and recommendations.');
-              M.push('');
-
-              // App Profile
-              M.push('## App Profile');
-              M.push('');
-              M.push(`- **Name**: ${appKey}`);
-              M.push(`- **Type**: ${metrics.type === 'appservice' ? 'App Service' : 'Container App'}`);
-              if (metrics.plan) M.push(`- **Plan**: ${metrics.plan.sku} · ${metrics.plan.cores} cores · ${metrics.plan.memoryMB} MB RAM`);
-              if (metrics.instances?.length) M.push(`- **Instances**: ${metrics.instances.length} (${metrics.instances.map(i => i.name.split('_').slice(-1)[0]).join(', ')})`);
-              if (ins2?.summary) M.push(`- **Assessment**: ${ins2.summary}`);
-              M.push(`- **Incident Description**: ${plainEnglish}`);
-              M.push('');
-
-              // 1. Metrics Snapshot
-              M.push('## 1. Metrics Snapshot');
-              M.push('');
-              M.push(tbl(
-                ['Metric', 'Before Avg', 'Before P99', 'During Avg', 'During P99'],
-                [
-                  ['CPU', avg(cpuBefore) != null ? `${avg(cpuBefore)}%` : '—', p99V(cpuBefore) != null ? `${p99V(cpuBefore)}%` : '—', avg(cpuDuring) != null ? `${avg(cpuDuring)}%` : '—', p99V(cpuDuring) != null ? `${p99V(cpuDuring)}%` : '—'],
-                  ['Memory', avg(memBefore) != null ? `${avg(memBefore)}%` : '—', p99V(memBefore) != null ? `${p99V(memBefore)}%` : '—', avg(memDuring) != null ? `${avg(memDuring)}%` : '—', p99V(memDuring) != null ? `${p99V(memDuring)}%` : '—'],
-                  ...(reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0 ? [
-                    ['Requests', String(avg(reqBucketsBefore) ?? '—'), String(p99V(reqBucketsBefore) ?? '—'), String(avg(reqBucketsDuring) ?? '—'), String(p99V(reqBucketsDuring) ?? '—')],
-                  ] : []),
-                  ...(rt ? [
-                    ['Response Time', avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—', p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—', avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—', p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'],
-                  ] : []),
-                ]
-              ));
-              M.push('');
-
-              // Overall metrics (from main card data)
-              M.push('**Overall period metrics (full selected range):**');
-              M.push('');
-              M.push(tbl(
-                ['Metric', 'Avg', 'P99', 'Max'],
-                [
-                  ['CPU', `${(+metrics.cpu.avg).toFixed(2)}%`, `${(+(metrics.cpu.p99 ?? 0)).toFixed(2)}%`, `${(+metrics.cpu.max).toFixed(2)}%`],
-                  ['Memory', `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, `${(+(metrics.memory.p99 ?? 0)).toFixed(2)}${metrics.memUnit}`, `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`],
-                  ...(metrics.responseTime ? [['Response Time', `${metrics.responseTime.avg}s`, metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—', `${metrics.responseTime.max}s`]] : []),
-                  ...(metrics.requests ? [['Total Requests', metrics.requests.total.toLocaleString(), '—', '—']] : []),
-                  ...(metrics.availability ? [['Availability', `${metrics.availability.pct.toFixed(2)}%`, '—', '—']] : []),
-                  ...(availDuring != null ? [['Availability During', `${availDuring}%`, '—', '—']] : []),
-                ]
-              ));
-              M.push('');
-
-              // 2. Root Cause
-              M.push('## 2. Root Cause Analysis');
-              M.push('');
-              M.push(`- **Primary**: ${(causeLabel ?? reasons.join(', ')) || 'Unknown'}`);
-              if (causeDetail) M.push(`- **Signals**: ${causeDetail.signals}`);
-              if (factors.length > 0) {
-                M.push('- **Contributing Factors**:');
-                factors.forEach(f => M.push(`  - ${f}`));
-              }
-              if (firstSig) M.push(`- **First Signal**: ${sgtTime(firstSig.t)} SGT — ${firstSig.label}`);
-              M.push('');
-
-              // 3. Dependency Failures
-              if (deps.length > 0) {
-                M.push('## 3. Dependency Failures');
-                M.push('');
-                M.push(tbl(
-                  ['Type', 'Name', 'Fail Count', 'Avg Duration'],
-                  deps.map(d => [d.type, d.name, d.count, fmtDur(d.totalDur / d.times)])
-                ));
-                M.push('');
-              }
-
-              // 4. Instance Health
-              if (instStats.length > 0) {
-                M.push('## 4. Instance Health');
-                M.push('');
-                M.push(tbl(
-                  ['Instance', 'Status', 'Before Avg', 'During Avg', 'During Min'],
-                  instStats.map(i => [i.shortName, i.color === '#3fb950' ? 'Healthy' : i.color === '#d29922' ? 'Degraded' : 'Critical', i.beforeAvg != null ? `${i.beforeAvg}%` : '—', i.duringAvg != null ? `${i.duringAvg}%` : '—', i.duringMin != null ? `${i.duringMin}%` : '—'])
-                ));
-                M.push('');
-              }
-
-              // 5. Health Probes
-              const failProbes = probeStats.filter(p => p.failures > 0);
-              if (failProbes.length > 0) {
-                M.push('## 5. Health Probes');
-                M.push('');
-                M.push(`Total failures: ${probeStats.reduce((a, p) => a + p.failures, 0)} across ${failProbes.length} instance(s)`);
-                M.push('');
-                M.push(tbl(
-                  ['Instance', 'Failures', 'Total Checks', 'Min %', 'Avg %', 'Fail Times (SGT)'],
-                  failProbes.map(p => [p.shortName, p.failures, p.total, p.minPct ?? '—', p.avgPct ?? '—', p.failTimes.map(t => sgtTime(t)).join(', ')])
-                ));
-                M.push('');
-              }
-
-              // 6. Traffic Analysis
-              if (reqBefore > 0 || reqDuring > 0 || ri2?.urls?.length || ri2?.failedUrls?.length || hfAll.length > 0) {
-                M.push('## 6. Traffic Analysis');
-                M.push('');
-                if (reqBefore > 0 || reqDuring > 0) {
-                  M.push(`- **Requests**: ${reqBefore.toLocaleString()} before → ${reqDuring.toLocaleString()} during${reqSpikePct != null ? ` (${reqSpikePct > 0 ? '+' : ''}${reqSpikePct}% change)` : ''}`);
-                  if (failBefore > 0 || failDuring > 0) M.push(`- **Failures**: ${failBefore.toLocaleString()} before → ${failDuring.toLocaleString()} during`);
-                }
-                if (metrics.requests) M.push(`- **Total Requests (full range)**: ${metrics.requests.total.toLocaleString()}${metrics.failedRequests ? ` · ${metrics.failedRequests.total.toLocaleString()} failed` : ''}`);
-                M.push('');
-
-                if (ri2?.urls?.length) {
-                  M.push('**Top Endpoints by Volume:**');
-                  M.push('');
-                  M.push(tbl(['URL', 'RPM', 'Count'], ri2.urls.map(u => [u.url, u.rpm, u.count])));
-                  M.push('');
-                }
-                if (ri2?.failedUrls?.length) {
-                  M.push('**Failed Endpoints:**');
-                  M.push('');
-                  M.push(tbl(['URL', 'Failed', 'Total', 'Failure Rate'], ri2.failedUrls.map(u => [u.url, u.count, u.totalCount, u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'])));
-                  M.push('');
-                }
-                if (ri2?.slowUrls?.length) {
-                  M.push('**Slow Endpoints:**');
-                  M.push('');
-                  M.push(tbl(['URL', 'Avg (ms)', 'P99 (ms)', 'Max (ms)', 'Count'], ri2.slowUrls.map(u => [u.url, u.avgMs, u.p99Ms, u.maxMs, u.count])));
-                  M.push('');
-                }
-                if (ri2?.ips?.length) {
-                  M.push('**Top IP Addresses:**');
-                  M.push('');
-                  M.push(tbl(['IP', 'RPM', 'Count'], ri2.ips.map(u => [u.ip, u.rpm, u.count])));
-                  M.push('');
-                }
-                if (ri2?.userAgents?.length) {
-                  M.push('**Top User Agents:**');
-                  M.push('');
-                  M.push(tbl(['User Agent', 'RPM', 'Count'], ri2.userAgents.map(u => [u.userAgent, u.rpm, u.count])));
-                  M.push('');
-                }
-                if (ri2?.bots?.length) {
-                  M.push('**Bots / Crawlers:**');
-                  M.push('');
-                  M.push(tbl(['User Agent', 'RPM', 'Count'], ri2.bots.map(u => [u.userAgent, u.rpm, u.count])));
-                  M.push('');
-                }
-                // Full high-freq traffic list (all, pre-incident window)
-                const hfWindow = hfAll.filter(h => {
-                  const t = new Date(h.timestamp).getTime();
-                  return t >= ivStart - 5 * 60 * 1000 && t <= ivEnd;
-                }).sort((a, b) => b.rpm - a.rpm);
-                if (hfWindow.length > 0) {
-                  M.push('**High-Frequency Traffic (−5 min → incident end):**');
-                  M.push('');
-                  M.push(tbl(
-                    ['IP / ID', 'Country', 'RPM', 'Total Requests', 'Window (SGT)', 'User Agent'],
-                    hfWindow.map(h => {
-                      const start = fmtSgtFull(h.timestamp);
-                      const end = h.lastSeen ? fmtSgtFull(h.lastSeen) : start;
-                      return [h.ip || '(unknown)', h.country ?? '—', h.rpm, h.count, `${start} → ${end}`, h.userAgent || '(unknown)'];
-                    })
-                  ));
-                  M.push('');
-                }
-              }
-
-              // 7. Timeline
-              if (events.length > 0) {
-                M.push('## 7. Timeline (SGT)');
-                M.push('');
-                events.forEach(e => M.push(`- \`${sgtTime(e.t)}\` ${e.icon} ${e.label}`));
-                M.push('');
-              }
-
-              // 8. Detector Analysis
-              if (detectorData && !detectorLoading) {
-                const visCats = detectorData.categories.filter(cat => cat.queries.some(q => q.result.rows.length > 0 || q.result.error));
-                if (visCats.length > 0) {
-                  M.push('## 8. Detector Analysis');
-                  M.push('');
-                  for (const cat of visCats) {
-                    M.push(`### ${cat.label}`);
-                    M.push('');
-                    for (const q of cat.queries.filter(qq => qq.result.rows.length > 0 || qq.result.error)) {
-                      M.push(`**${q.name}**`);
-                      M.push('');
-                      if (q.result.error) {
-                        M.push(`_Error: ${q.result.error}_`);
-                      } else if (q.result.columns.length === 1 && q.result.columns[0] === 'IncidentSummary') {
-                        M.push(`> ${String(q.result.rows[0]?.[0] ?? '—')}`);
-                      } else {
-                        const t = tbl(q.result.columns, q.result.rows);
-                        if (t) M.push(t);
-                      }
-                      M.push('');
-                    }
-                  }
-                }
-              }
-
-              // 9. App Insights Analysis
-              if (ins2) {
-                M.push('## 9. App Insights Analysis (Full Range)');
-                M.push('');
-                M.push(tbl(
-                  ['Metric', 'Value'],
-                  [
-                    ['Total Dependencies', ins2.totalDependencies.toLocaleString()],
-                    ['Failed Dependencies', `${ins2.failedDependencies.toLocaleString()} (${ins2.dependencyFailureRate.toFixed(2)}%)`],
-                    ['Dep P95 / P99', `${fmtMs(ins2.dependencyP95)} / ${fmtMs(ins2.dependencyP99)}`],
-                    ['Total Requests', ins2.totalRequests.toLocaleString()],
-                    ['Failed Requests', `${ins2.failedRequests.toLocaleString()} (${ins2.requestFailureRate.toFixed(2)}%)`],
-                    ['Req P95 / P99', `${fmtMs(ins2.requestP95)} / ${fmtMs(ins2.requestP99)}`],
-                    ['Socket Exceptions', ins2.socketExceptions.toLocaleString()],
-                    ['Assessment', ins2.summary],
-                  ]
-                ));
-                M.push('');
-              }
-
-              // AI prompt
-              M.push('---');
-              M.push('');
-              M.push('## AI Analysis Request');
-              M.push('');
-              M.push('You are analyzing a production incident for the application described above.');
-              M.push('Using this incident report **together with the project codebase**, please provide:');
-              M.push('');
-              M.push('1. **Root Cause** — What most likely caused this incident? Cite specific metrics or signals from this report.');
-              M.push('2. **Affected Code** — Which files, modules, or components in the codebase are most likely involved or contributed to the issue?');
-              M.push('3. **Immediate Fix** — What is the fastest safe remediation to stop recurrence?');
-              M.push('4. **Long-term Enhancements** — What architectural, configuration, or code changes would prevent this class of incident?');
-              M.push('5. **Monitoring Gaps** — What additional metrics, alerts, or dashboards would have caught this earlier?');
-              M.push('6. **Risk Assessment** — Are there other latent risks visible in this data that have not yet caused an incident?');
-              M.push('');
-              M.push('Be specific. Reference file names, function names, or configuration keys where possible.');
-              M.push('');
-              M.push(`_Generated by DevForge · ${sgtFull(Date.now())} SGT_`);
-              return M.join(nl);
-            };
-
-            const copyMd = () => {
-              navigator.clipboard.writeText(generateMd()).then(() => {
-                setMdCopied(true);
-                setTimeout(() => setMdCopied(false), 2000);
-              });
-            };
-
-            // Wire actions to ref so popup header can call them
-            reportActionsRef.current = {
-              copy: () => navigator.clipboard.writeText(generateText()).then(() => { setTextCopied(true); setTimeout(() => setTextCopied(false), 2000); }),
-              pdf:  exportPDF,
-              downloadMd: copyMd,
-            };
-
-            // Shared styles
-            const dim = '#484f58', sub = '#8b9ab3';
-            const cpuCol  = (v: number | null) => !v ? dim : v > 90 ? 'hsl(var(--destructive))' : v > 70 ? '#d29922' : '#3fb950';
-            const memCol  = (v: number | null) => !v ? dim : v > 95 ? 'hsl(var(--destructive))' : v > 80 ? '#d29922' : '#3fb950';
-            const hCol    = (v: number | null) => !v ? dim : v < 50 ? 'hsl(var(--destructive))' : v < 90 ? '#d29922' : '#3fb950';
-            const SecHead = ({ n, label, color = dim }: { n: string; label: string; color?: string }) => (
-              <div style={{ fontSize: 9, fontWeight: 700, color, letterSpacing: '0.08em', textTransform: 'uppercase', margin: '14px 0 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ color: dim }}>{n}</span>
-                <span style={{ color }}>{label}</span>
-                <span style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.05)', display: 'inline-block' }} />
-              </div>
-            );
-            const bCell = (v: string | null) => ({ padding: '3px 4px', textAlign: 'right' as const, color: sub, fontSize: 10, fontVariantNumeric: 'tabular-nums' as const });
-            const dCell = (c?: string) => ({ padding: '3px 4px', textAlign: 'right' as const, color: c ?? '#e6edf3', fontSize: 10, fontVariantNumeric: 'tabular-nums' as const, fontWeight: 600 });
-            const divider = { borderLeft: '1px solid rgba(255,255,255,0.08)' };
-
-            return (
-              <div style={{ marginTop: 0 }}>
-                {/* 1. Metrics Snapshot */}
-                <SecHead n="1." label="Metrics Snapshot" color="#3fb950" />
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ fontSize: 9, fontWeight: 700 }}>
-                      <th style={{ textAlign: 'left', padding: '2px 0' }} />
-                      <th colSpan={2} style={{ textAlign: 'center', padding: '2px 4px', color: dim, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>Before (5m)</th>
-                      <th colSpan={2} style={{ textAlign: 'center', padding: '2px 0', color: sub, borderBottom: '1px solid rgba(255,255,255,0.06)', ...divider }}>During</th>
-                    </tr>
-                    <tr style={{ fontSize: 9, fontWeight: 700, color: dim }}>
-                      <th style={{ textAlign: 'left', padding: '2px 0' }} />
-                      <th style={{ textAlign: 'right', padding: '2px 4px' }}>avg</th>
-                      <th style={{ textAlign: 'right', padding: '2px 8px' }}>p99</th>
-                      <th style={{ textAlign: 'right', padding: '2px 4px', ...divider }}>avg</th>
-                      <th style={{ textAlign: 'right', padding: '2px 0' }}>p99</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {/* CPU */}
-                    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                      <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>CPU</td>
-                      <td style={bCell(null)}>{avg(cpuBefore) != null ? `${avg(cpuBefore)}%` : '—'}</td>
-                      <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(cpuBefore) != null ? `${p99V(cpuBefore)}%` : '—'}</td>
-                      <td style={{ ...dCell(cpuCol(avg(cpuDuring))), ...divider }}>{avg(cpuDuring) != null ? `${avg(cpuDuring)}%` : '—'}</td>
-                      <td style={{ ...dCell(cpuCol(p99V(cpuDuring))), padding: '3px 0' }}>{p99V(cpuDuring) != null ? `${p99V(cpuDuring)}%` : '—'}</td>
-                    </tr>
-                    {/* Mem */}
-                    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                      <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Mem</td>
-                      <td style={bCell(null)}>{avg(memBefore) != null ? `${avg(memBefore)}%` : '—'}</td>
-                      <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(memBefore) != null ? `${p99V(memBefore)}%` : '—'}</td>
-                      <td style={{ ...dCell(memCol(avg(memDuring))), ...divider }}>{avg(memDuring) != null ? `${avg(memDuring)}%` : '—'}</td>
-                      <td style={{ ...dCell(memCol(p99V(memDuring))), padding: '3px 0' }}>{p99V(memDuring) != null ? `${p99V(memDuring)}%` : '—'}</td>
-                    </tr>
-                    {/* Requests */}
-                    {(reqBucketsBefore.length > 0 || reqBucketsDuring.length > 0) && (
-                      <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Requests</td>
-                        <td style={bCell(null)}>{avg(reqBucketsBefore) != null ? avg(reqBucketsBefore)!.toLocaleString() : '—'}</td>
-                        <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(reqBucketsBefore) != null ? p99V(reqBucketsBefore)!.toLocaleString() : '—'}</td>
-                        <td style={{ ...dCell('#58a6ff'), ...divider }}>{avg(reqBucketsDuring) != null ? avg(reqBucketsDuring)!.toLocaleString() : '—'}</td>
-                        <td style={{ ...dCell('#58a6ff'), padding: '3px 0' }}>{p99V(reqBucketsDuring) != null ? p99V(reqBucketsDuring)!.toLocaleString() : '—'}</td>
-                      </tr>
-                    )}
-                    {/* Response */}
-                    {rt != null && (
-                      <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td style={{ padding: '3px 0', color: dim, fontSize: 10 }}>Response</td>
-                        <td style={bCell(null)}>{avg(rtBucketsBefore) != null ? `${avg(rtBucketsBefore)}s` : '—'}</td>
-                        <td style={{ ...bCell(null), padding: '3px 8px' }}>{p99V(rtBucketsBefore) != null ? `${p99V(rtBucketsBefore)}s` : '—'}</td>
-                        <td style={{ ...dCell('#58a6ff'), ...divider }}>{avg(rtBucketsDuring) != null ? `${avg(rtBucketsDuring)}s` : '—'}</td>
-                        <td style={{ ...dCell('#58a6ff'), padding: '3px 0' }}>{p99V(rtBucketsDuring) != null ? `${p99V(rtBucketsDuring)}s` : '—'}</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-
-                {/* 3. Root Cause */}
-                <SecHead n="2." label="Root Cause Analysis" color="hsl(var(--destructive))" />
-                <div style={{ fontSize: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  <div><span style={{ color: dim }}>Primary: </span><span style={{ color: causeColor, fontWeight: 700 }}>{(causeLabel ?? reasons.join(', ')) || 'Unknown'}</span></div>
-                  {causeDetail && <div style={{ color: sub, fontSize: 10 }}><span style={{ color: dim }}>Signals: </span>{causeDetail.signals}</div>}
-                  {factors.length > 0 && (
-                    <div>
-                      <div style={{ color: dim, fontSize: 9, marginBottom: 3 }}>Contributing Factors:</div>
-                      {factors.map((f, i) => <div key={i} style={{ display: 'flex', gap: 6, color: sub, wordBreak: 'break-word', overflowWrap: 'anywhere' }}><span style={{ color: dim, flexShrink: 0 }}>•</span><span>{f}</span></div>)}
-                    </div>
-                  )}
-                  {firstSig && (
-                    <div style={{ fontSize: 10, wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                      <span style={{ color: dim }}>First signal: </span>
-                      <span style={{ color: firstSig.color, fontVariantNumeric: 'tabular-nums' }}>{sgtTime(firstSig.t)} SGT</span>
-                      <span style={{ color: dim }}> — </span>
-                      <span style={{ color: firstSig.color }}>{firstSig.label}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* 4. Dependency Failures */}
-                {deps.length > 0 && (
-                  <>
-                    <SecHead n="3." label="Dependency Failures" color="#a371f7" />
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                      <thead><tr style={{ color: dim, fontWeight: 700, fontSize: 9 }}>
-                        <th style={{ textAlign: 'left', padding: '2px 0' }}>Name</th>
-                        <th style={{ textAlign: 'left', padding: '2px 8px' }}>Type</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Fails</th>
-                        <th style={{ textAlign: 'right', padding: '2px 0' }}>Avg dur</th>
-                      </tr></thead>
-                      <tbody>
-                        {deps.map((d, i) => (
-                          <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                            <td style={{ padding: '3px 0', color: sub, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.name}>{d.name}</td>
-                            <td style={{ padding: '3px 8px', color: dim, whiteSpace: 'nowrap' }}>{d.type}</td>
-                            <td style={{ padding: '3px 8px', textAlign: 'right', color: 'hsl(var(--destructive))', fontVariantNumeric: 'tabular-nums' }}>{d.count}</td>
-                            <td style={{ padding: '3px 0', textAlign: 'right', color: dim, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{fmtDur(d.totalDur / d.times)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-                )}
-
-                {/* 5. Instance Health */}
-                {instStats.length > 0 && (
-                  <>
-                    <SecHead n="4." label="Instance Health" />
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                      <thead><tr style={{ color: dim, fontWeight: 700, fontSize: 9 }}>
-                        <th style={{ textAlign: 'left', padding: '2px 0' }}>Instance</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>Before avg</th>
-                        <th style={{ textAlign: 'right', padding: '2px 8px' }}>During avg</th>
-                        <th style={{ textAlign: 'right', padding: '2px 0' }}>During min</th>
-                      </tr></thead>
-                      <tbody>
-                        {instStats.map((inst, i) => (
-                          <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                            <td style={{ padding: '3px 0', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={inst.name}>
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><span style={{ color: inst.color, fontSize: 8 }}>●</span><span style={{ color: sub }}>{inst.shortName}</span></span>
-                            </td>
-                            <td style={{ padding: '3px 8px', textAlign: 'right', color: dim, fontVariantNumeric: 'tabular-nums' }}>{inst.beforeAvg != null ? `${inst.beforeAvg}%` : '—'}</td>
-                            <td style={{ padding: '3px 8px', textAlign: 'right', color: hCol(inst.duringAvg), fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{inst.duringAvg != null ? `${inst.duringAvg}%` : '—'}</td>
-                            <td style={{ padding: '3px 0', textAlign: 'right', color: hCol(inst.duringMin), fontVariantNumeric: 'tabular-nums' }}>{inst.duringMin != null ? `${inst.duringMin}%` : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-                )}
-
-                {/* 6. Health Probes */}
-                {probeStats.some(p => p.failures > 0) && (
-                  <>
-                    <SecHead n="5." label="Health Probes" color="#f85149" />
-                    <div style={{ fontSize: 10, color: dim, marginBottom: 6 }}>
-                      Total: <span style={{ color: 'hsl(var(--destructive))', fontWeight: 700 }}>{probeStats.reduce((a, p) => a + p.failures, 0)}</span> failures across <span style={{ color: sub }}>{probeStats.filter(p => p.failures > 0).length}</span> instance(s)
-                    </div>
-                    {probeStats.filter(p => p.failures > 0).map((p, i) => (
-                      <div key={i} style={{ marginBottom: 6 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                          <span style={{ color: p.color, fontSize: 8 }}>●</span>
-                          <span style={{ color: sub, fontSize: 10, fontWeight: 600 }}>{p.shortName}</span>
-                          <span style={{ color: dim, fontSize: 9 }}>— {p.failures}/{p.total} failures · min {p.minPct ?? '—'}% · avg {p.avgPct ?? '—'}%</span>
-                        </div>
-                        <div style={{ paddingLeft: 14, display: 'flex', flexWrap: 'wrap', gap: '2px 12px' }}>
-                          {p.failTimes.map((t, j) => <span key={j} style={{ fontSize: 9, color: 'hsl(var(--destructive))', fontVariantNumeric: 'tabular-nums' }}>{sgtTime(t)} SGT</span>)}
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                )}
-
-                {/* 7. Traffic Analysis */}
-                {(() => {
-                  const ri = popupChartData?.requestInsights;
-                  if (!ri && reqBefore === 0 && reqDuring === 0 && preHfTop5.length === 0) return null;
-                  const preHf = preHfTop5;
-                  return (
-                    <>
-                      <SecHead n="6." label="Traffic Analysis" color="#58a6ff" />
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 10 }}>
-                        {(reqBefore > 0 || reqDuring > 0) && (
-                          <div style={{ color: sub }}>
-                            Requests: <span style={{ color: dim }}>{reqBefore.toLocaleString()}</span> before → <span style={{ color: '#58a6ff', fontWeight: 600 }}>{reqDuring.toLocaleString()}</span> during{reqSpikePct != null && <span style={{ color: reqSpikePct > 50 ? '#f0883e' : dim }}>{' '}({reqSpikePct > 0 ? '+' : ''}{reqSpikePct}% vs baseline)</span>}
-                          </div>
-                        )}
-                        {(failBefore > 0 || failDuring > 0) && (
-                          <div style={{ color: sub }}>
-                            Failures: <span style={{ color: dim }}>{failBefore.toLocaleString()}</span> before → <span style={{ color: failDuring > 0 ? 'hsl(var(--destructive))' : '#3fb950', fontWeight: 600 }}>{failDuring.toLocaleString()}</span> during
-                          </div>
-                        )}
-                        {ri?.urls && ri.urls.length > 0 && (
-                          <div style={{ marginTop: 4 }}>
-                            <div style={{ color: dim, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>Top Endpoints</div>
-                            {ri.urls.slice(0, 5).map((u, i) => (
-                              <div key={i} style={{ display: 'flex', gap: 8, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
-                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sub }} title={u.url}>{u.url}</span>
-                                <span style={{ flexShrink: 0, color: '#58a6ff', fontVariantNumeric: 'tabular-nums' }}>{u.rpm} rpm</span>
-                                <span style={{ flexShrink: 0, color: dim, fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {ri?.failedUrls && ri.failedUrls.length > 0 && (
-                          <div style={{ marginTop: 4 }}>
-                            <div style={{ color: dim, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>Failed Endpoints</div>
-                            {ri.failedUrls.slice(0, 5).map((u, i) => (
-                              <div key={i} style={{ display: 'flex', gap: 8, borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '2px 0' }}>
-                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sub }} title={u.url}>{u.url}</span>
-                                <span style={{ flexShrink: 0, color: dim, fontVariantNumeric: 'tabular-nums' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                <span style={{ flexShrink: 0, color: '#f85149', fontVariantNumeric: 'tabular-nums' }}>{u.count.toLocaleString()} failed</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {preHf.length > 0 && (
-                          <div style={{ marginTop: 4 }}>
-                            <div style={{ color: dim, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>High Frequency Traffic (−5min → end)</div>
-                            {preHf.map((h, i) => {
-                              const fmtT = (iso: string) => new Date(iso).toLocaleString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                              const timeRange = h.lastSeen
-                                ? `${fmtT(h.timestamp)} → ${fmtT(h.lastSeen)}`
-                                : fmtT(h.timestamp);
-                              return (
-                              <div key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)', padding: '4px 0' }}>
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                                  <span style={{ color: sub, fontWeight: 600, whiteSpace: 'nowrap' }}>{h.ip || '(unknown)'}</span>
-                                  {h.country && <span style={{ color: dim, fontSize: 9 }}>{h.country}</span>}
-                                  <span style={{ flex: 1 }} />
-                                  <span style={{ flexShrink: 0, color: '#d29922', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{h.rpm} rpm</span>
-                                  <span style={{ flexShrink: 0, color: dim, fontVariantNumeric: 'tabular-nums' }}>{h.count.toLocaleString()} total</span>
-                                </div>
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 1 }}>
-                                  <span style={{ color: dim, fontSize: 9, fontVariantNumeric: 'tabular-nums' }}>{timeRange}</span>
-                                  <span style={{ color: '#484f58', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{h.userAgent || '(unknown UA)'}</span>
-                                </div>
-                              </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  );
-                })()}
-
-                {/* 8. Timeline */}
-                {events.length > 0 && (
-                  <>
-                    <SecHead n="7." label="Timeline" />
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                      {events.map((ev, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 10, ...(ev.isMarker ? { borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 4, marginTop: 2 } : {}) }}>
-                          <span style={{ color: dim, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontSize: 9, minWidth: 56 }}>{sgtTime(ev.t)}</span>
-                          <span style={{ color: ev.color, flexShrink: 0, width: 10, textAlign: 'center', fontSize: 9 }}>{ev.icon}</span>
-                          <span style={{ color: ev.color }}>{ev.label}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-
-                {/* Detector Analysis */}
-                {detectorLoading && (
-                  <div className="animate-pulse" style={{ marginTop: 14, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                    <div style={{ fontSize: 9, fontWeight: 700, color: '#484f58', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Detector Analysis</div>
-                    {[80, 60, 70, 50].map((w, i) => (
-                      <div key={i} style={{ height: 9, width: `${w}%`, borderRadius: 3, background: 'rgba(255,255,255,0.05)', marginBottom: 5 }} />
-                    ))}
-                  </div>
-                )}
-                {!detectorLoading && detectorData && (() => {
-                  const visibleCats = detectorData.categories.filter(cat =>
-                    cat.queries.some(q => q.result.rows.length > 0 || q.result.error)
-                  );
-                  if (visibleCats.length === 0 && !detectorData.error) return null;
-                  return (
-                    <>
-                      <SecHead n="8." label="Detector Analysis" color="#58a6ff" />
-                      {detectorData.error && (
-                        <div style={{ fontSize: 10, color: 'hsl(var(--destructive))', marginBottom: 6 }}>{detectorData.error}</div>
-                      )}
-                      {visibleCats.map(cat => {
-                        const nonempty = cat.queries.filter(q => q.result.rows.length > 0 || q.result.error);
-                        return (
-                          <div key={cat.id} style={{ marginBottom: 10 }}>
-                            <div style={{ fontSize: 9, fontWeight: 700, color: cat.color, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>{cat.label}</div>
-                            {nonempty.map((q, qi) => {
-                              const hasMsCol = q.result.columns.some(c => /duration|latency|responsetime|processingtime|elapsed/.test(c.toLowerCase()));
-                              return (
-                              <div key={qi} style={{ marginBottom: 6 }}>
-                                <div style={{ fontSize: 9, color: sub, marginBottom: 2 }}>{q.name}</div>
-                                {q.result.error
-                                  ? <span style={{ fontSize: 9, color: 'hsl(var(--destructive))' }}>{q.result.error}</span>
-                                  : q.result.columns.length === 1 && q.result.columns[0] === 'IncidentSummary'
-                                  ? (
-                                    <div style={{ fontSize: 10, color: sub, padding: '6px 8px', background: 'rgba(88,166,255,0.06)', borderLeft: '2px solid #58a6ff', borderRadius: 3, lineHeight: 1.5 }}>
-                                      {String(q.result.rows[0]?.[0] ?? '—')}
-                                    </div>
-                                  )
-                                  : (
-                                    <>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9 }}>
-                                      {q.result.columns.length > 0 && (
-                                        <thead>
-                                          <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                                            {q.result.columns.map((col, ci) => (
-                                              <th key={ci} style={{ padding: '2px 6px 3px 0', color: '#484f58', fontWeight: 700, textAlign: 'left', whiteSpace: 'nowrap', letterSpacing: '0.04em', textTransform: 'uppercase', fontSize: 8 }}>{col}</th>
-                                            ))}
-                                          </tr>
-                                        </thead>
-                                      )}
-                                      <tbody>
-                                        {q.result.rows.slice(0, 10).map((row, ri) => (
-                                          <tr key={ri} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                                            {row.map((val, ci) => {
-                                              const col = (q.result.columns[ci] ?? '').toLowerCase();
-                                              const isMs = /duration|latency|responsetime|processingtime|elapsed/.test(col) || (/^p\d+$/.test(col) && hasMsCol);
-                                              const isSec = /seconds?$|_s$/.test(col);
-                                              const isPct = /rate$|pct$|percent/.test(col);
-                                              const str = val == null ? '—'
-                                                : typeof val === 'boolean' ? (val ? 'true' : 'false')
-                                                : typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(val)
-                                                  ? sgtTime(new Date(val).getTime())
-                                                : typeof val === 'number' && isMs
-                                                  ? (val >= 1000 ? `${(val / 1000).toFixed(2)}s` : `${Math.round(val)}ms`)
-                                                : typeof val === 'number' && isSec
-                                                  ? `${val.toFixed(2)}s`
-                                                : typeof val === 'number' && isPct
-                                                  ? `${val.toFixed(1)}%`
-                                                : typeof val === 'number'
-                                                  ? (Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2))
-                                                : String(val);
-                                              return (
-                                                <td key={ci} style={{ padding: '2px 6px 2px 0', color: ci === 0 ? sub : dim, maxWidth: ci === 0 ? 200 : 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                                                  {str}
-                                                </td>
-                                              );
-                                            })}
-                                          </tr>
-                                        ))}
-                                        {q.result.rows.length > 10 && (
-                                          <tr><td colSpan={q.result.columns.length || 1} style={{ padding: '2px 0', color: dim, fontSize: 8 }}>+{q.result.rows.length - 10} more rows</td></tr>
-                                        )}
-                                      </tbody>
-                                    </table>
-                                    {q.name === 'Dependency Duration Spike' && q.result.rows.length > 0 && (() => {
-                                      const cols = q.result.columns;
-                                      const iTarget = cols.findIndex(c => /target/i.test(c));
-                                      const iP99   = cols.findIndex(c => /p99/i.test(c));
-                                      const iP95   = cols.findIndex(c => /p95/i.test(c));
-                                      const iFR    = cols.findIndex(c => /rate/i.test(c));
-                                      if (iP99 < 0) return null;
-                                      type Finding = { target: string; cause: string; color: string };
-                                      const findings: Finding[] = [];
-                                      q.result.rows.forEach(row => {
-                                        const p99  = typeof row[iP99] === 'number' ? row[iP99] as number : 0;
-                                        const p95  = iP95 >= 0 && typeof row[iP95] === 'number' ? row[iP95] as number : 0;
-                                        const fr   = iFR  >= 0 && typeof row[iFR]  === 'number' ? row[iFR]  as number : 0;
-                                        const tgt  = iTarget >= 0 ? String(row[iTarget]).replace(/\s*\|.*/, '') : '';
-                                        const highP99 = p99 > 5000;
-                                        const highFR  = fr > 10;
-                                        const lowDur  = p95 < 1000;
-                                        let cause = ''; let color = dim;
-                                        if (highP99 && highFR)       { cause = 'Timeout Exhaustion';       color = '#f85149'; }
-                                        else if (highP99 && !highFR) { cause = 'Performance Degradation';  color = '#d29922'; }
-                                        else if (highFR && lowDur)   { cause = 'Immediate Rejection';      color = '#f85149'; }
-                                        else if (highFR)             { cause = 'SNAT/Socket Pressure';     color = '#a371f7'; }
-                                        if (cause) findings.push({ target: tgt, cause, color });
-                                      });
-                                      if (!findings.length) return null;
-                                      return (
-                                        <div style={{ marginTop: 5, padding: '4px 6px', background: 'rgba(255,255,255,0.03)', borderRadius: 4, borderLeft: '2px solid #30363d' }}>
-                                          <div style={{ fontSize: 8, color: '#484f58', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>Interpretation</div>
-                                          {findings.map((f, i) => (
-                                            <div key={i} style={{ display: 'flex', gap: 6, fontSize: 9, marginBottom: 2 }}>
-                                              <span style={{ color: f.color, fontWeight: 700, flexShrink: 0 }}>{f.cause}</span>
-                                              <span style={{ color: dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.target}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      );
-                                    })()}
-                                    </>
-                                  )
-                                }
-                              </div>
-                            );
-                            })}
-                          </div>
-                        );
-                      })}
-                    </>
-                  );
-                })()}
-
-                {/* AI Report section */}
-                <div style={{ marginTop: 14, borderTop: '1px solid rgba(88,166,255,0.15)', paddingTop: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 9, fontWeight: 700, color: '#58a6ff', letterSpacing: '0.08em', textTransform: 'uppercase' }}>AI Analysis Report</span>
-                      <span style={{ fontSize: 9, color: '#484f58' }}>— Markdown file for AI-assisted root cause analysis</span>
-                    </div>
-                    <button
-                      onClick={() => copyMd()}
-                      style={{ fontSize: 9, padding: '2px 8px', borderRadius: 4, border: `1px solid ${mdCopied ? '#3fb95055' : '#58a6ff55'}`, background: mdCopied ? '#3fb95011' : '#58a6ff11', color: mdCopied ? '#3fb950' : '#58a6ff', cursor: 'pointer', fontWeight: 600, flexShrink: 0, transition: 'all 0.2s ease' }}
-                    >{mdCopied ? '✓ Copied!' : 'Copy AI Report (.md)'}</button>
-                  </div>
-                  <div style={{ fontSize: 9, color: '#484f58', marginBottom: 6, lineHeight: 1.5 }}>
-                    Feed this file together with your project codebase to an AI assistant (Claude, ChatGPT, Gemini) to get:
-                    root cause analysis · fix suggestions · architectural enhancements · monitoring recommendations
-                  </div>
-                  <div style={{ background: '#010409', border: '1px solid rgba(88,166,255,0.12)', borderRadius: 5, padding: '8px 10px', maxHeight: 120, overflowY: 'auto' }}>
-                    <pre style={{ margin: 0, fontSize: 8, color: '#484f58', fontFamily: 'monospace', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{[
-                      `# Incident Report — ${appKey}`,
-                      `Date: ${date} · ${timeRange} SGT · ${dur} · ${severity}`,
-                      `Classification: ${causeLabel ?? 'Unknown'}`,
-                      metrics.requestInsights?.insight?.summary ? `Insight: ${metrics.requestInsights.insight.summary}` : null,
-                      ``,
-                      `Sections included: Metrics Snapshot · Root Cause · Dependencies · Instance Health`,
-                      `  · Health Probes · Traffic Analysis · Timeline · Detector Analysis · App Insights`,
-                      ``,
-                      `## AI Analysis Request`,
-                      `1. Root Cause — cite specific metrics from this report`,
-                      `2. Affected Code — files, modules, components`,
-                      `3. Immediate Fix — fastest safe remediation`,
-                      `4. Long-term Enhancements — prevent recurrence`,
-                      `5. Monitoring Gaps — what alerts would catch this earlier`,
-                      `6. Risk Assessment — other latent risks visible in data`,
-                    ].filter(l => l != null).join('\n')}</pre>
-                  </div>
-                </div>
-
-                {/* Footer */}
-                <div style={{ marginTop: 14, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 9, color: '#333d48', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>DevForge · {appKey}</span>
-                  <span>Generated {sgtFull(Date.now())} SGT</span>
-                </div>
-              </div>
-            );
-          })()}
-          </div>{/* end scrollable content */}
-        </div>
-      </div>
-    )}
 
     </>
   );

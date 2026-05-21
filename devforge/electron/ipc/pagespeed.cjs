@@ -198,22 +198,28 @@ module.exports = function registerPagespeedHandlers(_win) {
 
             console.log(`[Lighthouse][${visitMode}][${runMode}] Done — ${lhrList.length}/${numRuns} run(s) succeeded in ${formatMs(Date.now() - auditStart)} total for ${url}`);
 
+            const lastLhr = lhrList[lhrList.length - 1];
             const averagedAudits = averageAudits(lhrList);
 
             const result = parseToPageSpeedInsightResult(
                 url,
                 averagedAudits,
                 lhrList[0].runWarnings?.[0],
+                {
+                    performanceScore: Math.round((lastLhr.categories?.performance?.score ?? 0) * 100),
+                    lighthouseVersion: lastLhr.lighthouseVersion,
+                    fetchTime: lastLhr.fetchTime,
+                }
             );
+
+            // averageAudits() strips details — re-parse last LHR to get opportunities with details
+            const lastResult = parseToPageSpeedInsightResult(url, lastLhr.audits);
+            result.opportunities = lastResult.opportunities;
 
             // Attach individual run results as history when in accuracy mode
             if (lhrList.length > 1) {
-                result.runHistory = lhrList.map((lhr, i) =>
-                    parseToPageSpeedInsightResult(
-                        url,
-                        lhr.audits,
-                        lhr.runWarnings?.[0],
-                    )
+                result.runHistory = lhrList.map((lhr) =>
+                    parseToPageSpeedInsightResult(url, lhr.audits, lhr.runWarnings?.[0])
                 );
             }
 
