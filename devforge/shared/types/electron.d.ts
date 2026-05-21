@@ -20,6 +20,15 @@ export interface IElectronAPI {
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
     };
 
+    // Auto-updater
+    update: {
+        onAvailable:  (cb: (data: { version: string }) => void) => () => void;
+        onProgress:   (cb: (data: { percent: number; transferred: number; total: number }) => void) => () => void;
+        onDownloaded: (cb: (data: { version: string }) => void) => () => void;
+        onError:      (cb: (message: string) => void) => () => void;
+        install: () => Promise<void>;
+    };
+
     // Incident Report
     incidentReport: {
         generate: (opts: {

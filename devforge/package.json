@@ -12,6 +12,7 @@
     "electron:dev:live": "concurrently -k \"cross-env BROWSER=none vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "electron:build": "cross-env ELECTRON=true vite build && electron-builder --config electron-builder.json5",
     "electron:pack": "cross-env ELECTRON=true vite build && electron-builder --config electron-builder.json5 --dir",
+    "electron:release": "cross-env ELECTRON=true vite build && electron-builder --config electron-builder.json5 --publish always",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -82,7 +82,49 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load pagespeed-insight.cjs:', err);
     }
 
-    if (!isDev) autoUpdater.checkForUpdatesAndNotify();
+    // ── Auto-updater ──────────────────────────────────────────────────────────
+    if (!isDev) {
+        const send = (channel, data) => {
+            if (!mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data);
+        };
+
+        autoUpdater.on('checking-for-update', () => {
+            console.log('[updater] Checking for update...');
+        });
+
+        autoUpdater.on('update-available', (info) => {
+            console.log(`[updater] Update available: v${info.version}`);
+            send('update:available', { version: info.version });
+        });
+
+        autoUpdater.on('update-not-available', () => {
+            console.log('[updater] Up to date.');
+        });
+
+        autoUpdater.on('download-progress', (progress) => {
+            send('update:progress', {
+                percent: Math.round(progress.percent),
+                transferred: progress.transferred,
+                total: progress.total,
+            });
+        });
+
+        autoUpdater.on('update-downloaded', (info) => {
+            console.log(`[updater] Update downloaded: v${info.version}`);
+            send('update:downloaded', { version: info.version });
+        });
+
+        autoUpdater.on('error', (err) => {
+            console.error('[updater] Error:', err.message);
+            send('update:error', err.message);
+        });
+
+        ipcMain.handle('update:install', () => {
+            autoUpdater.quitAndInstall();
+        });
+
+        autoUpdater.checkForUpdatesAndNotify();
+    }
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -92,6 +134,3 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
-
-autoUpdater.on('update-available', () => console.log('Update available'));
-autoUpdater.on('update-downloaded', () => autoUpdater.quitAndInstall());

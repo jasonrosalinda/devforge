@@ -29,4 +29,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         generate: (payload) => ipcRenderer.invoke('pagespeed-insight:generate', payload),
     },
 
+    update: {
+        onAvailable:  (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:available',  fn); return () => ipcRenderer.removeListener('update:available',  fn); },
+        onProgress:   (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:progress',   fn); return () => ipcRenderer.removeListener('update:progress',   fn); },
+        onDownloaded: (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:downloaded', fn); return () => ipcRenderer.removeListener('update:downloaded', fn); },
+        onError:      (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:error',      fn); return () => ipcRenderer.removeListener('update:error',      fn); },
+        install: () => ipcRenderer.invoke('update:install'),
+    },
+
 });

@@ -1,10 +1,12 @@
 import { useState, useRef, useCallback } from "react";
+import { useAppUpdater } from "@/hooks/useAppUpdater";
 import { ThemeProvider } from "@/components/provider/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { Home } from "lucide-react";
 import { SettingsProvider } from "@/context/settings-context";
 import { SettingsModal } from "@/components/settings/settings-modal";
+import { ReleaseNotesModal } from "@/components/release-notes/release-notes-modal";
 
 import { pages, renderPage } from "./routes/page-routes";
 import { BuildLabel } from "./components/ui/buildLabel";
@@ -60,11 +62,13 @@ const LAUNCH_STYLES = `
 `;
 
 export default function App() {
+  useAppUpdater();
   const [activePage, setActivePage] = useState<string>("Home");
   const [phase, setPhase] = useState<Phase>("idle");
   const [originStyle, setOriginStyle] = useState<string>("50% 50%");
   const [search, setSearch] = useState<string>("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
   const pendingPage = useRef<string>("Home");
 
   const isAppVisible = phase === "launching" || phase === "open" || phase === "closing";
@@ -110,6 +114,7 @@ export default function App() {
             onSearchChange={!isAppVisible ? setSearch : undefined}
             onBack={isAppVisible ? handleClose : undefined}
             onOpenSettings={() => setSettingsOpen(true)}
+            onOpenReleaseNotes={() => setReleaseNotesOpen(true)}
           />
 
           <div
@@ -145,6 +150,7 @@ export default function App() {
 
           <Toaster />
           <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
         </div>
       </SidebarProvider>
       </SettingsProvider>
