@@ -122,17 +122,6 @@ for (const key of order) {
     body += g.items.map(renderEntry).join('\n') + '\n\n';
 }
 
-// File change summary (collapsed)
-const diffStat = prevTag ? sh(`git diff --stat ${prevTag}..${currTag}`) : '';
-if (diffStat) {
-    const lines = diffStat.split('\n');
-    const summaryLine = lines[lines.length - 1] || '';
-    const fileLines = lines.slice(0, -1);
-    body += `<details>\n<summary>📊 File changes (${summaryLine.trim()})</summary>\n\n\`\`\`\n`;
-    body += fileLines.join('\n');
-    body += `\n\`\`\`\n\n</details>\n\n`;
-}
-
 // Footer
 if (prevTag) {
     body += `**Full Changelog**: ${repoUrl}/compare/${prevTag}...${currTag}\n`;
