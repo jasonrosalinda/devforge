@@ -151,6 +151,7 @@ export default function App() {
           <Toaster />
           <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
           <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
+          
         </div>
       </SidebarProvider>
       </SettingsProvider>
