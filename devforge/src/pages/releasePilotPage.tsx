@@ -152,6 +152,30 @@ function cleanHtml(html: string): string {
     return div.innerHTML;
 }
 
+function stripFromHeading(div: HTMLElement, pattern: RegExp): void {
+    const headings = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+    const stopHeading = headings.find((h) => pattern.test(h.textContent ?? ''));
+    if (!stopHeading) return;
+    // Remove the heading and everything after it
+    const toRemove: Element[] = [stopHeading];
+    let next = stopHeading.nextElementSibling;
+    while (next) {
+        toRemove.push(next);
+        next = next.nextElementSibling;
+    }
+    toRemove.forEach((el) => el.remove());
+    // Also remove any wrapping .table-wrap divs left behind
+    div.querySelectorAll('.table-wrap:empty').forEach((el) => el.remove());
+}
+
+function cleanRunbookHtml(html: string): string {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    stripConfluenceNoise(div);
+    stripFromHeading(div, /rollback/i);
+    return div.innerHTML;
+}
+
 function parseReleasePlanHeader(html: string, title: string): ReleasePlanHeader {
     const div = document.createElement('div');
     div.innerHTML = html;
@@ -577,7 +601,7 @@ export default function ReleasePilotPage() {
                             <div className="px-5 py-4">
                                 <div
                                     className="release-pilot-content text-sm leading-relaxed"
-                                    dangerouslySetInnerHTML={{ __html: cleanHtml(deploymentRunbook.html) }}
+                                    dangerouslySetInnerHTML={{ __html: cleanRunbookHtml(deploymentRunbook.html) }}
                                 />
                             </div>
                         )}
