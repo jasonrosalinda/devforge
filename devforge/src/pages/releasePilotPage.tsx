@@ -353,6 +353,8 @@ function parseRunbook(html: string): RunbookSection[] {
             const plainText = (i: number): string => {
                 const cell = cellEls[i];
                 if (!cell) return '';
+                // Explicitly skip logbook column
+                if (iLogbookCol >= 0 && i === iLogbookCol) return '';
                 const clone = cell.cloneNode(true) as Element;
                 clone.querySelectorAll('table, ul, ol, .confluence-information-macro, [data-macro-name]').forEach((n) => n.remove());
                 return clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
