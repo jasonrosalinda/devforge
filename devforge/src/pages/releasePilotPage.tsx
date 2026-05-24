@@ -292,9 +292,18 @@ function parseRunbook(html: string): RunbookSection[] {
         return t || null;
     }
 
-    // Collect all headings and tables in document order (regardless of nesting depth)
+    // Collect all headings and TOP-LEVEL tables (not nested inside another table) in document order
     const STOP_RE = /rollback|prompt|generator/i;
-    const elements = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6,table'));
+    const elements = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6,table')).filter((el) => {
+        if (el.tagName !== 'TABLE') return true;
+        // exclude tables nested inside another table
+        let parent = el.parentElement;
+        while (parent && parent !== div) {
+            if (parent.tagName === 'TABLE') return false;
+            parent = parent.parentElement;
+        }
+        return true;
+    });
 
     // Find the index of the first stop-heading so we can exclude everything after it
     const stopIdx = elements.findIndex(
