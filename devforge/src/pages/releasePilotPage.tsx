@@ -140,9 +140,22 @@ function formatRelative(seconds: number): string {
     return `${days}d ${hours % 24}h`;
 }
 
+function stripConfluenceNoise(div: HTMLElement): void {
+    div.querySelectorAll('[data-macro-name="expand"], .expand-container, .conf-macro.output-block').forEach((el) => el.remove());
+    div.querySelectorAll('.confluence-information-macro, [data-macro-name="info"], [data-macro-name="note"], [data-macro-name="warning"], [data-macro-name="tip"]').forEach((el) => el.remove());
+}
+
+function cleanHtml(html: string): string {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    stripConfluenceNoise(div);
+    return div.innerHTML;
+}
+
 function parseReleasePlanHeader(html: string, title: string): ReleasePlanHeader {
     const div = document.createElement('div');
     div.innerHTML = html;
+    stripConfluenceNoise(div);
     const text = div.textContent ?? '';
 
     const dateMatch =
@@ -168,6 +181,7 @@ function parseReleasePlanHeader(html: string, title: string): ReleasePlanHeader 
 function parseGoalsSection(html: string): string {
     const div = document.createElement('div');
     div.innerHTML = html;
+    stripConfluenceNoise(div);
 
     const headings = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6'));
     const goalHeading = headings.find((h) =>
@@ -563,7 +577,7 @@ export default function ReleasePilotPage() {
                             <div className="px-5 py-4">
                                 <div
                                     className="release-pilot-content text-sm leading-relaxed"
-                                    dangerouslySetInnerHTML={{ __html: deploymentRunbook.html }}
+                                    dangerouslySetInnerHTML={{ __html: cleanHtml(deploymentRunbook.html) }}
                                 />
                             </div>
                         )}
