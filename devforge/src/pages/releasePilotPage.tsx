@@ -33,19 +33,6 @@ interface DocState {
     html: string;
 }
 
-interface RunbookTask {
-    time: string | null;
-    description: string;
-    assignees: string | null;
-    status: string | null;
-}
-
-interface RunbookSection {
-    sectionName: string;
-    date: string;
-    tasks: RunbookTask[];
-}
-
 interface ReleasePlanHeader {
     title: string;
     date: string | null;
@@ -260,143 +247,6 @@ function parseGoalsSection(html: string): string {
     return fragment.innerHTML;
 }
 
-function parseRunbook(html: string): RunbookSection[] {
-    const div = document.createElement('div');
-    div.innerHTML = html;
-
-    const dateRe = /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b/i;
-
-    function colIndex(headers: string[], pattern: RegExp): number {
-        return headers.findIndex((h) => pattern.test(h));
-    }
-
-    function normaliseStatus(raw: string): string | null {
-        const s = raw.trim().toUpperCase();
-        if (!s) return null;
-        if (/done/i.test(s)) return 'DONE';
-        if (/scheduled/i.test(s)) return 'SCHEDULED';
-        if (/in.?progress/i.test(s)) return 'IN PROGRESS';
-        if (/pending/i.test(s)) return 'PENDING';
-        if (/cancel/i.test(s)) return 'CANCELLED';
-        return s || null;
-    }
-
-    function normaliseTime(raw: string): string | null {
-        const t = raw.trim();
-        if (!t) return null;
-        return t.replace(/\s+/g, '').toLowerCase();
-    }
-
-    function normalisePics(raw: string): string | null {
-        const t = raw.replace(/@/g, '').trim();
-        return t || null;
-    }
-
-    // Collect all headings and TOP-LEVEL tables (not nested inside another table) in document order
-    const STOP_RE = /rollback|prompt|generator/i;
-    const elements = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6,table')).filter((el) => {
-        if (el.tagName !== 'TABLE') return true;
-        // exclude tables nested inside another table
-        let parent = el.parentElement;
-        while (parent && parent !== div) {
-            if (parent.tagName === 'TABLE') return false;
-            parent = parent.parentElement;
-        }
-        return true;
-    });
-
-    // Find the index of the first stop-heading so we can exclude everything after it
-    const stopIdx = elements.findIndex(
-        (el) => /^H[1-6]$/.test(el.tagName) && STOP_RE.test(el.textContent ?? '')
-    );
-    const allowed = stopIdx >= 0 ? elements.slice(0, stopIdx) : elements;
-
-    const sections: RunbookSection[] = [];
-    let currentSectionName = 'Deployment Runbook';
-
-    for (const el of allowed) {
-        if (/^H[1-6]$/.test(el.tagName)) {
-            const text = el.textContent?.trim() ?? '';
-            if (text) currentSectionName = text;
-            continue;
-        }
-
-        // TABLE
-        const rows = Array.from(el.querySelectorAll('tr'));
-        if (rows.length < 2) continue;
-
-        const headerCells = Array.from(rows[0].querySelectorAll('th,td')).map(
-            (c) => c.textContent?.trim() ?? ''
-        );
-
-        const iDateCol    = colIndex(headerCells, /^date$/i);
-        const iTimeCol    = colIndex(headerCells, /^time/i);
-        const iActCol     = colIndex(headerCells, /^activity$/i);
-        const iStatusCol  = colIndex(headerCells, /^status$/i);
-        const iPicCol     = colIndex(headerCells, /^pic/i);
-        const iLogbookCol = colIndex(headerCells, /log.?book/i);
-
-        if (iActCol < 0 && iTimeCol < 0) continue;
-
-        const section: RunbookSection = { sectionName: currentSectionName, date: '', tasks: [] };
-        let lastDate = '';
-
-        console.log(`[runbook] section="${currentSectionName}" cols: date=${iDateCol} time=${iTimeCol} act=${iActCol} status=${iStatusCol} pic=${iPicCol} logbook=${iLogbookCol}`, headerCells);
-
-        const dataRows = Array.from(el.querySelectorAll('tr')).slice(1);
-
-        for (const row of dataRows) {
-            const cellEls = Array.from(row.querySelectorAll('td,th'));
-            if (cellEls.every((c) => !c.textContent?.trim())) continue;
-
-            // Get plain text from a cell, stripping nested tables/lists/macros
-            const plainText = (i: number): string => {
-                const cell = cellEls[i];
-                if (!cell) return '';
-                // Explicitly skip logbook column
-                if (iLogbookCol >= 0 && i === iLogbookCol) return '';
-                const clone = cell.cloneNode(true) as Element;
-                clone.querySelectorAll('table, ul, ol, .confluence-information-macro, [data-macro-name]').forEach((n) => n.remove());
-                return clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-            };
-
-            if (iDateCol >= 0 && plainText(iDateCol)) {
-                const dateMatch = plainText(iDateCol).match(dateRe);
-                if (dateMatch) lastDate = dateMatch[0];
-            }
-            if (lastDate) section.date = lastDate;
-
-            const description = iActCol >= 0 ? plainText(iActCol) : '';
-            const time        = iTimeCol >= 0 ? normaliseTime(plainText(iTimeCol)) : null;
-            const status      = iStatusCol >= 0 ? normaliseStatus(plainText(iStatusCol)) : null;
-            const assignees   = iPicCol >= 0 ? normalisePics(plainText(iPicCol)) : null;
-
-            if (!description) continue;
-            section.tasks.push({ time, description, assignees, status });
-        }
-
-        if (section.tasks.length > 0) sections.push(section);
-    }
-
-    return sections;
-}
-
-function renderRunbookToText(sections: RunbookSection[]): string {
-    return sections.map((section) => {
-        const dateBar = section.date ? `----${section.date}----\n` : '';
-        const sectionHeader = `${section.sectionName}\n`;
-        const tasks = section.tasks.map((t) => {
-            const parts: string[] = [];
-            if (t.time) parts.push(t.time);
-            parts.push(t.description);
-            if (t.assignees) parts.push(t.assignees);
-            if (t.status) parts.push(`- ${t.status}`);
-            return parts.join(' ');
-        });
-        return `${dateBar}${sectionHeader}${tasks.join('\n')}`;
-    }).join('\n\n');
-}
-
 interface UrlInputRowProps {
     label: string;
     value: string;
@@ -587,18 +437,13 @@ export default function ReleasePilotPage() {
 
         let header: ReleasePlanHeader | null = null;
         let goalsHtml = '';
-        let runbookSections: RunbookSection[] = [];
 
         if (releasePlan.page && releasePlan.html) {
             header = parseReleasePlanHeader(releasePlan.html, releasePlan.page.title);
             goalsHtml = parseGoalsSection(releasePlan.html);
         }
 
-        if (deploymentRunbook.html) {
-            runbookSections = parseRunbook(deploymentRunbook.html);
-        }
-
-        return { header, goalsHtml, runbookSections };
+        return { header, goalsHtml };
     }, [releasePlan.page, releasePlan.html, deploymentRunbook.page, deploymentRunbook.html]);
 
     return (
@@ -713,57 +558,15 @@ export default function ReleasePilotPage() {
                             </div>
                         )}
 
-                        {/* Deployment Runbook */}
-                        {assembledOutput.runbookSections.length > 0 ? (
+                        {/* Deployment Runbook — raw HTML */}
+                        {deploymentRunbook.html && (
                             <div className="px-5 py-4">
-                                {assembledOutput.runbookSections.map((section, si) => (
-                                    <div key={si} className={si > 0 ? 'mt-5' : ''}>
-                                        <div className="flex items-center gap-2 mb-2">
-                                            {section.date && (
-                                                <span className="text-[10px] font-mono bg-muted text-muted-foreground px-2 py-0.5 rounded">
-                                                    {section.date}
-                                                </span>
-                                            )}
-                                            <p className="text-xs font-semibold">{section.sectionName}</p>
-                                        </div>
-                                        <div className="flex flex-col gap-0.5 pl-1">
-                                            {section.tasks.map((task, ti) => (
-                                                <div key={ti} className="flex items-baseline gap-2 text-xs">
-                                                    {task.time && (
-                                                        <span className="font-mono text-muted-foreground w-14 shrink-0 text-right">{task.time}</span>
-                                                    )}
-                                                    <span className={task.time ? '' : 'pl-16'}>
-                                                        {task.description}
-                                                        {task.assignees && (
-                                                            <span className="text-muted-foreground ml-1">{task.assignees}</span>
-                                                        )}
-                                                        {task.status && (
-                                                            <span className={
-                                                                'ml-1 font-medium ' + (
-                                                                    task.status === 'DONE'
-                                                                        ? 'text-green-500'
-                                                                        : task.status === 'SCHEDULED'
-                                                                        ? 'text-blue-500'
-                                                                        : 'text-amber-500'
-                                                                )
-                                                            }>— {task.status}</span>
-                                                        )}
-                                                    </span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : deploymentRunbook.page && !deploymentRunbook.loading ? (
-                            <div className="px-5 py-4">
-                                <p className="text-xs font-semibold mb-2">Deployment Runbook</p>
                                 <div
                                     className="release-pilot-content text-sm leading-relaxed"
                                     dangerouslySetInnerHTML={{ __html: deploymentRunbook.html }}
                                 />
                             </div>
-                        ) : null}
+                        )}
                     </div>
                 </div>
             )}
