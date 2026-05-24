@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
-    Copy,
-    ExternalLink,
     Loader2,
     LogIn,
     LogOut,
@@ -206,6 +204,11 @@ function parseGoalsSection(html: string): string {
 
     const fragment = document.createElement('div');
     nodes.forEach((n) => fragment.appendChild(n.cloneNode(true)));
+
+    fragment.querySelectorAll('*').forEach((el) => {
+        if (/to be updated by/i.test(el.textContent ?? '')) el.remove();
+    });
+
     return fragment.innerHTML;
 }
 
@@ -516,47 +519,6 @@ export default function ReleasePilotPage() {
         return { header, goalsHtml, runbookSections };
     }, [releasePlan.page, releasePlan.html, deploymentRunbook.page, deploymentRunbook.html]);
 
-    function buildPlainText(): string {
-        if (!assembledOutput) return '';
-        const { header, goalsHtml, runbookSections } = assembledOutput;
-
-        const lines: string[] = [];
-
-        if (header) {
-            lines.push(`Deployment release notice: ${header.title}`);
-            if (header.date || header.time) {
-                const dateTime = [header.date, header.time ? `(${header.time} SGT onwards)` : ''].filter(Boolean).join(' - ');
-                lines.push(`${header.title} - ${dateTime}`);
-            }
-            lines.push('');
-        }
-
-        if (goalsHtml) {
-            lines.push('What to Expect in This Release');
-            const div = document.createElement('div');
-            div.innerHTML = goalsHtml;
-            lines.push(div.textContent?.trim() ?? '');
-            lines.push('');
-        }
-
-        if (runbookSections.length > 0) {
-            lines.push(renderRunbookToText(runbookSections));
-        }
-
-        return lines.join('\n');
-    }
-
-    async function handleCopy() {
-        const text = buildPlainText();
-        if (!text) return;
-        try {
-            await navigator.clipboard.writeText(text);
-            toast.success('Copied to clipboard');
-        } catch {
-            toast.error('Copy failed');
-        }
-    }
-
     return (
         <div className="flex flex-col gap-4 h-full min-h-0 overflow-auto">
             <PageHeader
@@ -638,44 +600,23 @@ export default function ReleasePilotPage() {
             {/* Assembled output */}
             {assembledOutput && (
                 <div className="flex flex-col gap-3 border-t pt-4">
-                    <div className="flex justify-end">
-                        <Button size="sm" variant="outline" onClick={handleCopy}>
-                            <Copy className="h-3.5 w-3.5 mr-1.5" />
-                            Copy
-                        </Button>
-                    </div>
-
                     <div className="rounded-md border bg-card overflow-hidden">
                         {/* Header block */}
                         {assembledOutput.header && (
                             <div className="px-5 py-4 border-b">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div>
-                                        <p className="text-[11px] font-medium text-muted-foreground mb-0.5 uppercase tracking-wide">Deployment release notice</p>
-                                        {(assembledOutput.header.date || assembledOutput.header.time) ? (
-                                            <p className="text-sm font-bold leading-snug">
-                                                {assembledOutput.header.title}
-                                                {assembledOutput.header.date ? ` - ${assembledOutput.header.date}` : ''}
-                                                {assembledOutput.header.time ? ` (${assembledOutput.header.time} SGT onwards)` : ''}
-                                            </p>
-                                        ) : (
-                                            <>
-                                                <p className="text-sm font-bold leading-snug">{assembledOutput.header.title}</p>
-                                                <p className="text-xs text-amber-500 mt-1">Could not parse date/time from Release Plan.</p>
-                                            </>
-                                        )}
-                                    </div>
-                                    {releasePlan.page?.webUrl && (
-                                        <a
-                                            href={releasePlan.page.webUrl}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="flex-shrink-0 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-0.5"
-                                        >
-                                            <ExternalLink className="h-3 w-3" />
-                                        </a>
-                                    )}
-                                </div>
+                                <p className="text-[11px] font-medium text-muted-foreground mb-0.5 uppercase tracking-wide">Deployment release notice</p>
+                                {(assembledOutput.header.date || assembledOutput.header.time) ? (
+                                    <p className="text-sm font-bold leading-snug">
+                                        {assembledOutput.header.title}
+                                        {assembledOutput.header.date ? ` - ${assembledOutput.header.date}` : ''}
+                                        {assembledOutput.header.time ? ` (${assembledOutput.header.time} SGT onwards)` : ''}
+                                    </p>
+                                ) : (
+                                    <>
+                                        <p className="text-sm font-bold leading-snug">{assembledOutput.header.title}</p>
+                                        <p className="text-xs text-amber-500 mt-1">Could not parse date/time from Release Plan.</p>
+                                    </>
+                                )}
                             </div>
                         )}
 
@@ -702,16 +643,6 @@ export default function ReleasePilotPage() {
                                                 </span>
                                             )}
                                             <p className="text-xs font-semibold">{section.sectionName}</p>
-                                            {deploymentRunbook.page?.webUrl && si === 0 && (
-                                                <a
-                                                    href={deploymentRunbook.page.webUrl}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                                                >
-                                                    <ExternalLink className="h-3 w-3" />
-                                                </a>
-                                            )}
                                         </div>
                                         <div className="flex flex-col gap-0.5 pl-1">
                                             {section.tasks.map((task, ti) => (
