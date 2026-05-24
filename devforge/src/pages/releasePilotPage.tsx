@@ -637,7 +637,7 @@ export default function ReleasePilotPage() {
 
             {/* Assembled output */}
             {assembledOutput && (
-                <div className="flex flex-col gap-4 border-t pt-4">
+                <div className="flex flex-col gap-3 border-t pt-4">
                     <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Release Notice</span>
                         <Button size="sm" variant="outline" onClick={handleCopy}>
@@ -646,107 +646,125 @@ export default function ReleasePilotPage() {
                         </Button>
                     </div>
 
-                    {/* Section 1: Header */}
-                    {assembledOutput.header && (
-                        <div className="rounded-md border bg-card p-4">
-                            <p className="text-xs text-muted-foreground mb-1">Deployment release notice:</p>
-                            <p className="text-base font-semibold">{assembledOutput.header.title}</p>
-                            {(assembledOutput.header.date || assembledOutput.header.time) ? (
-                                <p className="text-sm text-muted-foreground mt-0.5">
-                                    {assembledOutput.header.title}
-                                    {assembledOutput.header.date ? ` - ${assembledOutput.header.date}` : ''}
-                                    {assembledOutput.header.time ? ` (${assembledOutput.header.time} SGT onwards)` : ''}
-                                </p>
-                            ) : (
-                                <p className="text-xs text-amber-500 mt-1">Could not parse date/time from Release Plan page.</p>
-                            )}
-                            {releasePlan.page?.webUrl && (
-                                <a
-                                    href={releasePlan.page.webUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-2"
-                                >
-                                    Open in Confluence <ExternalLink className="h-3 w-3" />
-                                </a>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Section 2: What to Expect */}
-                    {assembledOutput.goalsHtml && (
-                        <div className="rounded-md border bg-card p-4">
-                            <h2 className="text-sm font-semibold mb-2">What to Expect in This Release</h2>
-                            <div
-                                className="release-pilot-content text-sm leading-relaxed"
-                                dangerouslySetInnerHTML={{ __html: assembledOutput.goalsHtml }}
-                            />
-                        </div>
-                    )}
-
-                    {/* Section 3: Deployment Runbook */}
-                    {assembledOutput.runbookSections.length > 0 ? (
-                        <div className="rounded-md border bg-card p-4">
-                            <h2 className="text-sm font-semibold mb-3">Deployment Runbook</h2>
-                            {assembledOutput.runbookSections.map((section, si) => (
-                                <div key={si} className="mb-4">
-                                    {section.date && (
-                                        <p className="text-xs font-mono text-muted-foreground mb-1">
-                                            ----{section.date}----
-                                        </p>
-                                    )}
-                                    <p className="text-xs font-semibold mb-1">{section.sectionName}</p>
-                                    <div className="flex flex-col gap-0.5">
-                                        {section.tasks.map((task, ti) => (
-                                            <p key={ti} className="text-xs font-mono">
-                                                {task.time && <span className="text-muted-foreground">{task.time} </span>}
-                                                {task.time ? '- ' : ''}{task.description}
-                                                {task.assignees && <span className="text-muted-foreground"> {task.assignees}</span>}
-                                                {task.status && (
-                                                    <span className={
-                                                        task.status === 'DONE'
-                                                            ? ' text-green-500'
-                                                            : task.status === 'SCHEDULED'
-                                                            ? ' text-blue-500'
-                                                            : ' text-amber-500'
-                                                    }> - {task.status}</span>
-                                                )}
+                    <div className="rounded-md border bg-card overflow-hidden">
+                        {/* Header block */}
+                        {assembledOutput.header && (
+                            <div className="px-5 py-4 border-b">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-[11px] font-medium text-muted-foreground mb-0.5 uppercase tracking-wide">Deployment release notice</p>
+                                        {(assembledOutput.header.date || assembledOutput.header.time) ? (
+                                            <p className="text-sm font-bold leading-snug">
+                                                {assembledOutput.header.title}
+                                                {assembledOutput.header.date ? ` - ${assembledOutput.header.date}` : ''}
+                                                {assembledOutput.header.time ? ` (${assembledOutput.header.time} SGT onwards)` : ''}
                                             </p>
-                                        ))}
+                                        ) : (
+                                            <>
+                                                <p className="text-sm font-bold leading-snug">{assembledOutput.header.title}</p>
+                                                <p className="text-xs text-amber-500 mt-1">Could not parse date/time from Release Plan.</p>
+                                            </>
+                                        )}
                                     </div>
+                                    {releasePlan.page?.webUrl && (
+                                        <a
+                                            href={releasePlan.page.webUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="flex-shrink-0 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-0.5"
+                                        >
+                                            <ExternalLink className="h-3 w-3" />
+                                        </a>
+                                    )}
                                 </div>
-                            ))}
-                            {deploymentRunbook.page?.webUrl && (
-                                <a
-                                    href={deploymentRunbook.page.webUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-2"
-                                >
-                                    Open in Confluence <ExternalLink className="h-3 w-3" />
-                                </a>
-                            )}
-                        </div>
-                    ) : deploymentRunbook.page && !deploymentRunbook.loading ? (
-                        <div className="rounded-md border bg-card p-4">
-                            <h2 className="text-sm font-semibold mb-2">Deployment Runbook</h2>
-                            <div
-                                className="release-pilot-content text-sm leading-relaxed"
-                                dangerouslySetInnerHTML={{ __html: deploymentRunbook.html }}
-                            />
-                        </div>
-                    ) : null}
+                            </div>
+                        )}
+
+                        {/* What to Expect */}
+                        {assembledOutput.goalsHtml && (
+                            <div className="px-5 py-4 border-b">
+                                <p className="text-xs font-semibold mb-2">What to Expect in This Release</p>
+                                <div
+                                    className="release-pilot-content text-sm leading-relaxed"
+                                    dangerouslySetInnerHTML={{ __html: assembledOutput.goalsHtml }}
+                                />
+                            </div>
+                        )}
+
+                        {/* Deployment Runbook */}
+                        {assembledOutput.runbookSections.length > 0 ? (
+                            <div className="px-5 py-4">
+                                {assembledOutput.runbookSections.map((section, si) => (
+                                    <div key={si} className={si > 0 ? 'mt-5' : ''}>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            {section.date && (
+                                                <span className="text-[10px] font-mono bg-muted text-muted-foreground px-2 py-0.5 rounded">
+                                                    {section.date}
+                                                </span>
+                                            )}
+                                            <p className="text-xs font-semibold">{section.sectionName}</p>
+                                            {deploymentRunbook.page?.webUrl && si === 0 && (
+                                                <a
+                                                    href={deploymentRunbook.page.webUrl}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                                >
+                                                    <ExternalLink className="h-3 w-3" />
+                                                </a>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-col gap-0.5 pl-1">
+                                            {section.tasks.map((task, ti) => (
+                                                <div key={ti} className="flex items-baseline gap-2 text-xs">
+                                                    {task.time && (
+                                                        <span className="font-mono text-muted-foreground w-14 shrink-0 text-right">{task.time}</span>
+                                                    )}
+                                                    <span className={task.time ? '' : 'pl-16'}>
+                                                        {task.description}
+                                                        {task.assignees && (
+                                                            <span className="text-muted-foreground ml-1">{task.assignees}</span>
+                                                        )}
+                                                        {task.status && (
+                                                            <span className={
+                                                                'ml-1 font-medium ' + (
+                                                                    task.status === 'DONE'
+                                                                        ? 'text-green-500'
+                                                                        : task.status === 'SCHEDULED'
+                                                                        ? 'text-blue-500'
+                                                                        : 'text-amber-500'
+                                                                )
+                                                            }>— {task.status}</span>
+                                                        )}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : deploymentRunbook.page && !deploymentRunbook.loading ? (
+                            <div className="px-5 py-4">
+                                <p className="text-xs font-semibold mb-2">Deployment Runbook</p>
+                                <div
+                                    className="release-pilot-content text-sm leading-relaxed"
+                                    dangerouslySetInnerHTML={{ __html: deploymentRunbook.html }}
+                                />
+                            </div>
+                        ) : null}
+                    </div>
                 </div>
             )}
 
             <style>{`
                 .release-pilot-content h1, .release-pilot-content h2, .release-pilot-content h3, .release-pilot-content h4 { font-weight: 600; margin: 0.75em 0 0.4em; }
-                .release-pilot-content h1 { font-size: 1.25rem; }
-                .release-pilot-content h2 { font-size: 1.1rem; }
-                .release-pilot-content h3 { font-size: 1rem; }
-                .release-pilot-content p { margin: 0.5em 0; }
-                .release-pilot-content ul, .release-pilot-content ol { margin: 0.5em 0; padding-left: 1.5em; }
-                .release-pilot-content li { margin: 0.2em 0; }
+                .release-pilot-content h1 { font-size: 1.1rem; }
+                .release-pilot-content h2 { font-size: 1rem; }
+                .release-pilot-content h3 { font-size: 0.9rem; }
+                .release-pilot-content p { margin: 0.35em 0; }
+                .release-pilot-content ul { margin: 0.25em 0; padding-left: 1.25em; list-style-type: disc; }
+                .release-pilot-content ol { margin: 0.25em 0; padding-left: 1.25em; }
+                .release-pilot-content li { margin: 0.25em 0; }
                 .release-pilot-content table { border-collapse: collapse; margin: 0.75em 0; width: 100%; }
                 .release-pilot-content th, .release-pilot-content td { border: 1px solid hsl(var(--border)); padding: 0.4em 0.6em; vertical-align: top; }
                 .release-pilot-content th { background: hsl(var(--muted)); font-weight: 600; text-align: left; }
