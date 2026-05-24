@@ -341,22 +341,34 @@ function parseRunbook(html: string): RunbookSection[] {
         const section: RunbookSection = { sectionName: currentSectionName, date: '', tasks: [] };
         let lastDate = '';
 
-        for (const row of rows.slice(1)) {
-            const cells = Array.from(row.querySelectorAll('td,th')).map(
-                (c) => c.textContent?.trim() ?? ''
-            );
-            if (cells.every((c) => !c)) continue;
+        const rawCells = Array.from(el.querySelectorAll('tr')).slice(1).map((row) =>
+            Array.from(row.querySelectorAll('td,th'))
+        );
 
-            if (iDateCol >= 0 && cells[iDateCol]) {
-                const dateMatch = cells[iDateCol].match(dateRe);
+        for (const cellEls of rawCells) {
+            if (cellEls.every((c) => !c.textContent?.trim())) continue;
+
+            const cellText = (i: number) => cellEls[i]?.textContent?.trim() ?? '';
+
+            // Activity: take only direct text nodes + first <p>, ignore nested tables/lists
+            const activityCell = iActCol >= 0 ? cellEls[iActCol] : null;
+            let description = '';
+            if (activityCell) {
+                // Clone and remove nested tables, lists, info-panels before extracting text
+                const clone = activityCell.cloneNode(true) as Element;
+                clone.querySelectorAll('table, ul, ol, .confluence-information-macro').forEach((n) => n.remove());
+                description = clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+            }
+
+            if (iDateCol >= 0 && cellText(iDateCol)) {
+                const dateMatch = cellText(iDateCol).match(dateRe);
                 if (dateMatch) lastDate = dateMatch[0];
             }
             if (lastDate) section.date = lastDate;
 
-            const time        = iTimeCol >= 0 ? normaliseTime(cells[iTimeCol] ?? '') : null;
-            const description = iActCol >= 0 ? (cells[iActCol] ?? '').trim() : cells.filter((_, i) => i !== iLogbookCol).filter(Boolean).join(' ');
-            const status      = iStatusCol >= 0 ? normaliseStatus(cells[iStatusCol] ?? '') : null;
-            const assignees   = iPicCol >= 0 ? normalisePics(cells[iPicCol] ?? '') : null;
+            const time      = iTimeCol >= 0 ? normaliseTime(cellText(iTimeCol)) : null;
+            const status    = iStatusCol >= 0 ? normaliseStatus(cellText(iStatusCol)) : null;
+            const assignees = iPicCol >= 0 ? normalisePics(cellText(iPicCol)) : null;
 
             if (!description) continue;
             section.tasks.push({ time, description, assignees, status });
