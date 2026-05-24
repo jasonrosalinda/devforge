@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
     Copy,
@@ -54,12 +54,6 @@ interface ReleasePlanHeader {
     time: string | null;
 }
 
-function formatBytes(bytes: number): string {
-    if (!bytes || bytes <= 0) return '';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
-}
 
 type ExpiryStatus =
     | { kind: 'unknown' }
@@ -503,29 +497,72 @@ export default function ReleasePilotPage() {
         }
     }
 
+    const assembledOutput = useMemo(() => {
+        if (!releasePlan.page && !deploymentRunbook.page) return null;
+
+        let header: ReleasePlanHeader | null = null;
+        let goalsHtml = '';
+        let runbookSections: RunbookSection[] = [];
+
+        if (releasePlan.page && releasePlan.html) {
+            header = parseReleasePlanHeader(releasePlan.html, releasePlan.page.title);
+            goalsHtml = parseGoalsSection(releasePlan.html);
+        }
+
+        if (deploymentRunbook.html) {
+            runbookSections = parseRunbook(deploymentRunbook.html);
+        }
+
+        return { header, goalsHtml, runbookSections };
+    }, [releasePlan.page, releasePlan.html, deploymentRunbook.page, deploymentRunbook.html]);
+
+    function buildPlainText(): string {
+        if (!assembledOutput) return '';
+        const { header, goalsHtml, runbookSections } = assembledOutput;
+
+        const lines: string[] = [];
+
+        if (header) {
+            lines.push(`Deployment release notice: ${header.title}`);
+            if (header.date || header.time) {
+                const dateTime = [header.date, header.time ? `(${header.time} SGT onwards)` : ''].filter(Boolean).join(' - ');
+                lines.push(`${header.title} - ${dateTime}`);
+            }
+            lines.push('');
+        }
+
+        if (goalsHtml) {
+            lines.push('What to Expect in This Release');
+            const div = document.createElement('div');
+            div.innerHTML = goalsHtml;
+            lines.push(div.textContent?.trim() ?? '');
+            lines.push('');
+        }
+
+        if (runbookSections.length > 0) {
+            lines.push(renderRunbookToText(runbookSections));
+        }
+
+        return lines.join('\n');
+    }
+
+    async function handleCopy() {
+        const text = buildPlainText();
+        if (!text) return;
+        try {
+            await navigator.clipboard.writeText(text);
+            toast.success('Copied to clipboard');
+        } catch {
+            toast.error('Copy failed');
+        }
+    }
+
     return (
-        <div className="flex flex-col gap-4 h-full min-h-0">
-            <style>{`
-                .release-pilot-content h1, .release-pilot-content h2, .release-pilot-content h3, .release-pilot-content h4 { font-weight: 600; margin: 0.75em 0 0.4em; }
-                .release-pilot-content h1 { font-size: 1.25rem; }
-                .release-pilot-content h2 { font-size: 1.1rem; }
-                .release-pilot-content h3 { font-size: 1rem; }
-                .release-pilot-content p { margin: 0.5em 0; }
-                .release-pilot-content ul, .release-pilot-content ol { margin: 0.5em 0; padding-left: 1.5em; }
-                .release-pilot-content li { margin: 0.2em 0; }
-                .release-pilot-content table { border-collapse: collapse; margin: 0.75em 0; width: 100%; }
-                .release-pilot-content th, .release-pilot-content td { border: 1px solid hsl(var(--border)); padding: 0.4em 0.6em; vertical-align: top; }
-                .release-pilot-content th { background: hsl(var(--muted)); font-weight: 600; text-align: left; }
-                .release-pilot-content img { max-width: 100%; height: auto; }
-                .release-pilot-content a { color: hsl(var(--primary)); text-decoration: underline; text-underline-offset: 2px; }
-                .release-pilot-content code { background: hsl(var(--muted)); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }
-                .release-pilot-content pre { background: hsl(var(--muted)); padding: 0.75em; border-radius: 4px; overflow-x: auto; }
-                .release-pilot-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: 0.75em; color: hsl(var(--muted-foreground)); margin: 0.5em 0; }
-            `}</style>
+        <div className="flex flex-col gap-4 h-full min-h-0 overflow-auto">
             <PageHeader
                 icon={Rocket}
                 title="Release Pilot"
-                subtitle="Pull a Confluence page (with images) into your clipboard, ready to paste into MS Teams."
+                subtitle="Compose a deployment release notice from Confluence pages."
                 actions={
                     !settingsLoading && confluenceBaseUrl ? (
                         <SessionStatusPill
@@ -546,7 +583,7 @@ export default function ReleasePilotPage() {
                 <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs flex items-center gap-2">
                     <SettingsIcon className="h-3.5 w-3.5" />
                     <span>
-                        Confluence base URL is not set. Open Settings → API Keys and add it (e.g., https://your-workspace.atlassian.net).
+                        Confluence base URL not set. Open Settings → API Keys and add it (e.g. https://your-workspace.atlassian.net).
                     </span>
                 </div>
             )}
@@ -555,65 +592,170 @@ export default function ReleasePilotPage() {
                 <p className="text-xs text-muted-foreground -mt-2">{silentLoginReason}</p>
             )}
 
-            <div className="flex flex-col gap-2">
-                <Label className="text-xs">Confluence page URL</Label>
-                <div className="flex gap-2">
-                    <Input
-                        value={releasePlan.url}
-                        onChange={(e) => setReleasePlan((d) => ({ ...d, url: e.target.value }))}
-                        placeholder="https://your-workspace.atlassian.net/wiki/spaces/SPACE/pages/123456789/Deployment+Runbook"
-                        className="text-xs font-mono"
-                    />
-                    <Button onClick={handleFetchAll} disabled={fetchingAll || !canFetch}>
-                        {fetchingAll ? (
-                            <>
-                                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> Fetching…
-                            </>
-                        ) : (
-                            'Fetch All'
-                        )}
-                    </Button>
-                </div>
-                {releasePlan.error && (
-                    <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                        {releasePlan.error}
-                    </div>
-                )}
+            {/* URL inputs */}
+            <div className="flex flex-col gap-3">
+                <UrlInputRow
+                    label="Release Plan"
+                    value={releasePlan.url}
+                    onChange={(v) => setReleasePlan((d) => ({ ...d, url: v }))}
+                    loading={releasePlan.loading}
+                    error={releasePlan.error}
+                    disabled={fetchingAll}
+                />
+                <UrlInputRow
+                    label="Release Notes"
+                    value={releaseNotes.url}
+                    onChange={(v) => setReleaseNotes((d) => ({ ...d, url: v }))}
+                    loading={releaseNotes.loading}
+                    error={releaseNotes.error}
+                    disabled={fetchingAll}
+                />
+                <UrlInputRow
+                    label="Deployment Runbook"
+                    value={deploymentRunbook.url}
+                    onChange={(v) => setDeploymentRunbook((d) => ({ ...d, url: v }))}
+                    loading={deploymentRunbook.loading}
+                    error={deploymentRunbook.error}
+                    disabled={fetchingAll}
+                />
+                <Button
+                    onClick={handleFetchAll}
+                    disabled={
+                        fetchingAll ||
+                        !canFetch ||
+                        (!releasePlan.url.trim() && !releaseNotes.url.trim() && !deploymentRunbook.url.trim())
+                    }
+                    className="self-start"
+                >
+                    {fetchingAll ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> Fetching…</>
+                    ) : (
+                        'Fetch All'
+                    )}
+                </Button>
             </div>
 
-            {releasePlan.page && (
-                <>
-                    <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-                        <div className="flex-1 min-w-0">
-                            <div className="text-sm font-semibold truncate">{releasePlan.page.title}</div>
-                            <div className="text-xs text-muted-foreground flex items-center gap-2">
-                                {releasePlan.page.version != null && <span>v{releasePlan.page.version}</span>}
-                                {releasePlan.page.webUrl && (
-                                    <a
-                                        href={releasePlan.page.webUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-flex items-center gap-1 hover:text-foreground underline-offset-2 hover:underline"
-                                    >
-                                        Open in Confluence <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                )}
-                            </div>
-                        </div>
-                        <Button size="sm" variant="outline">
+            {/* Assembled output */}
+            {assembledOutput && (
+                <div className="flex flex-col gap-4 border-t pt-4">
+                    <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Release Notice</span>
+                        <Button size="sm" variant="outline" onClick={handleCopy}>
                             <Copy className="h-3.5 w-3.5 mr-1.5" />
                             Copy
                         </Button>
                     </div>
 
-                    <div className="flex-1 min-h-0 overflow-auto rounded-md border bg-card p-4">
-                        <div
-                            className="release-pilot-content text-sm leading-relaxed"
-                            dangerouslySetInnerHTML={{ __html: releasePlan.html }}
-                        />
-                    </div>
-                </>
+                    {/* Section 1: Header */}
+                    {assembledOutput.header && (
+                        <div className="rounded-md border bg-card p-4">
+                            <p className="text-xs text-muted-foreground mb-1">Deployment release notice:</p>
+                            <p className="text-base font-semibold">{assembledOutput.header.title}</p>
+                            {(assembledOutput.header.date || assembledOutput.header.time) ? (
+                                <p className="text-sm text-muted-foreground mt-0.5">
+                                    {assembledOutput.header.title}
+                                    {assembledOutput.header.date ? ` - ${assembledOutput.header.date}` : ''}
+                                    {assembledOutput.header.time ? ` (${assembledOutput.header.time} SGT onwards)` : ''}
+                                </p>
+                            ) : (
+                                <p className="text-xs text-amber-500 mt-1">Could not parse date/time from Release Plan page.</p>
+                            )}
+                            {releasePlan.page?.webUrl && (
+                                <a
+                                    href={releasePlan.page.webUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-2"
+                                >
+                                    Open in Confluence <ExternalLink className="h-3 w-3" />
+                                </a>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Section 2: What to Expect */}
+                    {assembledOutput.goalsHtml && (
+                        <div className="rounded-md border bg-card p-4">
+                            <h2 className="text-sm font-semibold mb-2">What to Expect in This Release</h2>
+                            <div
+                                className="release-pilot-content text-sm leading-relaxed"
+                                dangerouslySetInnerHTML={{ __html: assembledOutput.goalsHtml }}
+                            />
+                        </div>
+                    )}
+
+                    {/* Section 3: Deployment Runbook */}
+                    {assembledOutput.runbookSections.length > 0 ? (
+                        <div className="rounded-md border bg-card p-4">
+                            <h2 className="text-sm font-semibold mb-3">Deployment Runbook</h2>
+                            {assembledOutput.runbookSections.map((section, si) => (
+                                <div key={si} className="mb-4">
+                                    {section.date && (
+                                        <p className="text-xs font-mono text-muted-foreground mb-1">
+                                            ----{section.date}----
+                                        </p>
+                                    )}
+                                    <p className="text-xs font-semibold mb-1">{section.sectionName}</p>
+                                    <div className="flex flex-col gap-0.5">
+                                        {section.tasks.map((task, ti) => (
+                                            <p key={ti} className="text-xs font-mono">
+                                                {task.time && <span className="text-muted-foreground">{task.time} </span>}
+                                                {task.time ? '- ' : ''}{task.description}
+                                                {task.assignees && <span className="text-muted-foreground"> {task.assignees}</span>}
+                                                {task.status && (
+                                                    <span className={
+                                                        task.status === 'DONE'
+                                                            ? ' text-green-500'
+                                                            : task.status === 'SCHEDULED'
+                                                            ? ' text-blue-500'
+                                                            : ' text-amber-500'
+                                                    }> - {task.status}</span>
+                                                )}
+                                            </p>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                            {deploymentRunbook.page?.webUrl && (
+                                <a
+                                    href={deploymentRunbook.page.webUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mt-2"
+                                >
+                                    Open in Confluence <ExternalLink className="h-3 w-3" />
+                                </a>
+                            )}
+                        </div>
+                    ) : deploymentRunbook.page && !deploymentRunbook.loading ? (
+                        <div className="rounded-md border bg-card p-4">
+                            <h2 className="text-sm font-semibold mb-2">Deployment Runbook</h2>
+                            <div
+                                className="release-pilot-content text-sm leading-relaxed"
+                                dangerouslySetInnerHTML={{ __html: deploymentRunbook.html }}
+                            />
+                        </div>
+                    ) : null}
+                </div>
             )}
+
+            <style>{`
+                .release-pilot-content h1, .release-pilot-content h2, .release-pilot-content h3, .release-pilot-content h4 { font-weight: 600; margin: 0.75em 0 0.4em; }
+                .release-pilot-content h1 { font-size: 1.25rem; }
+                .release-pilot-content h2 { font-size: 1.1rem; }
+                .release-pilot-content h3 { font-size: 1rem; }
+                .release-pilot-content p { margin: 0.5em 0; }
+                .release-pilot-content ul, .release-pilot-content ol { margin: 0.5em 0; padding-left: 1.5em; }
+                .release-pilot-content li { margin: 0.2em 0; }
+                .release-pilot-content table { border-collapse: collapse; margin: 0.75em 0; width: 100%; }
+                .release-pilot-content th, .release-pilot-content td { border: 1px solid hsl(var(--border)); padding: 0.4em 0.6em; vertical-align: top; }
+                .release-pilot-content th { background: hsl(var(--muted)); font-weight: 600; text-align: left; }
+                .release-pilot-content img { max-width: 100%; height: auto; }
+                .release-pilot-content a { color: hsl(var(--primary)); text-decoration: underline; text-underline-offset: 2px; }
+                .release-pilot-content code { background: hsl(var(--muted)); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }
+                .release-pilot-content pre { background: hsl(var(--muted)); padding: 0.75em; border-radius: 4px; overflow-x: auto; }
+                .release-pilot-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: 0.75em; color: hsl(var(--muted-foreground)); margin: 0.5em 0; }
+            `}</style>
         </div>
     );
 }
