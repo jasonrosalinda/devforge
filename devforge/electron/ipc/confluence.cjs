@@ -51,193 +51,8 @@ async function fetchJson(url, headers) {
     return res.json();
 }
 
-async function fetchBuffer(url, headers) {
-    let currentUrl = url;
-    let currentHeaders = { ...headers, Accept: '*/*' };
-    for (let hops = 0; hops < 6; hops++) {
-        const res = await fetch(currentUrl, { headers: currentHeaders, redirect: 'manual' });
-        if (res.status >= 200 && res.status < 300) {
-            const arr = await res.arrayBuffer();
-            return Buffer.from(arr);
-        }
-        if (res.status >= 300 && res.status < 400) {
-            const loc = res.headers.get('location');
-            if (!loc) throw new Error(`HTTP ${res.status} redirect with no Location for ${currentUrl}`);
-            const nextUrl = new URL(loc, currentUrl).toString();
-            const sameOrigin = new URL(nextUrl).origin === new URL(currentUrl).origin;
-            currentUrl = nextUrl;
-            currentHeaders = sameOrigin ? { ...headers, Accept: '*/*' } : { Accept: '*/*' };
-            continue;
-        }
-        const text = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status} ${res.statusText} for ${currentUrl}${text ? ` — ${text.slice(0, 200)}` : ''}`);
-    }
-    throw new Error(`Too many redirects starting from ${url}`);
-}
-
 function trimBaseUrl(baseUrl) {
     return String(baseUrl || '').replace(/\/+$/, '');
-}
-
-function rewriteImageSources(html, attachments) {
-    if (!html) return html;
-    const byTitle = new Map();
-    const byTitleLower = new Map();
-    const byMediaId = new Map();
-    const byId = new Map();
-    const byIdNumeric = new Map();
-    for (const att of attachments) {
-        if (!att.dataUri) continue;
-        if (att.title) {
-            byTitle.set(att.title, att.dataUri);
-            byTitleLower.set(String(att.title).toLowerCase(), att.dataUri);
-        }
-        if (att.mediaId) byMediaId.set(att.mediaId, att.dataUri);
-        if (att.id) {
-            byId.set(att.id, att.dataUri);
-            const numeric = String(att.id).replace(/^att/, '');
-            byIdNumeric.set(numeric, att.dataUri);
-        }
-    }
-
-    const extractFilename = (urlOrPath) => {
-        if (!urlOrPath) return '';
-        try {
-            const noQuery = urlOrPath.split('?')[0];
-            const last = noQuery.split('/').pop() || '';
-            return decodeURIComponent(last);
-        } catch {
-            return '';
-        }
-    };
-
-    const findByFilename = (raw) => {
-        if (!raw) return null;
-        if (byTitle.has(raw)) return byTitle.get(raw);
-        const lower = raw.toLowerCase();
-        if (byTitleLower.has(lower)) return byTitleLower.get(lower);
-        return null;
-    };
-
-    let totalImgs = 0;
-    let matched = 0;
-    const unmatchedSamples = [];
-
-    const result = html.replace(/<img\b[^>]*>/gi, (tag) => {
-        totalImgs += 1;
-        const setSrc = (uri) => {
-            matched += 1;
-            if (/\bsrc="[^"]*"/i.test(tag)) return tag.replace(/\bsrc="[^"]*"/i, `src="${uri}"`);
-            return tag.replace(/<img\b/i, `<img src="${uri}"`);
-        };
-
-        const m1 = tag.match(/data-media-id="([^"]+)"/i);
-        if (m1 && byMediaId.has(m1[1])) return setSrc(byMediaId.get(m1[1]));
-
-        const m2 = tag.match(/data-linked-resource-id="([^"]+)"/i);
-        if (m2) {
-            if (byId.has(m2[1])) return setSrc(byId.get(m2[1]));
-            if (byIdNumeric.has(m2[1])) return setSrc(byIdNumeric.get(m2[1]));
-        }
-
-        const m3 = tag.match(/data-linked-resource-default-alias="([^"]+)"/i);
-        if (m3) {
-            const hit = findByFilename(m3[1]);
-            if (hit) return setSrc(hit);
-        }
-
-        const altMatch = tag.match(/\balt="([^"]+)"/i);
-        if (altMatch) {
-            const hit = findByFilename(altMatch[1]);
-            if (hit) return setSrc(hit);
-        }
-
-        const imageSrcMatch = tag.match(/data-image-src="([^"]+)"/i);
-        if (imageSrcMatch) {
-            const fn = extractFilename(imageSrcMatch[1]);
-            const hit = findByFilename(fn);
-            if (hit) return setSrc(hit);
-        }
-
-        const srcMatch = tag.match(/\bsrc="([^"]+)"/i);
-        if (srcMatch) {
-            const fn = extractFilename(srcMatch[1]);
-            const hit = findByFilename(fn);
-            if (hit) return setSrc(hit);
-        }
-
-        if (unmatchedSamples.length < 3) {
-            unmatchedSamples.push(tag.slice(0, 240));
-        }
-        return tag;
-    });
-
-    console.log(`[confluence] rewriteImageSources matched ${matched}/${totalImgs} img tags (attachments cached: ${byTitle.size})`);
-    if (unmatchedSamples.length) {
-        console.log('[confluence] unmatched img samples:', unmatchedSamples);
-    }
-    return result;
-}
-
-function resolveUrl(baseUrl, link) {
-    if (!link) return '';
-    if (/^https?:\/\//i.test(link)) return link;
-    if (link.startsWith('/wiki/')) return `${baseUrl}${link}`;
-    if (link.startsWith('/')) return `${baseUrl}/wiki${link}`;
-    return `${baseUrl}/wiki/${link}`;
-}
-
-function stripApiV2(url) {
-    return url.replace(/([?&])api=v2(&|$)/, (_, before, after) => (after ? before : '')).replace(/[?&]$/, '');
-}
-
-async function fetchAttachments(baseUrl, pageId, headers) {
-    const url = `${baseUrl}/wiki/rest/api/content/${pageId}/child/attachment?limit=100&expand=version`;
-    const data = await fetchJson(url, headers).catch((e) => {
-        console.error('[confluence] attachments fetch failed:', e.message);
-        return { results: [] };
-    });
-    const items = Array.isArray(data?.results) ? data.results : [];
-    const enriched = [];
-    for (const item of items) {
-        const mediaType = item.extensions?.mediaType || item.metadata?.mediaType || '';
-        const downloadLink = item._links?.download || '';
-        const fullUrl = resolveUrl(baseUrl, downloadLink);
-        const att = {
-            id: item.id,
-            title: item.title || `attachment-${item.id}`,
-            mediaType,
-            mediaId: item.extensions?.fileId || item.metadata?.mediaId || null,
-            sizeBytes: typeof item.extensions?.fileSize === 'number' ? item.extensions.fileSize : 0,
-            downloadUrl: fullUrl,
-            dataUri: null,
-        };
-        if (mediaType.startsWith('image/') && fullUrl) {
-            const candidates = [];
-            const legacy = stripApiV2(fullUrl);
-            candidates.push(legacy);
-            const manual = `${baseUrl}/wiki/download/attachments/${pageId}/${encodeURIComponent(att.title)}`;
-            if (!candidates.includes(manual)) candidates.push(manual);
-            let lastErr = null;
-            for (const candidate of candidates) {
-                try {
-                    const buf = await fetchBuffer(candidate, headers);
-                    att.dataUri = `data:${mediaType};base64,${buf.toString('base64')}`;
-                    att.sizeBytes = buf.length;
-                    att.downloadUrl = candidate;
-                    lastErr = null;
-                    break;
-                } catch (err) {
-                    lastErr = err;
-                }
-            }
-            if (lastErr) {
-                console.warn(`[confluence] failed to download attachment "${att.title}":`, lastErr.message);
-            }
-        }
-        enriched.push(att);
-    }
-    return enriched;
 }
 
 const handler = (_mainWindow) => {
@@ -370,10 +185,7 @@ const handler = (_mainWindow) => {
                 bodyViewPreview: page?.body?.view?.value?.slice(0, 500),
             }, null, 2));
 
-            const attachments = await fetchAttachments(trimmed, pageId, headers);
-            const rawHtml = page?.body?.view?.value || '';
-            const rewrittenHtml = rewriteImageSources(rawHtml, attachments);
-
+            const html = page?.body?.view?.value || '';
             const webUrl = page?._links?.webui ? `${trimmed}/wiki${page._links.webui}` : null;
 
             return {
@@ -384,15 +196,8 @@ const handler = (_mainWindow) => {
                     version: page.version?.number ?? null,
                     webUrl,
                 },
-                html: rewrittenHtml,
-                attachments: attachments.map((a) => ({
-                    id: a.id,
-                    title: a.title,
-                    mediaType: a.mediaType,
-                    sizeBytes: a.sizeBytes,
-                    dataUri: a.dataUri,
-                    downloadUrl: a.downloadUrl,
-                })),
+                html,
+                attachments: [],
             };
         } catch (err) {
             return { success: false, error: err.message || String(err) };
