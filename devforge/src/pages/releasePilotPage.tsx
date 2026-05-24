@@ -292,29 +292,30 @@ function parseRunbook(html: string): RunbookSection[] {
         return t || null;
     }
 
+    // Collect all headings and tables in document order (regardless of nesting depth)
+    const STOP_RE = /rollback|prompt|generator/i;
+    const elements = Array.from(div.querySelectorAll('h1,h2,h3,h4,h5,h6,table'));
+
+    // Find the index of the first stop-heading so we can exclude everything after it
+    const stopIdx = elements.findIndex(
+        (el) => /^H[1-6]$/.test(el.tagName) && STOP_RE.test(el.textContent ?? '')
+    );
+    const allowed = stopIdx >= 0 ? elements.slice(0, stopIdx) : elements;
+
     const sections: RunbookSection[] = [];
     let currentSectionName = 'Deployment Runbook';
-    let stopped = false;
 
-    const topNodes = Array.from(div.childNodes);
-
-    for (const node of topNodes) {
-        if (stopped) break;
-        if (!(node instanceof Element)) continue;
-
-        if (/^H[1-6]$/.test(node.tagName)) {
-            const text = node.textContent?.trim() ?? '';
-            if (/rollback|prompt|generator/i.test(text)) { stopped = true; break; }
+    for (const el of allowed) {
+        if (/^H[1-6]$/.test(el.tagName)) {
+            const text = el.textContent?.trim() ?? '';
             if (text) currentSectionName = text;
             continue;
         }
 
-        if (node.tagName !== 'TABLE') continue;
-
-        const rows = Array.from(node.querySelectorAll('tr'));
+        // TABLE
+        const rows = Array.from(el.querySelectorAll('tr'));
         if (rows.length < 2) continue;
 
-        // Detect header row — first row with th or first row overall
         const headerCells = Array.from(rows[0].querySelectorAll('th,td')).map(
             (c) => c.textContent?.trim() ?? ''
         );
@@ -326,7 +327,6 @@ function parseRunbook(html: string): RunbookSection[] {
         const iPicCol     = colIndex(headerCells, /^pic/i);
         const iLogbookCol = colIndex(headerCells, /log.?book/i);
 
-        // Skip table if no recognisable runbook columns
         if (iActCol < 0 && iTimeCol < 0) continue;
 
         const section: RunbookSection = { sectionName: currentSectionName, date: '', tasks: [] };
@@ -338,13 +338,11 @@ function parseRunbook(html: string): RunbookSection[] {
             );
             if (cells.every((c) => !c)) continue;
 
-            // Date: use cell value if present, else carry forward
             if (iDateCol >= 0 && cells[iDateCol]) {
                 const dateMatch = cells[iDateCol].match(dateRe);
                 if (dateMatch) lastDate = dateMatch[0];
             }
-            if (!section.date && lastDate) section.date = lastDate;
-            else if (lastDate) section.date = lastDate;
+            if (lastDate) section.date = lastDate;
 
             const time        = iTimeCol >= 0 ? normaliseTime(cells[iTimeCol] ?? '') : null;
             const description = iActCol >= 0 ? (cells[iActCol] ?? '').trim() : cells.filter((_, i) => i !== iLogbookCol).filter(Boolean).join(' ');
