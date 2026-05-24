@@ -263,87 +263,100 @@ function parseRunbook(html: string): RunbookSection[] {
     const div = document.createElement('div');
     div.innerHTML = html;
 
-    const sections: RunbookSection[] = [];
     const dateRe = /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b/i;
-    const timeRe = /^(\d{1,2}:\d{2}\s*[ap]m|\d{1,2}\s*[ap]m|\d{2}:\d{2})/i;
-    const statusRe = /[-–]\s*(DONE|SCHEDULED|IN PROGRESS|PENDING|CANCELLED)\s*$/i;
-    const assigneesRe = /\(([^)]+)\)\s*(?:[-–]\s*(?:DONE|SCHEDULED|IN PROGRESS|PENDING|CANCELLED)\s*)?$/i;
 
-    function parseTaskLine(line: string): RunbookTask | null {
-        const trimmed = line.trim();
-        if (!trimmed) return null;
-
-        const statusMatch = trimmed.match(statusRe);
-        const status = statusMatch ? statusMatch[1].toUpperCase() : null;
-        const withoutStatus = status ? trimmed.slice(0, statusMatch!.index).trim() : trimmed;
-
-        const assigneesMatch = withoutStatus.match(assigneesRe);
-        const assignees = assigneesMatch ? `(${assigneesMatch[1]})` : null;
-        const withoutAssignees = assignees
-            ? withoutStatus.slice(0, withoutStatus.lastIndexOf('(')).trim()
-            : withoutStatus;
-
-        const timeMatch = withoutAssignees.match(timeRe);
-        const time = timeMatch ? timeMatch[0].replace(/\s+/, '').toLowerCase() : null;
-        const description = time
-            ? withoutAssignees.replace(timeRe, '').replace(/^[-–\s]+/, '').trim()
-            : withoutAssignees.replace(/^[-–\s]+/, '').trim();
-
-        if (!description) return null;
-        return { time, description, assignees, status };
+    function colIndex(headers: string[], pattern: RegExp): number {
+        return headers.findIndex((h) => pattern.test(h));
     }
 
-    const tables = div.querySelectorAll('table');
-    if (tables.length > 0) {
-        let currentSection: RunbookSection = { sectionName: 'Deployment Runbook', date: '', tasks: [] };
-        sections.push(currentSection);
-        tables.forEach((table) => {
-            table.querySelectorAll('tr').forEach((row) => {
-                const cells = Array.from(row.querySelectorAll('td,th')).map((c) => c.textContent?.trim() ?? '');
-                if (cells.length === 0) return;
-                const rowText = cells.join(' - ');
-                const dateMatch = rowText.match(dateRe);
-                if (dateMatch) { currentSection.date = dateMatch[0]; return; }
-                const task = parseTaskLine(rowText);
-                if (task) currentSection.tasks.push(task);
-            });
-        });
-        if (sections.some((s) => s.tasks.length > 0)) return sections.filter((s) => s.tasks.length > 0);
+    function normaliseStatus(raw: string): string | null {
+        const s = raw.trim().toUpperCase();
+        if (!s) return null;
+        if (/done/i.test(s)) return 'DONE';
+        if (/scheduled/i.test(s)) return 'SCHEDULED';
+        if (/in.?progress/i.test(s)) return 'IN PROGRESS';
+        if (/pending/i.test(s)) return 'PENDING';
+        if (/cancel/i.test(s)) return 'CANCELLED';
+        return s || null;
     }
 
-    const allNodes = Array.from(div.childNodes);
-    let currentSection: RunbookSection = { sectionName: 'Deployment Runbook', date: '', tasks: [] };
-    sections.push(currentSection);
+    function normaliseTime(raw: string): string | null {
+        const t = raw.trim();
+        if (!t) return null;
+        return t.replace(/\s+/g, '').toLowerCase();
+    }
 
-    function processNode(node: Node) {
-        if (!(node instanceof Element)) return;
+    function normalisePics(raw: string): string | null {
+        const t = raw.replace(/@/g, '').trim();
+        return t || null;
+    }
+
+    const sections: RunbookSection[] = [];
+    let currentSectionName = 'Deployment Runbook';
+    let stopped = false;
+
+    const topNodes = Array.from(div.childNodes);
+
+    for (const node of topNodes) {
+        if (stopped) break;
+        if (!(node instanceof Element)) continue;
+
         if (/^H[1-6]$/.test(node.tagName)) {
             const text = node.textContent?.trim() ?? '';
-            const dateMatch = text.match(dateRe);
-            if (dateMatch) {
-                currentSection.date = dateMatch[0];
-            } else if (text) {
-                currentSection = { sectionName: text, date: currentSection.date, tasks: [] };
-                sections.push(currentSection);
-            }
-        } else if (node.tagName === 'UL' || node.tagName === 'OL') {
-            node.querySelectorAll('li').forEach((li) => {
-                const task = parseTaskLine(li.textContent ?? '');
-                if (task) currentSection.tasks.push(task);
-            });
-        } else if (node.tagName === 'P') {
-            const text = node.textContent?.trim() ?? '';
-            const dateMatch = text.match(dateRe);
-            if (dateMatch) { currentSection.date = dateMatch[0]; return; }
-            const task = parseTaskLine(text);
-            if (task) currentSection.tasks.push(task);
-        } else {
-            node.childNodes.forEach(processNode);
+            if (/rollback/i.test(text)) { stopped = true; break; }
+            if (text) currentSectionName = text;
+            continue;
         }
+
+        if (node.tagName !== 'TABLE') continue;
+
+        const rows = Array.from(node.querySelectorAll('tr'));
+        if (rows.length < 2) continue;
+
+        // Detect header row — first row with th or first row overall
+        const headerCells = Array.from(rows[0].querySelectorAll('th,td')).map(
+            (c) => c.textContent?.trim() ?? ''
+        );
+
+        const iDateCol   = colIndex(headerCells, /^date$/i);
+        const iTimeCol   = colIndex(headerCells, /^time/i);
+        const iActCol    = colIndex(headerCells, /^activity$/i);
+        const iStatusCol = colIndex(headerCells, /^status$/i);
+        const iPicCol    = colIndex(headerCells, /^pic/i);
+
+        // Skip table if no recognisable runbook columns
+        if (iActCol < 0 && iTimeCol < 0) continue;
+
+        const section: RunbookSection = { sectionName: currentSectionName, date: '', tasks: [] };
+        let lastDate = '';
+
+        for (const row of rows.slice(1)) {
+            const cells = Array.from(row.querySelectorAll('td,th')).map(
+                (c) => c.textContent?.trim() ?? ''
+            );
+            if (cells.every((c) => !c)) continue;
+
+            // Date: use cell value if present, else carry forward
+            if (iDateCol >= 0 && cells[iDateCol]) {
+                const dateMatch = cells[iDateCol].match(dateRe);
+                if (dateMatch) lastDate = dateMatch[0];
+            }
+            if (!section.date && lastDate) section.date = lastDate;
+            else if (lastDate) section.date = lastDate;
+
+            const time        = iTimeCol >= 0 ? normaliseTime(cells[iTimeCol] ?? '') : null;
+            const description = iActCol >= 0 ? (cells[iActCol] ?? '').trim() : cells.filter(Boolean).join(' ');
+            const status      = iStatusCol >= 0 ? normaliseStatus(cells[iStatusCol] ?? '') : null;
+            const assignees   = iPicCol >= 0 ? normalisePics(cells[iPicCol] ?? '') : null;
+
+            if (!description) continue;
+            section.tasks.push({ time, description, assignees, status });
+        }
+
+        if (section.tasks.length > 0) sections.push(section);
     }
 
-    allNodes.forEach(processNode);
-    return sections.filter((s) => s.tasks.length > 0);
+    return sections;
 }
 
 function renderRunbookToText(sections: RunbookSection[]): string {
