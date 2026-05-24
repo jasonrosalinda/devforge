@@ -318,11 +318,12 @@ function parseRunbook(html: string): RunbookSection[] {
             (c) => c.textContent?.trim() ?? ''
         );
 
-        const iDateCol   = colIndex(headerCells, /^date$/i);
-        const iTimeCol   = colIndex(headerCells, /^time/i);
-        const iActCol    = colIndex(headerCells, /^activity$/i);
-        const iStatusCol = colIndex(headerCells, /^status$/i);
-        const iPicCol    = colIndex(headerCells, /^pic/i);
+        const iDateCol    = colIndex(headerCells, /^date$/i);
+        const iTimeCol    = colIndex(headerCells, /^time/i);
+        const iActCol     = colIndex(headerCells, /^activity$/i);
+        const iStatusCol  = colIndex(headerCells, /^status$/i);
+        const iPicCol     = colIndex(headerCells, /^pic/i);
+        const iLogbookCol = colIndex(headerCells, /log.?book/i);
 
         // Skip table if no recognisable runbook columns
         if (iActCol < 0 && iTimeCol < 0) continue;
@@ -345,7 +346,7 @@ function parseRunbook(html: string): RunbookSection[] {
             else if (lastDate) section.date = lastDate;
 
             const time        = iTimeCol >= 0 ? normaliseTime(cells[iTimeCol] ?? '') : null;
-            const description = iActCol >= 0 ? (cells[iActCol] ?? '').trim() : cells.filter(Boolean).join(' ');
+            const description = iActCol >= 0 ? (cells[iActCol] ?? '').trim() : cells.filter((_, i) => i !== iLogbookCol).filter(Boolean).join(' ');
             const status      = iStatusCol >= 0 ? normaliseStatus(cells[iStatusCol] ?? '') : null;
             const assignees   = iPicCol >= 0 ? normalisePics(cells[iPicCol] ?? '') : null;
 
