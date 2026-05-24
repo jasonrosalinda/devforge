@@ -638,8 +638,7 @@ export default function ReleasePilotPage() {
             {/* Assembled output */}
             {assembledOutput && (
                 <div className="flex flex-col gap-3 border-t pt-4">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Release Notice</span>
+                    <div className="flex justify-end">
                         <Button size="sm" variant="outline" onClick={handleCopy}>
                             <Copy className="h-3.5 w-3.5 mr-1.5" />
                             Copy
