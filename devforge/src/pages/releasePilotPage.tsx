@@ -205,8 +205,9 @@ function parseGoalsSection(html: string): string {
     const fragment = document.createElement('div');
     nodes.forEach((n) => fragment.appendChild(n.cloneNode(true)));
 
+    const STRIP_RE = /to be updated by|release deployment generator|prompt|rollback/i;
     fragment.querySelectorAll('*').forEach((el) => {
-        if (/to be updated by/i.test(el.textContent ?? '')) el.remove();
+        if (STRIP_RE.test(el.textContent ?? '')) el.remove();
     });
 
     // If there's a table with Objectives/Goals columns, extract Goals column as bullet list
@@ -303,7 +304,7 @@ function parseRunbook(html: string): RunbookSection[] {
 
         if (/^H[1-6]$/.test(node.tagName)) {
             const text = node.textContent?.trim() ?? '';
-            if (/rollback/i.test(text)) { stopped = true; break; }
+            if (/rollback|prompt|generator/i.test(text)) { stopped = true; break; }
             if (text) currentSectionName = text;
             continue;
         }
