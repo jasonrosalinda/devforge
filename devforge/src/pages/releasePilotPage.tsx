@@ -209,6 +209,53 @@ function parseGoalsSection(html: string): string {
         if (/to be updated by/i.test(el.textContent ?? '')) el.remove();
     });
 
+    // If there's a table with Objectives/Goals columns, extract Goals column as bullet list
+    const table = fragment.querySelector('table');
+    if (table) {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        // Find Goals column index from header row
+        let goalsColIndex = -1;
+        const headerRow = rows[0];
+        if (headerRow) {
+            const headers = Array.from(headerRow.querySelectorAll('th,td'));
+            goalsColIndex = headers.findIndex((h) => /goal/i.test(h.textContent ?? ''));
+        }
+        // Collect goal values from data rows
+        const goalItems: string[] = [];
+        const dataRows = goalsColIndex >= 0 ? rows.slice(1) : rows;
+        for (const row of dataRows) {
+            const cells = Array.from(row.querySelectorAll('td,th'));
+            const cell = goalsColIndex >= 0 ? cells[goalsColIndex] : cells[cells.length - 1];
+            const text = cell?.textContent?.trim();
+            if (text) goalItems.push(text);
+        }
+        if (goalItems.length > 0) {
+            const ul = document.createElement('ul');
+            goalItems.forEach((item) => {
+                const li = document.createElement('li');
+                li.textContent = item;
+                ul.appendChild(li);
+            });
+            return ul.outerHTML;
+        }
+    }
+
+    // If content is multi-line paragraphs/text nodes, convert to bullet list
+    const items: string[] = [];
+    fragment.querySelectorAll('p, li').forEach((el) => {
+        const text = el.textContent?.trim();
+        if (text) items.push(text);
+    });
+    if (items.length > 1) {
+        const ul = document.createElement('ul');
+        items.forEach((item) => {
+            const li = document.createElement('li');
+            li.textContent = item;
+            ul.appendChild(li);
+        });
+        return ul.outerHTML;
+    }
+
     return fragment.innerHTML;
 }
 
