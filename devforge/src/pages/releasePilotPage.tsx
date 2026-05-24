@@ -341,34 +341,33 @@ function parseRunbook(html: string): RunbookSection[] {
         const section: RunbookSection = { sectionName: currentSectionName, date: '', tasks: [] };
         let lastDate = '';
 
-        const rawCells = Array.from(el.querySelectorAll('tr')).slice(1).map((row) =>
-            Array.from(row.querySelectorAll('td,th'))
-        );
+        console.log(`[runbook] section="${currentSectionName}" cols: date=${iDateCol} time=${iTimeCol} act=${iActCol} status=${iStatusCol} pic=${iPicCol} logbook=${iLogbookCol}`, headerCells);
 
-        for (const cellEls of rawCells) {
+        const dataRows = Array.from(el.querySelectorAll('tr')).slice(1);
+
+        for (const row of dataRows) {
+            const cellEls = Array.from(row.querySelectorAll('td,th'));
             if (cellEls.every((c) => !c.textContent?.trim())) continue;
 
-            const cellText = (i: number) => cellEls[i]?.textContent?.trim() ?? '';
+            // Get plain text from a cell, stripping nested tables/lists/macros
+            const plainText = (i: number): string => {
+                const cell = cellEls[i];
+                if (!cell) return '';
+                const clone = cell.cloneNode(true) as Element;
+                clone.querySelectorAll('table, ul, ol, .confluence-information-macro, [data-macro-name]').forEach((n) => n.remove());
+                return clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+            };
 
-            // Activity: take only direct text nodes + first <p>, ignore nested tables/lists
-            const activityCell = iActCol >= 0 ? cellEls[iActCol] : null;
-            let description = '';
-            if (activityCell) {
-                // Clone and remove nested tables, lists, info-panels before extracting text
-                const clone = activityCell.cloneNode(true) as Element;
-                clone.querySelectorAll('table, ul, ol, .confluence-information-macro').forEach((n) => n.remove());
-                description = clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-            }
-
-            if (iDateCol >= 0 && cellText(iDateCol)) {
-                const dateMatch = cellText(iDateCol).match(dateRe);
+            if (iDateCol >= 0 && plainText(iDateCol)) {
+                const dateMatch = plainText(iDateCol).match(dateRe);
                 if (dateMatch) lastDate = dateMatch[0];
             }
             if (lastDate) section.date = lastDate;
 
-            const time      = iTimeCol >= 0 ? normaliseTime(cellText(iTimeCol)) : null;
-            const status    = iStatusCol >= 0 ? normaliseStatus(cellText(iStatusCol)) : null;
-            const assignees = iPicCol >= 0 ? normalisePics(cellText(iPicCol)) : null;
+            const description = iActCol >= 0 ? plainText(iActCol) : '';
+            const time        = iTimeCol >= 0 ? normaliseTime(plainText(iTimeCol)) : null;
+            const status      = iStatusCol >= 0 ? normaliseStatus(plainText(iStatusCol)) : null;
+            const assignees   = iPicCol >= 0 ? normalisePics(plainText(iPicCol)) : null;
 
             if (!description) continue;
             section.tasks.push({ time, description, assignees, status });
