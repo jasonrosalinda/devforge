@@ -21,13 +21,15 @@
   "asar": true,
   "win": {
     "target": ["nsis", "portable"],
-    "icon": "public/icon.ico"
+    "icon": "public/icon.ico",
+    "artifactName": "${productName}.${version}.${ext}"
   },
   "nsis": {
     "oneClick": false,
     "perMachine": false,
     "allowToChangeInstallationDirectory": true,
-    "shortcutName": "devForge"
+    "shortcutName": "devForge",
+    "artifactName": "${productName}.Setup.${version}.${ext}"
   },
   "mac": {
     "target": ["dmg", "zip"],
