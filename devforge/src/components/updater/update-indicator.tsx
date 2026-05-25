@@ -1,12 +1,10 @@
-import { CheckCircle2, Download, X } from 'lucide-react';
+import { CheckCircle2, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { UpdateInfo } from '@/hooks/useAppUpdater';
 
 interface Props {
     info: UpdateInfo;
     onRestart: () => void;
-    onDismiss?: () => void;
-    hidden?: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -16,8 +14,7 @@ function formatBytes(bytes: number): string {
     return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
-export function UpdateIndicator({ info, onRestart, onDismiss, hidden }: Props) {
-    if (hidden) return null;
+export function UpdateIndicator({ info, onRestart }: Props) {
     const { state } = info;
     if (state === 'idle' || state === 'error') return null;
 
@@ -37,20 +34,10 @@ export function UpdateIndicator({ info, onRestart, onDismiss, hidden }: Props) {
                         <div className="text-xs text-muted-foreground mt-0.5">
                             Restart devForge to apply.
                         </div>
-                        <div className="mt-2 flex gap-2">
+                        <div className="mt-2">
                             <Button size="sm" className="h-7 text-xs" onClick={onRestart}>
                                 Restart Now
                             </Button>
-                            {onDismiss && (
-                                <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="h-7 text-xs"
-                                    onClick={onDismiss}
-                                >
-                                    Later
-                                </Button>
-                            )}
                         </div>
                     </div>
                 </div>
@@ -74,16 +61,6 @@ export function UpdateIndicator({ info, onRestart, onDismiss, hidden }: Props) {
             <div className="flex items-center gap-2 mb-2">
                 <Download className="h-4 w-4 text-primary flex-shrink-0" />
                 <span className="text-sm font-medium flex-1 truncate">{label}</span>
-                {onDismiss && (
-                    <button
-                        type="button"
-                        onClick={onDismiss}
-                        aria-label="Hide"
-                        className="text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                        <X className="h-3.5 w-3.5" />
-                    </button>
-                )}
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                 {isPreparing ? (
