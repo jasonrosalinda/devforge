@@ -120,7 +120,7 @@ app.whenReady().then(() => {
         });
 
         ipcMain.handle('update:install', () => {
-            autoUpdater.quitAndInstall();
+            autoUpdater.quitAndInstall(true, true);
         });
 
         autoUpdater.checkForUpdatesAndNotify();
