@@ -33,7 +33,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [showPagespeed, setShowPagespeed] = useState(false);
   const [showAnthropic, setShowAnthropic] = useState(false);
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
-  const [newMonitorId, setNewMonitorId] = useState('');
+const [newMonitorId, setNewMonitorId] = useState('');
 
   useEffect(() => {
     if (open) setDraft(settings);
@@ -379,6 +379,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               </div>
               <p className="text-xs text-muted-foreground">Used to fetch monitor status and downtime logs per app. UptimeRobot → Integration & API → Main API Keys → Read-only API key</p>
             </div>
+
 
           </div>
         )}

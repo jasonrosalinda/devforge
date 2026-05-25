@@ -8,7 +8,7 @@ import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
 import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import CSSAuditPage from "@/pages/cssAuditPage";
-import ImageToSvgConverter from "@/components/converters/img-to-svg-converter";
+import ImageToSvgPage from "@/pages/imageToSvgPage";
 import ReactCheatsheetPage from "@/pages/reactCheatsheetPage";
 import BlazorCheatsheetPage from "@/pages/blazorCheatsheetPage";
 import TimeConverterPage from "@/pages/timeConverterPage";
@@ -49,7 +49,7 @@ export const pages: Page[] = [
         title: "Image to SVG",
         url: "#",
         icon: AiOutlineFileImage,
-        component: ImageToSvgConverter
+        component: ImageToSvgPage
     },
     {
         title: "Time Converter",

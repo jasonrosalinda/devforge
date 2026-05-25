@@ -14,6 +14,7 @@ interface UseAzureMetrics {
   detailsLoaded: Record<string, boolean>;
   fetchMetrics: (appKeys: string[], range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => Promise<void>;
   fetchAppDetails: (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => Promise<void>;
+  recheckCredential: () => Promise<void>;
 }
 
 export function useAzureMetrics(): UseAzureMetrics {
@@ -25,16 +26,31 @@ export function useAzureMetrics(): UseAzureMetrics {
   const [detailsLoaded, setDetailsLoaded] = useState<Record<string, boolean>>({});
   const fetchIdRef = useRef(0);
 
-  useEffect(() => {
-    window.electronAPI.azureMetrics.checkCredential().then((result) => {
+  const credCheckInFlight = useRef(false);
+  const recheckCredential = useCallback(async () => {
+    if (credCheckInFlight.current) return;
+    credCheckInFlight.current = true;
+    setCredStatus('checking');
+    setCredError(null);
+    try {
+      const result = await window.electronAPI.azureMetrics.checkCredential();
       if (result.ok) {
         setCredStatus('ok');
       } else {
         setCredStatus('error');
         setCredError(result.error ?? 'Authentication failed');
       }
-    });
+    } catch (err: unknown) {
+      setCredStatus('error');
+      setCredError(err instanceof Error ? err.message : String(err));
+    } finally {
+      credCheckInFlight.current = false;
+    }
   }, []);
+
+  useEffect(() => {
+    void recheckCredential();
+  }, [recheckCredential]);
 
   // Subscribe to per-app partial results for progressive rendering
   useEffect(() => {
@@ -85,5 +101,5 @@ export function useAzureMetrics(): UseAzureMetrics {
     }
   }, [detailsLoaded, detailsLoading]);
 
-  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails };
+  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, recheckCredential };
 }

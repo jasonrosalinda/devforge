@@ -19,6 +19,8 @@ export interface AppMetrics {
   memory: MetricSeries
   cpuUnit: string
   memUnit: string
+  connections?: MetricSeries | null
+  apiConnections?: MetricSeries | null
   plan?: { sku: string; cores: number; memoryMB: number } | null
   instances?: InstanceInfo[]
   apiInstances?: InstanceInfo[]
@@ -47,6 +49,7 @@ export interface AppMetrics {
     errorTypes?: Array<{ type: string; count: number }> | null
     errorCount?: number | null
     errorDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
+    dependencyTimeouts?: Array<{ name: string; count: number }> | null
     insight?: {
       summary: string
       totalDependencies: number
@@ -92,6 +95,7 @@ export interface AppMetrics {
     errorTypes?: Array<{ type: string; count: number }> | null
     errorCount?: number | null
     errorDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
+    dependencyTimeouts?: Array<{ name: string; count: number }> | null
     insight?: {
       summary: string
       totalDependencies: number

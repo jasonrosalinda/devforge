@@ -7,6 +7,8 @@ import { useSettings } from "@/context/settings-context";
 import { Button } from "@/components/ui";
 import { isNullOrEmpty } from "@shared/utils/stringHelper";
 import { Loader2, Sparkles } from "lucide-react";
+import { SiPagespeedinsights } from "react-icons/si";
+import { PageHeader } from "@/components/layout/page-header";
 
 export default function PageSpeedResultPage() {
     const { settings } = useSettings();
@@ -57,6 +59,11 @@ export default function PageSpeedResultPage() {
 
     return (
         <>
+            <PageHeader
+                icon={SiPagespeedinsights}
+                title="PageSpeed"
+                subtitle="Run Lighthouse / PageSpeed Insights audits across desktop and mobile — single run, branch compare, or averaged."
+            />
             <div className="flex items-center justify-end gap-2">
                 {canAnalyze && !isAuditing && (
                     <Button variant="outline" onClick={analyzeAll}>Analyze</Button>

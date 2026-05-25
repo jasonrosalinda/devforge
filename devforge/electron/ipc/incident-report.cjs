@@ -74,17 +74,21 @@ async function runKQL(appId, aiToken, timespan, query) {
 async function fetchExceptionAnalysis(appId, aiToken, timespan) {
   const rows = await runKQL(appId, aiToken, timespan, `
 exceptions
-| summarize count=count(), firstOccurrence=min(timestamp), lastOccurrence=max(timestamp)
+| summarize count=count(), firstOccurrence=min(timestamp), lastOccurrence=max(timestamp),
+    sampleInnerMsg=any(innermostMessage), sampleOpName=any(operation_Name), sampleInnerType=any(innermostType)
     by type, outerMessage
 | order by count desc
 | take 20`);
   if (!rows) return null;
-  return rows.map(([type, outerMessage, count, firstOccurrence, lastOccurrence]) => ({
+  return rows.map(([type, outerMessage, count, firstOccurrence, lastOccurrence, sampleInnerMsg, sampleOpName, sampleInnerType]) => ({
     type: String(type ?? '(unknown)'),
     outerMessage: String(outerMessage ?? ''),
     count: Number(count) || 0,
     firstOccurrence: String(firstOccurrence ?? ''),
     lastOccurrence: String(lastOccurrence ?? ''),
+    sampleInnerMsg: String(sampleInnerMsg ?? ''),
+    sampleOpName: String(sampleOpName ?? ''),
+    sampleInnerType: String(sampleInnerType ?? ''),
   }));
 }
 
@@ -242,6 +246,44 @@ requests
   }));
 }
 
+async function fetchFailedUrlsByStatus(appId, aiToken, timespan) {
+  const rows = await runKQL(appId, aiToken, timespan, `
+requests
+| extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
+| extend statusGroup=iff(toint(resultCode) >= 500, "5xx", iff(toint(resultCode) >= 400, "4xx", "other"))
+| where statusGroup in ("4xx", "5xx")
+| summarize count=count() by nameClean, statusGroup
+| order by count desc
+| take 60`);
+  if (!rows) return null;
+  const result = { urls4xx: [], urls5xx: [] };
+  for (const [name, statusGroup, count] of rows) {
+    const entry = { name: String(name ?? ''), count: Number(count) || 0 };
+    if (statusGroup === '4xx') result.urls4xx.push(entry);
+    else if (statusGroup === '5xx') result.urls5xx.push(entry);
+  }
+  return result;
+}
+
+async function fetchSlowUrls(appId, aiToken, timespan) {
+  const rows = await runKQL(appId, aiToken, timespan, `
+requests
+| extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
+| summarize count=count(), avgMs=avg(duration), p99Ms=percentile(duration,99), maxMs=max(duration)
+    by nameClean
+| where count > 5
+| order by avgMs desc
+| take 15`);
+  if (!rows) return null;
+  return rows.map(([name, count, avgMs, p99Ms, maxMs]) => ({
+    name: String(name ?? ''),
+    count: Number(count) || 0,
+    avgMs: Math.round(Number(avgMs) || 0),
+    p99Ms: Math.round(Number(p99Ms) || 0),
+    maxMs: Math.round(Number(maxMs) || 0),
+  }));
+}
+
 async function fetchThreadPoolCounters(appId, aiToken, timespan) {
   const rows = await runKQL(appId, aiToken, timespan, `
 performanceCounters
@@ -299,10 +341,14 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
     fetchHighFreqIPs(appId, aiToken, timespan),
     fetchThreadPoolCounters(appId, aiToken, timespan),
     fetchGCCounters(appId, aiToken, timespan),
-  ]) : Promise.resolve(Array(10).fill(null));
+    fetchFailedUrlsByStatus(appId, aiToken, timespan),
+    fetchSlowUrls(appId, aiToken, timespan),
+  ]) : Promise.resolve(Array(12).fill(null));
 
   const [[cpuSeries, memSeries, rtSeries, rawAvailSeries, requestsSeries, fail5xxSeries, fail4xxSeries],
-         [exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators, failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters]]
+         [exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
+          failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
+          failedUrlsByStatus, slowUrls]]
     = await Promise.all([armPromises, kqlPromises]);
 
   // Normalize Container App RunningReplicas to 0/100 availability scale
@@ -314,6 +360,7 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
     cpuSeries, memSeries, rtSeries, availSeries, requestsSeries, fail5xxSeries, fail4xxSeries,
     exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
     failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
+    failedUrlsByStatus, slowUrls,
   };
 }
 
@@ -321,12 +368,16 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
 
 async function fetchApiIncidentData(aiToken, appId, startTime, endTime) {
   const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-  const [endpointLatency, exceptionAnalysis, failedDeps, sqlDeep] = await Promise.allSettled([
-    fetchEndpointLatency(appId, aiToken, timespan),
-    fetchExceptionAnalysis(appId, aiToken, timespan),
-    fetchFailedDeps(appId, aiToken, timespan),
-    fetchSqlDependencyDeep(appId, aiToken, timespan),
-  ]);
+  const [endpointLatency, exceptionAnalysis, failedDeps, sqlDeep, trafficInsight, highFreqIPs, snatIndicators] =
+    await Promise.allSettled([
+      fetchEndpointLatency(appId, aiToken, timespan),
+      fetchExceptionAnalysis(appId, aiToken, timespan),
+      fetchFailedDeps(appId, aiToken, timespan),
+      fetchSqlDependencyDeep(appId, aiToken, timespan),
+      fetchTrafficInsight(appId, aiToken, timespan),
+      fetchHighFreqIPs(appId, aiToken, timespan),
+      fetchSnatIndicators(appId, aiToken, timespan),
+    ]);
   const reqRows = await runKQL(appId, aiToken, timespan,
     `requests | summarize total=count(), failed=countif(success==false), avgMs=round(avg(duration),0), p99Ms=round(percentile(duration,99),0)`
   ).catch(() => null);
@@ -335,6 +386,9 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime) {
     exceptionAnalysis: exceptionAnalysis.status === 'fulfilled' ? exceptionAnalysis.value : null,
     failedDeps: failedDeps.status === 'fulfilled' ? failedDeps.value : null,
     sqlDeep: sqlDeep.status === 'fulfilled' ? sqlDeep.value : null,
+    trafficInsight: trafficInsight.status === 'fulfilled' ? trafficInsight.value : null,
+    highFreqIPs: highFreqIPs.status === 'fulfilled' ? highFreqIPs.value : null,
+    snatIndicators: snatIndicators.status === 'fulfilled' ? snatIndicators.value : null,
     reqSummary: reqRows?.[0] ?? null,
   };
 }
@@ -509,6 +563,28 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
       ])
     );
     md += '\n';
+    if (data.slowUrls?.length) {
+      md += `**Slowest endpoints by average latency:**\n\n`;
+      md += mdTable(
+        ['Endpoint', 'Count', 'Avg', 'P99', 'Max'],
+        data.slowUrls.slice(0, 15).map(e => [
+          '`' + e.name + '`', e.count, msFormat(e.avgMs), msFormat(e.p99Ms), msFormat(e.maxMs),
+        ])
+      );
+      md += '\n';
+    }
+    if (data.failedUrlsByStatus) {
+      if (data.failedUrlsByStatus.urls5xx?.length) {
+        md += `**5xx errors by endpoint:**\n\n`;
+        md += mdTable(['Endpoint', 'Count'], data.failedUrlsByStatus.urls5xx.slice(0, 15).map(e => ['`' + e.name + '`', e.count]));
+        md += '\n';
+      }
+      if (data.failedUrlsByStatus.urls4xx?.length) {
+        md += `**4xx errors by endpoint:**\n\n`;
+        md += mdTable(['Endpoint', 'Count'], data.failedUrlsByStatus.urls4xx.slice(0, 15).map(e => ['`' + e.name + '`', e.count]));
+        md += '\n';
+      }
+    }
   }
 
   // ── Category 5: Database Deep ──
@@ -654,10 +730,13 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
     md += `_No exceptions detected._\n\n`;
   } else {
     md += mdTable(
-      ['Exception Type', 'Message', 'Count', 'First Seen', 'Last Seen'],
+      ['Exception Type', 'Inner Type', 'Message', 'Inner Msg', 'Operation', 'Count', 'First Seen', 'Last Seen'],
       data.exceptionAnalysis.slice(0, 15).map(e => [
         '`' + e.type + '`',
-        (e.outerMessage || '').slice(0, 100),
+        e.sampleInnerType ? '`' + e.sampleInnerType + '`' : '—',
+        (e.outerMessage || '').slice(0, 80),
+        (e.sampleInnerMsg || '').slice(0, 80),
+        (e.sampleOpName || '—').slice(0, 60),
         e.count, e.firstOccurrence, e.lastOccurrence,
       ])
     );
@@ -744,10 +823,13 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
       md += `_No exceptions detected._\n\n`;
     } else {
       md += mdTable(
-        ['Exception Type', 'Message', 'Count', 'First Seen', 'Last Seen'],
+        ['Exception Type', 'Inner Type', 'Message', 'Inner Msg', 'Operation', 'Count', 'First Seen', 'Last Seen'],
         apiData.exceptionAnalysis.slice(0, 15).map(e => [
           '`' + e.type + '`',
-          (e.outerMessage || '').slice(0, 100),
+          e.sampleInnerType ? '`' + e.sampleInnerType + '`' : '—',
+          (e.outerMessage || '').slice(0, 80),
+          (e.sampleInnerMsg || '').slice(0, 80),
+          (e.sampleOpName || '—').slice(0, 60),
           e.count, e.firstOccurrence, e.lastOccurrence,
         ])
       );
@@ -780,6 +862,46 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
         ])
       );
       md += '\n';
+    }
+
+    md += `### Traffic Intelligence\n\n`;
+    const apiTi = apiData.trafficInsight;
+    if (apiTi) {
+      md += `| Metric | Value |\n|---|---|\n`;
+      md += `| Total requests | ${apiTi.totalReqs.toLocaleString()} |\n`;
+      md += `| Failed requests | ${apiTi.failedReqs.toLocaleString()} (${apiTi.reqFailRate.toFixed(2)}%) |\n`;
+      md += `| Request P95 / P99 | ${msFormat(apiTi.reqP95)} / ${msFormat(apiTi.reqP99)} |\n`;
+      md += `| Total dependencies | ${apiTi.totalDeps.toLocaleString()} |\n`;
+      md += `| Failed dependencies | ${apiTi.failedDeps.toLocaleString()} (${apiTi.depFailRate.toFixed(2)}%) |\n`;
+      md += `| Dependency P95 / P99 | ${msFormat(apiTi.depP95)} / ${msFormat(apiTi.depP99)} |\n`;
+      md += `| Socket exceptions | ${apiTi.socketExceptions} |\n`;
+      md += `| Bot requests | ${apiTi.botRequests.toLocaleString()} |\n\n`;
+    } else {
+      md += `_No traffic data._\n\n`;
+    }
+    if (apiData.highFreqIPs?.length) {
+      md += `**High-frequency clients (peak > 5 RPM):**\n\n`;
+      md += mdTable(
+        ['IP / Identifier', 'Country', 'User Agent', 'Total', 'Peak RPM', 'First Seen', 'Last Seen'],
+        apiData.highFreqIPs.slice(0, 10).map(r => [
+          '`' + r.ip + '`', r.country || '—', r.userAgent.slice(0, 60), r.count, r.rpm.toFixed(1),
+          r.firstSeen, r.lastSeen,
+        ])
+      );
+      md += '\n';
+    }
+
+    md += `### SNAT / Socket Indicators\n\n`;
+    if (apiData.snatIndicators?.length) {
+      const grouped = {};
+      for (const r of apiData.snatIndicators) grouped[r.outerMessage] = (grouped[r.outerMessage] || 0) + r.count;
+      md += mdTable(
+        ['Exception Message', 'Total Count'],
+        Object.entries(grouped).sort((a, b) => b[1] - a[1]).map(([msg, count]) => ['`' + msg + '`', count])
+      );
+      md += '\n';
+    } else {
+      md += `_No SNAT/socket indicators detected._\n\n`;
     }
   }
 

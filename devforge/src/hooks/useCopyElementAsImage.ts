@@ -9,7 +9,7 @@ interface UseCopyElementAsImageOptions {
 
 let html2CanvasLoader: Promise<any> | null = null;
 
-const loadHtml2Canvas = () => {
+export const loadHtml2Canvas = () => {
     if ((window as any).html2canvas) {
         return Promise.resolve((window as any).html2canvas);
     }

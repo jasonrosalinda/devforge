@@ -1,6 +1,5 @@
 import { useMemo, useEffect } from 'react';
 import { AppDropdown } from './appDropdown';
-import { CredBadge } from './credBadge';
 import { C, GRANULARITIES, inputStyle, maxEndDt } from './styles';
 
 type Props = {
@@ -125,7 +124,7 @@ export function ControlBar(props: Props) {
             fontSize: 16,
             cursor: fetchDisabled ? 'not-allowed' : 'pointer',
             display: 'flex', alignItems: 'center',
-            opacity: credStatus === 'error' || effectiveSelected.length === 0 ? 0.4 : 1,
+            opacity: fetchDisabled ? 0.4 : 1,
           }}
         >
           {loading ? (
@@ -138,9 +137,6 @@ export function ControlBar(props: Props) {
         </button>
       </div>
 
-      <div style={{ marginLeft: 'auto' }}>
-        <CredBadge status={credStatus} error={credError} />
-      </div>
     </div>
   );
 }

@@ -23,6 +23,7 @@ interface CombinedChartProps {
   cpu: MetricSeries;
   memory: MetricSeries;
   downtimeIntervals?: DowntimeInterval[];
+  urDowntimeIntervals?: DowntimeInterval[];
   availabilitySeries?: Array<{ t: string; v: number }>;
   instanceHealthSeries?: InstanceSeries[] | null;
   apiInstanceHealthSeries?: InstanceSeries[] | null;
@@ -58,7 +59,7 @@ function formatTick(isoStr: string, spanMs: number): string {
 }
 
 export function CombinedChart({
-  cpu, memory, downtimeIntervals = [], availabilitySeries,
+  cpu, memory, downtimeIntervals = [], urDowntimeIntervals = [], availabilitySeries,
   instanceHealthSeries, apiInstanceHealthSeries,
   loading = false, height = 200,
 }: CombinedChartProps) {
@@ -129,6 +130,15 @@ export function CombinedChart({
 
   const hasAvail = (availabilitySeries?.length ?? 0) > 0;
 
+  const snapX = (ms: number): string | null => {
+    if (!merged.length) return null;
+    return merged.reduce((best, cur) => {
+      const bd = Math.abs(new Date(String(best.t)).getTime() - ms);
+      const cd = Math.abs(new Date(String(cur.t)).getTime() - ms);
+      return cd < bd ? cur : best;
+    }).t as string;
+  };
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={merged} margin={{ top: 4, right: 25, bottom: 0, left: -16 }}>
@@ -173,6 +183,21 @@ export function CombinedChart({
             strokeWidth={1}
           />
         ))}
+        {urDowntimeIntervals.map((iv, i) => {
+          const x1 = snapX(iv.start);
+          const x2 = snapX(iv.end);
+          if (!x1 || !x2 || x1 === x2) return null;
+          return (
+            <ReferenceArea
+              key={`ur_${i}`}
+              x1={x1}
+              x2={x2}
+              fill="rgba(248,81,73,0.65)"
+              stroke="rgba(248,81,73,1)"
+              strokeWidth={1}
+            />
+          );
+        })}
 
         <Area type="monotone" dataKey="cpuAvg" name="CPU Avg" stroke={CHART_COLORS.cpuAvg} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
         <Area type="monotone" dataKey="cpuMax" name="CPU Max" stroke={CHART_COLORS.cpuMax} fill="url(#gCpuMax)" strokeWidth={2} dot={false} />

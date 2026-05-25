@@ -1,14 +1,97 @@
 import { useState, useCallback } from 'react';
+import { TbActivity } from 'react-icons/tb';
+import { Loader2, Copy, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { useAzureMetrics } from '@/hooks/useAzureMetrics';
 import { useSettings } from '@/context/settings-context';
+import { PageHeader } from '@/components/layout/page-header';
 import { AzureAppCard } from '@/components/azure/azureAppCard';
 import { ControlBar } from '@/components/app-health-check/controlBar';
-import { NotConfiguredBanner, CredErrorBanner, StatusLegend } from '@/components/app-health-check/banners';
+import { NotConfiguredBanner, StatusLegend } from '@/components/app-health-check/banners';
 import { C, maxEndDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+
+type CredStatus = 'checking' | 'ok' | 'error';
+
+function AzureStatusPill({
+    credStatus,
+    credError,
+    onRecheck,
+}: {
+    credStatus: CredStatus;
+    credError: string | null;
+    onRecheck: () => void;
+}) {
+    const copyAzLogin = () => {
+        navigator.clipboard.writeText('az login');
+        toast.info('Copied `az login`', { description: 'Run it in your terminal, then click "Re-check".' });
+    };
+
+    if (credStatus === 'checking') {
+        return (
+            <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Checking…
+            </span>
+        );
+    }
+
+    if (credStatus === 'ok') {
+        return (
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <button
+                        type="button"
+                        className="inline-flex items-center gap-1.5 rounded-full border border-green-500/60 bg-green-500/10 px-3 py-1 text-xs text-green-500 hover:bg-green-500/20 transition-colors"
+                    >
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
+                        Authenticated
+                    </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={onRecheck}>
+                        <RefreshCw className="h-3.5 w-3.5 mr-2" /> Re-check
+                    </DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>
+        );
+    }
+
+    return (
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-card px-3 py-1 text-xs text-destructive hover:bg-accent transition-colors"
+                    title={credError || 'Azure CLI not authenticated'}
+                >
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-destructive" />
+                    Not authenticated
+                </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-64">
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                    Run this in your terminal, then click Re-check:
+                </div>
+                <DropdownMenuItem onClick={copyAzLogin} className="font-mono text-xs">
+                    <Copy className="h-3.5 w-3.5 mr-2" /> az login
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={onRecheck}>
+                    <RefreshCw className="h-3.5 w-3.5 mr-2" /> Re-check
+                </DropdownMenuItem>
+            </DropdownMenuContent>
+        </DropdownMenu>
+    );
+}
 
 export default function AppHealthCheckPage() {
   const { settings, loading: settingsLoading } = useSettings();
-  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails } = useAzureMetrics();
+  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, recheckCredential } = useAzureMetrics();
   const allAppKeys = settings.azure.apps.map(a => a.name);
   const [selectedApps, setSelectedApps] = useState<string[]>([]);
   const [startDt, setStartDt] = useState(() => toDatetimeLocal(todayMidnight()));
@@ -30,13 +113,19 @@ export default function AppHealthCheckPage() {
   }, [fetchMetrics, effectiveSelected, startDt, endDt, settings.azure, granularity]);
 
   const notConfigured = !settingsLoading && (!settings.azure.subscriptionId || allAppKeys.length === 0);
-  const fetchDisabled = loading || credStatus === 'error' || effectiveSelected.length === 0 || notConfigured || !startDt || !endDt;
+  const fetchDisabled = loading || credStatus !== 'ok' || effectiveSelected.length === 0 || notConfigured || !startDt || !endDt;
 
   return (
     <div className="flex flex-col gap-4">
 
+      <PageHeader
+        icon={TbActivity}
+        title="App Health Check"
+        subtitle="Pull Azure App Service metrics for selected apps and time range — CPU, memory, requests, and downtime detection."
+        actions={<AzureStatusPill credStatus={credStatus} credError={credError} onRecheck={() => void recheckCredential()} />}
+      />
+
       {notConfigured && <NotConfiguredBanner />}
-      {credStatus === 'error' && <CredErrorBanner />}
 
       <ControlBar
         notConfigured={notConfigured}
