@@ -100,7 +100,7 @@ export function ReleaseNotesModal({ open, onClose }: Props) {
                 <DialogHeader className="flex-shrink-0">
                     <DialogTitle>Release Notes</DialogTitle>
                 </DialogHeader>
-                <ScrollArea className="flex-1 min-h-0 pr-4 -mr-4">
+                <ScrollArea className="h-[calc(80vh-80px)] pr-4 -mr-4">
                     {loading && (
                         <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
                             <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading releases...
