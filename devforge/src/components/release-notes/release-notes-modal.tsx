@@ -39,8 +39,12 @@ function renderInline(text: string): ReactNode {
     return parts;
 }
 
+function stripCommitLinks(md: string): string {
+    return md.replace(/\s*\(\[`[a-f0-9]+`\]\(https:\/\/github\.com\/[^)]+\)\)/g, '');
+}
+
 function renderMarkdown(md: string): ReactNode[] {
-    const lines = md.split('\n');
+    const lines = stripCommitLinks(md).split('\n');
     const nodes: ReactNode[] = [];
     let listItems: ReactNode[] = [];
     let key = 0;
