@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         generate: (payload) => ipcRenderer.invoke('pagespeed-insight:generate', payload),
     },
 
+    commands: {
+        sync: (opts) => ipcRenderer.invoke('commands:sync', opts),
+    },
+
     update: {
         onAvailable:  (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:available',  fn); return () => ipcRenderer.removeListener('update:available',  fn); },
         onProgress:   (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:progress',   fn); return () => ipcRenderer.removeListener('update:progress',   fn); },

@@ -82,6 +82,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load pagespeed-insight.cjs:', err);
     }
 
+    try {
+        require('./ipc/commands.cjs')();
+        console.log('✅ commands handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load commands.cjs:', err);
+    }
+
     // ── Auto-updater ──────────────────────────────────────────────────────────
     if (!isDev) {
         const send = (channel, data) => {

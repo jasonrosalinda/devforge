@@ -29,6 +29,11 @@ export interface IElectronAPI {
         install: () => Promise<void>;
     };
 
+    // Claude Code commands sync
+    commands: {
+        sync(opts: { subscriptionId: string; apps: { name: string; resourceGroup: string; type: string; appInsightsAppId?: string; apiName?: string; apiType?: string; apiInsightsAppId?: string }[] }): Promise<{ success: boolean; error?: string }>;
+    };
+
     // Incident Report
     incidentReport: {
         generate: (opts: {

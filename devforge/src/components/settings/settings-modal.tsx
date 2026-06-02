@@ -170,6 +170,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                         placeholder="myapp"
                         className="text-xs"
                       />
+                      <span className="text-[10px] text-muted-foreground">Application Name</span>
                     </div>
                     <div className="flex flex-col gap-1 col-span-2">
                       <Label className="text-xs">App Insights Application ID <span className="text-muted-foreground">(optional)</span></Label>
@@ -179,7 +180,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="text-xs font-mono"
                       />
-                      <span className="text-[10px] text-muted-foreground">Azure Portal → App Insights → Overview → Application ID</span>
+                      <span className="text-[10px] text-muted-foreground">Azure Portal → App Insights → Overview → Connection string → Application Id</span>
                     </div>
                   </div>
                 </div>
@@ -211,6 +212,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                         placeholder="myapp-api"
                         className="text-xs"
                       />
+                      <span className="text-[10px] text-muted-foreground">Application Name</span>
                     </div>
                     <div className="flex flex-col gap-1 col-span-2">
                       <Label className="text-xs">App Insights Application ID</Label>
@@ -220,6 +222,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                         className="text-xs font-mono"
                       />
+                      <span className="text-[10px] text-muted-foreground">Azure Portal → App Insights → Overview → Connection string → Application Id</span>
                     </div>
                   </div>
                 </div>

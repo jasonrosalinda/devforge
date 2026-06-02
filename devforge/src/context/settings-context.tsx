@@ -22,12 +22,20 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     loadSettings().then(s => {
       setSettings(s);
       setLoading(false);
+      window.electronAPI?.commands?.sync({
+        subscriptionId: s.azure.subscriptionId,
+        apps: s.azure.apps,
+      });
     });
   }, []);
 
   async function updateSettings(s: AppSettings) {
     await saveSettings(s);
     setSettings(s);
+    window.electronAPI?.commands?.sync({
+      subscriptionId: s.azure.subscriptionId,
+      apps: s.azure.apps,
+    });
   }
 
   return (
