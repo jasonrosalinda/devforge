@@ -77,6 +77,27 @@ export interface IElectronAPI {
             resourceGroup: string;
             appName: string;
         }) => Promise<unknown>;
+        rca: (opts: {
+            subscriptionId: string;
+            resourceGroup?: string | undefined;
+            appName: string;
+            appType?: string | undefined;
+            appInsightsAppId?: string | undefined;
+            apiName?: string | undefined;
+            apiInsightsAppId?: string | undefined;
+            apiType?: string | undefined;
+            startMs: number;
+            endMs: number;
+            uptimeRobotIncidents?: unknown[] | undefined;
+        }) => Promise<{ success: boolean; rca?: string; error?: string }>;
+        saveRca: (opts: {
+            appName: string;
+            startMs: number;
+            endMs: number;
+            markdown: string;
+        }) => Promise<{ success: boolean; path?: string; error?: string }>;
+        onRcaChunk: (cb: (data: { appKey: string; chunk: string }) => void) => () => void;
+        onRcaProgress: (cb: (data: { appKey: string; stage: string }) => void) => () => void;
     };
 }
 

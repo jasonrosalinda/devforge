@@ -19,7 +19,6 @@ export interface AzureSettings {
 
 export interface ApiKeysSettings {
   pagespeedApiKey: string;
-  anthropicApiKey: string;
   uptimeRobotApiKey: string;
 }
 

@@ -31,7 +31,6 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [showPagespeed, setShowPagespeed] = useState(false);
-  const [showAnthropic, setShowAnthropic] = useState(false);
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
   const [showAtlassianToken, setShowAtlassianToken] = useState(false);
 const [newMonitorId, setNewMonitorId] = useState('');
@@ -341,29 +340,6 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 </button>
               </div>
               <p className="text-xs text-muted-foreground">Used by PageSpeed Insights tool. Get your key at <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Google PageSpeed Insights API</a>.</p>
-            </div>
-
-            <Separator />
-
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-xs">Anthropic API Key</Label>
-              <div className="relative">
-                <Input
-                  type={showAnthropic ? 'text' : 'password'}
-                  value={draft.apiKeys.anthropicApiKey}
-                  onChange={e => setDraft(d => ({ ...d, apiKeys: { ...d.apiKeys, anthropicApiKey: e.target.value } }))}
-                  placeholder="sk-ant-oat01-..."
-                  className="text-xs font-mono pr-8"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowAnthropic(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showAnthropic ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground">Used by AI-powered tools. Get key at "claude setup-token".</p>
             </div>
 
             <Separator />

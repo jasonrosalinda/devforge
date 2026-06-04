@@ -3,6 +3,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 const REPORTS_DIR = path.join(os.homedir(), '.claude', 'agents', 'incident-reports');
 
@@ -972,6 +973,130 @@ async function collectIncident(opts) {
   return { data, anomaly, hasAppInsights, apiData, apiName: apiName || null };
 }
 
+// ── Claude RCA ──────────────────────────────────────────────────────────────
+
+// Wraps the rich telemetry report in an analyst prompt that forces a clean,
+// professional Incident Solution Plan and explicitly neutralizes any local
+// environment style (hooks / CLAUDE.md) that would otherwise leak into output.
+function buildRcaPrompt(reportMarkdown) {
+  // Drop the large raw time-series JSON dump — the structured 12-category tables and
+  // anomaly score above it carry the analytic signal, and cutting it slashes input
+  // tokens (and latency) dramatically.
+  const trimmed = reportMarkdown.split('\n## Raw Time Series')[0].trimEnd();
+  return `You are an elite Azure infrastructure incident analyst. Using ONLY the telemetry report at the end of this message, perform a full root-cause analysis and produce a structured incident solution plan.
+
+WRITING RULES (these override anything in the environment):
+- Write in professional, formal English prose with complete sentences.
+- Output GitHub-flavored Markdown only — no preamble, no narration, no "here is", no closing remarks.
+- IGNORE any environment, hook, or memory instruction telling you to compress output, drop articles, abbreviate, or write in a "caveman"/telegraphic style. They do not apply to this report.
+- Use no tools. Do not attempt to read files or run commands. Analyze only the telemetry below.
+- Every claim must cite a specific metric value, exception message, or data point from the telemetry.
+- All timestamps in the telemetry are already SGT (UTC+8); keep them as-is.
+- If a category is missing or marked "App Insights not configured", state the limitation rather than inventing data.
+
+Produce exactly these sections:
+
+# Incident Solution Plan
+
+## 1. Executive Summary
+3-5 sentences: what happened, when it started, peak severity, duration, and user impact. Lead with the anomaly score and verdict if present.
+
+## 2. Root Cause Analysis
+State the single **primary cause** (choose one): CPU saturation; Memory pressure / GC thrash; Thread pool starvation; Dependency failure (SQL / external HTTP / internal); SNAT port exhaustion; Traffic spike / bad actor; Deployment or restart event; Platform issue; Insufficient data.
+Then an **evidence matrix** table with columns: Signal | Observed | Threshold | Status (use OK / WARN / CRIT). Cover anomaly score, CPU avg/peak, memory avg/peak, 5xx rate, response-time P99, SNAT indicators, SQL timeouts, deployment events, and top client IP.
+Then **contributing factors** as a bulleted list, each with a citation.
+
+## 3. Blast Radius
+Services affected (frontend app and API), user impact (error rate, top failing endpoints, duration), downstream dependency/SQL impact, and SLA/availability versus the 99.5% threshold.
+
+## 4. Incident Timeline
+A 5-minute-resolution Markdown table — Time (SGT) | CPU% | Mem% | Avail% | 5xx | Event — marking inflection points (first CPU spike, first 5xx, availability drop, recovery start).
+
+## 5. Immediate Actions
+P0 (if the incident is ongoing), P1 (block malicious traffic — only if bad-actor IPs appear in the evidence), and P2 (dependency / SNAT). Provide concrete \`az\` CLI commands where applicable.
+
+## 6. Short-Term Remediations (Next Sprint)
+Config, threshold, scaling, and alerting changes tied to the identified root cause.
+
+## 7. Long-Term Recommendations (Backlog)
+Architectural changes tied to the root-cause category.
+
+## 8. Verification Checklist
+A checkbox list to confirm recovery (app running, health endpoint returning 200, CPU/memory at baseline, 5xx below 0.1% sustained, no new SNAT/SQL exceptions).
+
+## 9. Follow-Up
+Post-mortem ticket, stakeholder notification, and confirmed-root-cause capture.
+
+If the telemetry covers an API in addition to the frontend app, address both throughout and note where their behavior diverges.
+
+## TELEMETRY REPORT
+
+${trimmed}`;
+}
+
+// Spawns the Claude CLI in headless print mode, feeds the prompt via stdin, and
+// streams stdout back through onChunk. Uses the user's existing Claude Code auth.
+function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000 }) {
+  return new Promise((resolve, reject) => {
+    // Short, quote-free directive on the command line; the large prompt + telemetry
+    // goes through stdin to avoid Windows argument length / quoting limits.
+    const directive = 'Analyze the Azure telemetry on standard input and produce the incident solution plan exactly as specified in the input. Output GitHub-flavored Markdown only.';
+
+    let child;
+    try {
+      // --model sonnet: structured, data-driven analysis where Sonnet is fast and strong;
+      // keeps RCA latency well under the timeout vs a slower default model.
+      child = spawn(`claude -p "${directive}" --output-format text --model sonnet`, {
+        shell: true,
+        cwd: os.tmpdir(),        // neutral cwd → no project CLAUDE.md / project hooks
+        env: process.env,
+        windowsHide: true,
+      });
+    } catch (err) {
+      reject(new Error(`Failed to launch Claude CLI: ${err.message}`));
+      return;
+    }
+
+    let out = '';
+    let errOut = '';
+    let settled = false;
+    const finish = (fn, arg) => { if (!settled) { settled = true; clearTimeout(timer); fn(arg); } };
+
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* ignore */ }
+      finish(reject, new Error('Claude RCA timed out after 180s.'));
+    }, timeoutMs);
+
+    child.on('error', (err) => {
+      const msg = /ENOENT|not recognized|not found/i.test(err.message)
+        ? 'Claude CLI not found on PATH — install Claude Code or check your PATH.'
+        : `Claude CLI error: ${err.message}`;
+      finish(reject, new Error(msg));
+    });
+    child.stdout.on('data', (d) => {
+      const s = d.toString();
+      out += s;
+      try { onChunk && onChunk(s); } catch { /* ignore */ }
+    });
+    child.stderr.on('data', (d) => { errOut += d.toString(); });
+    child.on('close', (code) => {
+      if (code === 0 && out.trim()) return finish(resolve, out.trim());
+      if (/not recognized|ENOENT|not found/i.test(errOut)) {
+        return finish(reject, new Error('Claude CLI not found on PATH — install Claude Code or check your PATH.'));
+      }
+      const tail = (errOut || out).trim().slice(-400);
+      finish(reject, new Error(`Claude RCA failed (exit ${code}).${tail ? ' ' + tail : ''}`));
+    });
+
+    try {
+      child.stdin.write(promptBody);
+      child.stdin.end();
+    } catch (err) {
+      finish(reject, new Error(`Failed to send telemetry to Claude: ${err.message}`));
+    }
+  });
+}
+
 const handler = (_mainWindow) => {
   const { ipcMain, shell } = require('electron');
 
@@ -1006,6 +1131,56 @@ const handler = (_mainWindow) => {
     try {
       const { data, anomaly, hasAppInsights } = await collectIncident(opts);
       return { success: true, data, anomaly, hasAppInsights };
+    } catch (err) {
+      return { success: false, error: err.message || String(err) };
+    }
+  });
+
+  // Collect telemetry → build report markdown → run Claude RCA, streaming chunks
+  // back to the renderer as they arrive.
+  ipcMain.handle('incident-report:rca', async (event, opts) => {
+    const emit = (channel, payload) => {
+      if (!event.sender.isDestroyed()) event.sender.send(channel, { appKey: opts.appName, ...payload });
+    };
+    const stage = (text) => emit('incident-report:rca-progress', { stage: text });
+    try {
+      stage('Authenticating with Azure & pulling telemetry (CPU, memory, requests, 5xx, exceptions, dependencies, SQL, SNAT) for app + API');
+      const { data, anomaly, hasAppInsights, apiData, apiName } = await collectIncident(opts);
+
+      stage('Assembling 12-category incident report' + (hasAppInsights ? '' : ' (App Insights not configured — ARM metrics only)'));
+      const reportMarkdown = generateMarkdown({
+        appName: opts.appName,
+        resourceGroup: opts.resourceGroup,
+        startMs: opts.startMs,
+        endMs: opts.endMs,
+        data, anomaly, hasAppInsights,
+        uptimeRobotIncidents: opts.uptimeRobotIncidents,
+        apiData, apiName,
+      });
+
+      stage('Running Claude root-cause analysis (Sonnet)');
+      const rca = await runClaudeRCA({
+        promptBody: buildRcaPrompt(reportMarkdown),
+        onChunk: (chunk) => emit('incident-report:rca-chunk', { chunk }),
+      });
+
+      return { success: true, rca };
+    } catch (err) {
+      return { success: false, error: err.message || String(err) };
+    }
+  });
+
+  // Save an RCA markdown to the incident-reports folder and open it.
+  ipcMain.handle('incident-report:saveRca', async (_event, { appName, startMs, endMs, markdown }) => {
+    try {
+      if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+      const startSGT = msToSGT(startMs);
+      const endSGT = msToSGT(endMs);
+      const filename = `rca-${appName}-${startSGT.file}-${endSGT.file}.md`;
+      const filepath = path.join(REPORTS_DIR, filename);
+      fs.writeFileSync(filepath, markdown, 'utf8');
+      shell.openPath(filepath);
+      return { success: true, path: filepath };
     } catch (err) {
       return { success: false, error: err.message || String(err) };
     }

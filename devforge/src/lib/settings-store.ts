@@ -11,7 +11,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   apiKeys: {
     pagespeedApiKey: '',
-    anthropicApiKey: '',
     uptimeRobotApiKey: '',
   },
   atlassian: {

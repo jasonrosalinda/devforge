@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Copy, Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal } from 'lucide-react';
+import { Copy, Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch } from 'lucide-react';
+import { marked } from 'marked';
+import { toast } from 'sonner';
+import { RcaDialog, type RcaStatus } from './rcaDialog';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
@@ -169,6 +172,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [depsAPIExpanded, setDepsAPIExpanded] = useState(false);
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
+  const [rcaOpen, setRcaOpen] = useState(false);
+  const [rcaStatus, setRcaStatus] = useState<RcaStatus>('running');
+  const [rcaText, setRcaText] = useState('');
+  const [rcaError, setRcaError] = useState<string | null>(null);
+  const [rcaStages, setRcaStages] = useState<string[]>([]);
 
   useEffect(() => {
     setUrExpanded(false);
@@ -186,49 +194,111 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   }, [metrics.cpu.avg]);
 
 
-  const handleIncidentReport = useCallback(async () => {
+  // Shared payload for both the incident-report download and the Claude RCA.
+  const buildIncidentPayload = useCallback(() => {
     const appCfg = azureSettings?.apps?.find((a) => a.name === appKey);
+    const effectiveStart = rangeStart ? new Date(rangeStart).getTime() : Date.now() - 24 * 3600_000;
+    const effectiveEnd   = rangeEnd   ? new Date(rangeEnd).getTime()   : Date.now();
+    const uptimeRobotIncidents = urMonitors.flatMap(mon =>
+      (mon.logs ?? [])
+        .filter(l => l.type === 1)
+        .filter(l => {
+          const logStart = l.datetime * 1000;
+          const logEnd   = (l.datetime + l.duration) * 1000;
+          return logEnd >= effectiveStart && logStart <= effectiveEnd;
+        })
+        .map(l => ({
+          monitor:  mon.friendly_name || mon.url,
+          start:    l.datetime * 1000,
+          end:      (l.datetime + l.duration) * 1000,
+          duration: l.duration,
+          reason:   l.reason?.detail ?? '',
+        }))
+    );
+    return {
+      subscriptionId: azureSettings.subscriptionId,
+      resourceGroup: appCfg?.resourceGroup,
+      appName: appKey,
+      appType: appCfg?.type ?? 'appservice',
+      appInsightsAppId: appCfg?.appInsightsAppId,
+      apiName: appCfg?.apiName,
+      apiInsightsAppId: appCfg?.apiInsightsAppId,
+      apiType: appCfg?.apiType,
+      startMs: effectiveStart,
+      endMs: effectiveEnd,
+      uptimeRobotIncidents,
+    };
+  }, [appKey, azureSettings, rangeStart, rangeEnd, urMonitors]);
+
+  const handleIncidentReport = useCallback(async () => {
     setIncidentReportLoading(true);
     setIncidentReportError(null);
     try {
-      const effectiveStart = rangeStart ? new Date(rangeStart).getTime() : Date.now() - 24 * 3600_000;
-      const effectiveEnd   = rangeEnd   ? new Date(rangeEnd).getTime()   : Date.now();
-      const uptimeRobotIncidents = urMonitors.flatMap(mon =>
-        (mon.logs ?? [])
-          .filter(l => l.type === 1)
-          .filter(l => {
-            const logStart = l.datetime * 1000;
-            const logEnd   = (l.datetime + l.duration) * 1000;
-            return logEnd >= effectiveStart && logStart <= effectiveEnd;
-          })
-          .map(l => ({
-            monitor:  mon.friendly_name || mon.url,
-            start:    l.datetime * 1000,
-            end:      (l.datetime + l.duration) * 1000,
-            duration: l.duration,
-            reason:   l.reason?.detail ?? '',
-          }))
-      );
-      const result = await (window.electronAPI as any).incidentReport.generate({
-        subscriptionId: azureSettings.subscriptionId,
-        resourceGroup: appCfg?.resourceGroup,
-        appName: appKey,
-        appType: appCfg?.type ?? 'appservice',
-        appInsightsAppId: appCfg?.appInsightsAppId,
-        apiName: appCfg?.apiName,
-        apiInsightsAppId: appCfg?.apiInsightsAppId,
-        apiType: appCfg?.apiType,
-        startMs: effectiveStart,
-        endMs: effectiveEnd,
-        uptimeRobotIncidents,
-      });
+      const result = await window.electronAPI.incidentReport.generate(buildIncidentPayload() as any);
       if (!result.success) setIncidentReportError(result.error ?? 'Unknown error');
     } catch (e: any) {
       setIncidentReportError(e?.message ?? 'Unknown error');
     } finally {
       setIncidentReportLoading(false);
     }
-  }, [appKey, azureSettings, rangeStart, rangeEnd]);
+  }, [buildIncidentPayload]);
+
+  const handleRunRca = useCallback(async () => {
+    setRcaOpen(true);
+    setRcaStatus('running');
+    setRcaText('');
+    setRcaError(null);
+    setRcaStages([]);
+    const offChunk = window.electronAPI.incidentReport.onRcaChunk(({ appKey: k, chunk }) => {
+      if (k === appKey) setRcaText(prev => prev + chunk);
+    });
+    const offProgress = window.electronAPI.incidentReport.onRcaProgress(({ appKey: k, stage }) => {
+      if (k === appKey) setRcaStages(prev => [...prev, stage]);
+    });
+    try {
+      const result = await window.electronAPI.incidentReport.rca(buildIncidentPayload());
+      if (result.success && result.rca) {
+        setRcaText(result.rca);
+        setRcaStatus('done');
+      } else {
+        setRcaError(result.error ?? 'Unknown error');
+        setRcaStatus('error');
+      }
+    } catch (e: any) {
+      setRcaError(e?.message ?? 'Unknown error');
+      setRcaStatus('error');
+    } finally {
+      offChunk();
+      offProgress();
+    }
+  }, [appKey, buildIncidentPayload]);
+
+  const exportRca = useCallback(async () => {
+    try {
+      const { startMs, endMs } = buildIncidentPayload();
+      const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown: rcaText });
+      if (!result.success) throw new Error(result.error ?? 'Save failed');
+      await navigator.clipboard.writeText(rcaText);
+      toast.success('RCA saved & markdown copied');
+    } catch (e: any) {
+      toast.error('Export failed', { description: e?.message });
+    }
+  }, [appKey, buildIncidentPayload, rcaText]);
+
+  const copyRcaForTeams = useCallback(async () => {
+    try {
+      const htmlBody = marked.parse(rcaText, { async: false }) as string;
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html':  new Blob([htmlBody], { type: 'text/html' }),
+          'text/plain': new Blob([rcaText], { type: 'text/plain' }),
+        }),
+      ]);
+      toast.success('Copied for Teams');
+    } catch (e: any) {
+      toast.error('Copy failed', { description: e?.message });
+    }
+  }, [rcaText]);
 
   // Eagerly fetch details when CPI data is available (top dependency % needed for accurate score)
   useEffect(() => {
@@ -551,6 +621,24 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               style={incidentReportLoading ? {
                 color: '#d29922',
                 filter: 'drop-shadow(0 0 6px #d29922)',
+                animation: 'sparkle-glow 1.2s ease-in-out infinite',
+              } : undefined}
+            />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            onClick={() => handleRunRca()}
+            disabled={rcaOpen && rcaStatus === 'running'}
+            title="Run Claude RCA on captured metrics"
+            data-html2canvas-ignore="true"
+          >
+            <ScanSearch
+              className="w-3.5 h-3.5"
+              style={(rcaOpen && rcaStatus === 'running') ? {
+                color: '#58a6ff',
+                filter: 'drop-shadow(0 0 6px #58a6ff)',
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
               } : undefined}
             />
@@ -2295,6 +2383,18 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     </Card>
     </div>
 
+    <RcaDialog
+      open={rcaOpen}
+      onOpenChange={setRcaOpen}
+      title={resourceGroup || metrics.label}
+      status={rcaStatus}
+      markdown={rcaText}
+      stages={rcaStages}
+      error={rcaError}
+      onExport={exportRca}
+      onCopyTeams={copyRcaForTeams}
+      onRetry={handleRunRca}
+    />
 
     </>
   );

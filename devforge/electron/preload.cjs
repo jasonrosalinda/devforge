@@ -23,6 +23,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     incidentReport: {
         generate: (opts) => ipcRenderer.invoke('incident-report:generate', opts),
         fetchData: (opts) => ipcRenderer.invoke('incident-report:fetchData', opts),
+        rca: (opts) => ipcRenderer.invoke('incident-report:rca', opts),
+        saveRca: (opts) => ipcRenderer.invoke('incident-report:saveRca', opts),
+        onRcaChunk: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('incident-report:rca-chunk', fn);
+            return () => ipcRenderer.removeListener('incident-report:rca-chunk', fn);
+        },
+        onRcaProgress: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('incident-report:rca-progress', fn);
+            return () => ipcRenderer.removeListener('incident-report:rca-progress', fn);
+        },
     },
 
     pagespeedInsight: {
