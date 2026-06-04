@@ -33,6 +33,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         sync: (opts) => ipcRenderer.invoke('commands:sync', opts),
     },
 
+    confluence: {
+        fetchRunbook: (opts) => ipcRenderer.invoke('confluence:fetchRunbook', opts),
+        fetchImages: (opts) => ipcRenderer.invoke('confluence:fetchImages', opts),
+        login: (opts) => ipcRenderer.invoke('confluence:login', opts),
+        authStatus: (opts) => ipcRenderer.invoke('confluence:authStatus', opts),
+        logout: () => ipcRenderer.invoke('confluence:logout'),
+        saveSummary: (opts) => ipcRenderer.invoke('confluence:saveSummary', opts),
+    },
+
     update: {
         onAvailable:  (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:available',  fn); return () => ipcRenderer.removeListener('update:available',  fn); },
         onProgress:   (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:progress',   fn); return () => ipcRenderer.removeListener('update:progress',   fn); },

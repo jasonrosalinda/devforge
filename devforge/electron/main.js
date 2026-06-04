@@ -89,6 +89,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load commands.cjs:', err);
     }
 
+    try {
+        require('./ipc/confluence.cjs')();
+        console.log('✅ confluence handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load confluence.cjs:', err);
+    }
+
     // ── Auto-updater ──────────────────────────────────────────────────────────
     if (!isDev) {
         const send = (channel, data) => {

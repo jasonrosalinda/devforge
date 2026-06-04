@@ -14,6 +14,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
     anthropicApiKey: '',
     uptimeRobotApiKey: '',
   },
+  atlassian: {
+    confluenceBaseUrl: '',
+    email: '',
+    apiToken: '',
+  },
 };
 
 async function deriveKey(): Promise<CryptoKey> {
@@ -59,6 +64,7 @@ export async function loadSettings(): Promise<AppSettings> {
     return {
       azure: { ...DEFAULT_SETTINGS.azure, ...parsed.azure },
       apiKeys: { ...DEFAULT_SETTINGS.apiKeys, ...parsed.apiKeys },
+      atlassian: { ...DEFAULT_SETTINGS.atlassian, ...parsed.atlassian },
     };
   } catch {
     return DEFAULT_SETTINGS;

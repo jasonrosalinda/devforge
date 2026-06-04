@@ -5,7 +5,7 @@ import ChartLightbox from "../azure/azureChartLightbox";
 import type { AzureTileImage } from "@/hooks/useAzureCapture";
 import { Toast } from "../ui";
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
-const DASHBOARDS = [] as const;
+const DASHBOARDS: ReadonlyArray<{ url: string; label: string }> = [];
 import { Search, RefreshCcw, Copy, SlidersHorizontal, BarChart2, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

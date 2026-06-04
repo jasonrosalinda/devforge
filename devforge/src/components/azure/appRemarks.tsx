@@ -13,7 +13,7 @@ export type RemarkSeverity = 'ok' | 'warning' | 'critical';
 
 export interface MetricRemark {
   kind: RemarkKind;
-  display?: string;
+  display?: string | undefined;
   lastBadAt: string | null;
   severity: RemarkSeverity;
 }
@@ -47,7 +47,8 @@ function findLastBadIso<T extends { t: string }>(
 ): string | null {
   if (!Array.isArray(series) || series.length === 0) return null;
   for (let i = series.length - 1; i >= 0; i--) {
-    if (isBad(series[i])) return series[i].t;
+    const point = series[i];
+    if (point && isBad(point)) return point.t;
   }
   return null;
 }
@@ -98,6 +99,7 @@ function httpRateStats(
   let anyAligned = false;
   for (let i = 0; i < errSeries.length; i++) {
     const pt = errSeries[i];
+    if (!pt) continue;
     const total = reqMap.get(pt.t) ?? 0;
     if (total <= 0) continue;
     anyAligned = true;
@@ -133,7 +135,7 @@ function memoryIsBad(point: { v: number; m: number }, memUnit: string, planMemor
 
 function joinKinds(kinds: string[]): string {
   if (kinds.length === 0) return '';
-  if (kinds.length === 1) return kinds[0];
+  if (kinds.length === 1) return kinds[0] ?? '';
   if (kinds.length === 2) return `${kinds[0]} and ${kinds[1]}`;
   return `${kinds.slice(0, -1).join(', ')}, and ${kinds[kinds.length - 1]}`;
 }

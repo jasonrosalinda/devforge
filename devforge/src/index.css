@@ -146,4 +146,104 @@
   .scrollable-content table td {
     border: 1px solid hsl(var(--border)) !important;
   }
+
+  /* Hide native browser disclosure triangle on all <summary> elements;
+     icons are provided by Tailwind / lucide in the component. */
+  summary {
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::marker {
+    display: none;
+  }
+
+  /* Confluence AUI lozenges inside runbook cells — styled as themed pills. */
+  .runbook-cell .aui-lozenge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.25rem;
+    border: 1px solid;
+    padding: 0.1rem 0.45rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    margin: 0.1rem 0.15rem 0.1rem 0;
+    /* default: grey */
+    background-color: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+    border-color: hsl(var(--border));
+  }
+  .runbook-cell .aui-lozenge-success,
+  .runbook-cell .aui-lozenge-added {
+    background-color: hsl(142 76% 36% / 0.15);
+    color: hsl(142 76% 36%);
+    border-color: hsl(142 76% 36% / 0.4);
+  }
+  .runbook-cell .aui-lozenge-error,
+  .runbook-cell .aui-lozenge-removed {
+    background-color: hsl(0 84% 60% / 0.15);
+    color: hsl(0 72% 50%);
+    border-color: hsl(0 84% 60% / 0.35);
+  }
+  .runbook-cell .aui-lozenge-current,
+  .runbook-cell .aui-lozenge-inprogress {
+    background-color: hsl(217 91% 60% / 0.15);
+    color: hsl(217 91% 55%);
+    border-color: hsl(217 91% 60% / 0.35);
+  }
+  .runbook-cell .aui-lozenge-moved,
+  .runbook-cell .aui-lozenge-warning {
+    background-color: hsl(38 92% 50% / 0.15);
+    color: hsl(38 92% 40%);
+    border-color: hsl(38 92% 50% / 0.35);
+  }
+  .runbook-cell .aui-lozenge-complete {
+    background-color: hsl(270 70% 60% / 0.15);
+    color: hsl(270 70% 55%);
+    border-color: hsl(270 70% 60% / 0.35);
+  }
+  /* Dark mode adjustments */
+  .dark .runbook-cell .aui-lozenge-success,
+  .dark .runbook-cell .aui-lozenge-added {
+    color: hsl(142 76% 50%);
+  }
+  .dark .runbook-cell .aui-lozenge-error,
+  .dark .runbook-cell .aui-lozenge-removed {
+    color: hsl(0 84% 65%);
+  }
+  .dark .runbook-cell .aui-lozenge-current,
+  .dark .runbook-cell .aui-lozenge-inprogress {
+    color: hsl(217 91% 70%);
+  }
+  .dark .runbook-cell .aui-lozenge-moved,
+  .dark .runbook-cell .aui-lozenge-warning {
+    color: hsl(38 92% 60%);
+  }
+  .dark .runbook-cell .aui-lozenge-complete {
+    color: hsl(270 70% 70%);
+  }
+
+  /* Themed chevron for Confluence expand macros rendered inside cell HTML
+     (can't inject lucide there, so use a CSS-only SVG chevron). */
+  .runbook-cell details > summary::before {
+    content: '';
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin-right: 0.35em;
+    flex-shrink: 0;
+    background-color: hsl(var(--muted-foreground));
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='9 18 15 12 9 6'/%3E%3C/svg%3E");
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    transition: transform 150ms;
+    vertical-align: middle;
+  }
+  .runbook-cell details[open] > summary::before {
+    transform: rotate(90deg);
+  }
 }

@@ -15,8 +15,8 @@ export interface IElectronAPI {
     // PageSpeed AI Insights
     pagespeedInsight: {
         generate: (payload: {
-            desktop?: { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: string | null; auditEnd: string | null };
-            mobile?:  { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: string | null; auditEnd: string | null };
+            desktop?: { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: Date | null; auditEnd: Date | null } | undefined;
+            mobile?:  { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: Date | null; auditEnd: Date | null } | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
     };
 
@@ -32,6 +32,32 @@ export interface IElectronAPI {
     // Claude Code commands sync
     commands: {
         sync(opts: { subscriptionId: string; apps: { name: string; resourceGroup: string; type: string; appInsightsAppId?: string; apiName?: string; apiType?: string; apiInsightsAppId?: string }[] }): Promise<{ success: boolean; error?: string }>;
+    };
+
+    // Confluence runbook fetch (Release Pilot)
+    confluence: {
+        fetchRunbook(opts: { baseUrl: string; email: string; apiToken: string; pageUrl: string }): Promise<{
+            ok: boolean;
+            error?: string;
+            pageId?: string;
+            url?: string;
+            title?: string;
+            version?: number;
+            author?: string;
+            when?: string;
+            spaceKey?: string;
+            connected?: boolean;
+            html?: string;
+            attachments?: { filename: string; mediaType: string; isImage: boolean; dataUri: string; id?: string; fileId?: string }[];
+            attDebug?: { connected: boolean; listStatus: number; listed: number; downloaded: number; firstErr?: string };
+        }>;
+        fetchImages(opts: { urls: string[] }): Promise<{
+            results: { url: string; ok: boolean; status: number; mediaType?: string; isImage?: boolean; dataUri?: string; error?: string; textHead?: string }[];
+        }>;
+        login(opts: { baseUrl: string }): Promise<{ ok: boolean; error?: string }>;
+        authStatus(opts: { baseUrl: string }): Promise<{ connected: boolean }>;
+        logout(): Promise<{ ok: boolean; error?: string }>;
+        saveSummary(opts: { html: string; title?: string | undefined }): Promise<{ ok: boolean; path?: string; error?: string }>;
     };
 
     // Incident Report

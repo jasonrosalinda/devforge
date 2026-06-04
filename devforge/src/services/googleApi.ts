@@ -14,7 +14,7 @@ class GoogleApiService {
   private async request<T>(endpoint: string, options?: RequestInit, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
-      signal,
+      ...(signal ? { signal } : {}),
       headers: {
         'Content-Type': 'application/json',
         ...options?.headers,

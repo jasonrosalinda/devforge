@@ -1,5 +1,5 @@
 import type { Page } from "@/types/pages.types";
-import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages } from "lucide-react";
+import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages, Rocket } from "lucide-react";
 import { SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
 import { AiOutlineTranslation, AiOutlineFileImage } from "react-icons/ai";
 import { TbActivity } from "react-icons/tb";
@@ -13,6 +13,7 @@ import ReactCheatsheetPage from "@/pages/reactCheatsheetPage";
 import BlazorCheatsheetPage from "@/pages/blazorCheatsheetPage";
 import TimeConverterPage from "@/pages/timeConverterPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
+import ReleasePilotPage from "@/pages/releasePilotPage";
 
 export const pages: Page[] = [
     {
@@ -38,6 +39,12 @@ export const pages: Page[] = [
         url: "#",
         icon: TbActivity,
         component: AppHealthCheckPage
+    },
+    {
+        title: "Release Pilot",
+        url: "#",
+        icon: Rocket,
+        component: ReleasePilotPage
     },
     {
         title: "CSS Audit",

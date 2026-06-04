@@ -30,7 +30,7 @@ export function parseToPageSpeedInsightResult(
     url: string,
     audits: RawAudits,
     runWarnings?: string,
-    meta?: { performanceScore?: number; lighthouseVersion?: string; fetchTime?: string }
+    meta?: { performanceScore?: number | undefined; lighthouseVersion?: string | undefined; fetchTime?: string | undefined }
 ): PageSpeedInsightResult {
     const opps: PageSpeedOpportunity[] = Object.entries(audits)
         .filter(([key, a]) =>

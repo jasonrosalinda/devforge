@@ -26,9 +26,9 @@ export interface PageSpeedOpportunity {
     type: 'opportunity' | 'diagnostic';
     auditKey?: string;
     title: string;
-    displayValue?: string;
+    displayValue?: string | undefined;
     score: number | null;
-    scoreDisplayMode?: string;
+    scoreDisplayMode?: string | undefined;
     details?: AuditDetails;
     metricSavings?: Record<string, number>;
 }
@@ -43,11 +43,11 @@ export interface PageSpeedInsightResult {
     runWarnings?: string | string[];
     errorResponse?: PageSpeedErrorResponse;
     runHistory?: PageSpeedInsightResult[];
-    opportunities?: PageSpeedOpportunity[];
-    interactive?: PageSpeedMetrics;
-    performanceScore?: number;
-    lighthouseVersion?: string;
-    fetchTime?: string;
+    opportunities?: PageSpeedOpportunity[] | undefined;
+    interactive?: PageSpeedMetrics | undefined;
+    performanceScore?: number | undefined;
+    lighthouseVersion?: string | undefined;
+    fetchTime?: string | undefined;
 }
 
 export type PageSpeedStrategy = "mobile" | "desktop";

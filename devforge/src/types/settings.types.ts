@@ -23,7 +23,14 @@ export interface ApiKeysSettings {
   uptimeRobotApiKey: string;
 }
 
+export interface AtlassianSettings {
+  confluenceBaseUrl: string;   // e.g. https://mims.atlassian.net
+  email: string;               // atlassian account email
+  apiToken: string;            // Confluence Cloud API token
+}
+
 export interface AppSettings {
   azure: AzureSettings;
   apiKeys: ApiKeysSettings;
+  atlassian: AtlassianSettings;
 }

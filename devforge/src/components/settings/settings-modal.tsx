@@ -21,7 +21,7 @@ const EMPTY_APP: AzureAppEntry = {
   name: '',
 };
 
-type Tab = 'azure' | 'apikeys';
+type Tab = 'azure' | 'apikeys' | 'atlassian';
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const { settings, updateSettings } = useSettings();
@@ -33,6 +33,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [showPagespeed, setShowPagespeed] = useState(false);
   const [showAnthropic, setShowAnthropic] = useState(false);
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
+  const [showAtlassianToken, setShowAtlassianToken] = useState(false);
 const [newMonitorId, setNewMonitorId] = useState('');
 
   useEffect(() => {
@@ -104,6 +105,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
         <div className="flex gap-1 border-b pb-2 mb-4">
           <button style={tabStyle('azure')} onClick={() => setTab('azure')}>Azure</button>
           <button style={tabStyle('apikeys')} onClick={() => setTab('apikeys')}>API Keys</button>
+          <button style={tabStyle('atlassian')} onClick={() => setTab('atlassian')}>Atlassian</button>
         </div>
 
         {/* Azure Tab */}
@@ -384,6 +386,57 @@ const [newMonitorId, setNewMonitorId] = useState('');
             </div>
 
 
+          </div>
+        )}
+
+        {/* Atlassian Tab */}
+        {tab === 'atlassian' && (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Confluence Base URL</Label>
+              <Input
+                value={draft.atlassian.confluenceBaseUrl}
+                onChange={e => setDraft(d => ({ ...d, atlassian: { ...d.atlassian, confluenceBaseUrl: e.target.value } }))}
+                placeholder="https://your-site.atlassian.net"
+                className="text-xs font-mono"
+              />
+              <p className="text-xs text-muted-foreground">Your Atlassian Cloud site root. The Release Pilot page appends <span className="font-mono">/wiki/rest/api</span>.</p>
+            </div>
+
+            <Separator />
+
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Atlassian Account Email</Label>
+              <Input
+                value={draft.atlassian.email}
+                onChange={e => setDraft(d => ({ ...d, atlassian: { ...d.atlassian, email: e.target.value } }))}
+                placeholder="you@company.com"
+                className="text-xs font-mono"
+              />
+            </div>
+
+            <Separator />
+
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Confluence API Token</Label>
+              <div className="relative">
+                <Input
+                  type={showAtlassianToken ? 'text' : 'password'}
+                  value={draft.atlassian.apiToken}
+                  onChange={e => setDraft(d => ({ ...d, atlassian: { ...d.atlassian, apiToken: e.target.value } }))}
+                  placeholder="ATATT3x..."
+                  className="text-xs font-mono pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAtlassianToken(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showAtlassianToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">id.atlassian.com → API tokens</a>. Used with Basic auth to fetch runbook pages + attachments.</p>
+            </div>
           </div>
         )}
 

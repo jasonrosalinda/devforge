@@ -137,8 +137,8 @@ export interface DetectorAnalysisResult {
 
 export interface IAzureMetricsAPI {
   checkCredential: () => Promise<{ ok: boolean; error?: string }>
-  fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string; customEnd?: string; granularity?: string }) => Promise<Record<string, AppMetrics>>
-  fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string; customEnd?: string; granularity?: string }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'failedDependencies' | 'apiFailedDependencies'>>
+  fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Record<string, AppMetrics>>
+  fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'failedDependencies' | 'apiFailedDependencies'>>
   fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
   onPartial?: (cb: (data: { key: string; result: AppMetrics }) => void) => (() => void)
 }

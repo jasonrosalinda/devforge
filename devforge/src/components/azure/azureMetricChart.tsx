@@ -16,6 +16,7 @@ interface DowntimeInterval {
 
 interface InstanceSeries {
   name: string;
+  roleName?: string | null;
   series: Array<{ t: string; v: number }>;
 }
 
@@ -24,7 +25,7 @@ interface CombinedChartProps {
   memory: MetricSeries;
   downtimeIntervals?: DowntimeInterval[];
   urDowntimeIntervals?: DowntimeInterval[];
-  availabilitySeries?: Array<{ t: string; v: number }>;
+  availabilitySeries?: Array<{ t: string; v: number }> | undefined;
   instanceHealthSeries?: InstanceSeries[] | null;
   apiInstanceHealthSeries?: InstanceSeries[] | null;
   loading?: boolean;

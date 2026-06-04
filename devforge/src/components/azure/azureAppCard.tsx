@@ -714,7 +714,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       : null;
                     const fallbackPct = inst.healthPct ?? statusFallback;
                     const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
-                    const latest = vals.length ? vals[vals.length - 1] : fallbackPct;
+                    const latest = vals.length ? (vals[vals.length - 1] ?? null) : fallbackPct;
                     const minVal = vals.length ? Math.min(...vals) : fallbackPct;
                     const minIdx = vals.length ? vals.indexOf(Math.min(...vals)) : -1;
                     const minTimeIso = minIdx >= 0 ? (preSeriesPoints[minIdx]?.t ?? null) : null;
@@ -731,8 +731,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     // First / last seen — derived from the per-instance series.
                     // A point exists in the series only when the instance produced traffic in that bucket,
                     // so first point ≈ when instance came online and last point ≈ last activity.
-                    const firstSeenIso = preSeriesPoints.length ? preSeriesPoints[0].t : null;
-                    const lastSeenIso  = preSeriesPoints.length ? preSeriesPoints[preSeriesPoints.length - 1].t : null;
+                    const firstSeenIso = preSeriesPoints.length ? (preSeriesPoints[0]?.t ?? null) : null;
+                    const lastSeenIso  = preSeriesPoints.length ? (preSeriesPoints[preSeriesPoints.length - 1]?.t ?? null) : null;
                     const fmtDt = (iso: string) => {
                       const d = new Date(iso);
                       return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
