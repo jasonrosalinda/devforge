@@ -71,16 +71,28 @@ jobs:
         with:
           node-version: 20
 
-      - name: Determine bump type from commit message
+      - name: Determine bump type from commits since last tag
         id: type
         run: |
-          MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $MSG"
-          if echo "$MSG" | grep -qE "(BREAKING CHANGE|^[a-z]+(\(.+\))?!:)"; then
+          # Scan every commit since the last tag — not just HEAD — so a merge
+          # commit on top of a feat/fix no longer masks the release.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            RANGE=""
+            echo "No previous tag — scanning all commits"
+          else
+            RANGE="${LAST_TAG}..HEAD"
+            echo "Scanning commits in $RANGE"
+          fi
+          MSGS=$(git log $RANGE --pretty=%B)
+          echo "----- commit messages -----"
+          echo "$MSGS"
+          echo "---------------------------"
+          if echo "$MSGS" | grep -qE "(BREAKING CHANGE|^[a-z]+(\(.+\))?!:)"; then
             BUMP=major
-          elif echo "$MSG" | grep -qE "^feat(\(.+\))?:"; then
+          elif echo "$MSGS" | grep -qE "^feat(\(.+\))?:"; then
             BUMP=minor
-          elif echo "$MSG" | grep -qE "^(fix|perf)(\(.+\))?:"; then
+          elif echo "$MSGS" | grep -qE "^(fix|perf)(\(.+\))?:"; then
             BUMP=patch
           else
             BUMP=none
