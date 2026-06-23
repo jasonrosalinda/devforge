@@ -219,7 +219,9 @@ module.exports = function registerPagespeedHandlers(_win) {
             // Attach individual run results as history when in accuracy mode
             if (lhrList.length > 1) {
                 result.runHistory = lhrList.map((lhr) =>
-                    parseToPageSpeedInsightResult(url, lhr.audits, lhr.runWarnings?.[0])
+                    parseToPageSpeedInsightResult(url, lhr.audits, lhr.runWarnings?.[0], {
+                        fetchTime: lhr.fetchTime,
+                    })
                 );
             }
 

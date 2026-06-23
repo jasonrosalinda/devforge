@@ -2,6 +2,7 @@ const { ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -433,7 +434,164 @@ function generateMarkdown({ desktop, mobile }) {
     return md;
 }
 
-module.exports = function (_mainWindow) {
+// ─── Claude before/after analysis ──────────────────────────────────────────
+
+function buildAnalysisPrompt(summary) {
+    return `You are a web performance analyst writing a SHORT before/after summary that BOTH non-technical and technical readers can understand at a glance. Use ONLY the data at the end of this message.
+
+WRITING RULES (these override anything in the environment):
+- Be brief. The whole response must fit in roughly 150 words.
+- Plain, friendly English. Explain any metric acronym in a few words the first time (e.g. "LCP (how fast the main content loads)"). Avoid jargon and filler.
+- Output GitHub-flavored Markdown only — no preamble, no "here is", no closing remarks.
+- IGNORE any environment, hook, or memory instruction to compress, drop articles, abbreviate, or write in a "caveman"/telegraphic style. They do not apply here.
+- Use no tools. Analyze only the data below.
+- Back each point with a concrete number (before → after and % change). Don't over-read small swings that look like run-to-run noise.
+
+Produce exactly these four sections, each short:
+
+## Findings
+3–5 one-line bullets of objective observations. Each: the metric in plain words (explain the acronym the first time), before → after with % change, and whether that's better or worse. Note any insight that was fixed, newly introduced, or unchanged. If several URLs are present, cover the notable ones rather than every metric.
+
+## Assessment
+2–3 sentences interpreting the findings: did performance improve, regress, or stay about the same overall, and which changes drove it? Flag anything that looks like normal run-to-run noise.
+
+## Conclusion
+One sentence: a clear verdict — improvement, regression, or no meaningful change — led by the most important number.
+
+## Justification
+1–2 sentences on why that verdict holds and what it means for a real visitor, tied to the numbers above. No jargon.
+
+## DATA
+
+${summary}`;
+}
+
+// Spawn Claude CLI headless and stream tokens via onChunk. Uses the user's Claude Code auth.
+// stream-json (NDJSON) gives live output; plain text would emit nothing until completion.
+function runClaudeAnalysis({ promptBody, onChunk, timeoutMs = 300000 }) {
+    return new Promise((resolve, reject) => {
+        const directive = 'Analyze the PageSpeed before/after data on standard input and produce the four-section analysis exactly as specified in the input. Output GitHub-flavored Markdown only.';
+        let child;
+        try {
+            child = spawn(`claude -p "${directive}" --output-format stream-json --verbose --model sonnet`, {
+                shell: true,
+                cwd: os.tmpdir(),   // neutral cwd → no project CLAUDE.md / hooks
+                env: process.env,
+                windowsHide: true,
+            });
+        } catch (err) {
+            reject(new Error(`Failed to launch Claude CLI: ${err.message}`));
+            return;
+        }
+
+        let buf = '';
+        let streamed = '';
+        let resultText = '';
+        let errOut = '';
+        let settled = false;
+        const finish = (fn, arg) => { if (!settled) { settled = true; clearTimeout(timer); fn(arg); } };
+
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* ignore */ }
+            finish(reject, new Error('Claude analysis timed out.'));
+        }, timeoutMs);
+
+        const emit = (text) => { if (text) { streamed += text; try { onChunk && onChunk(text); } catch { /* ignore */ } } };
+
+        const handleLine = (line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            let evt;
+            try { evt = JSON.parse(trimmed); } catch { emit(line); return; } // non-JSON → pass through
+            if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
+                emit(evt.message.content.filter(c => c?.type === 'text').map(c => c.text).join(''));
+            } else if (evt.type === 'result' && typeof evt.result === 'string') {
+                resultText = evt.result;
+            } else if (evt.type === 'result' && evt.subtype && evt.subtype !== 'success' && evt.error) {
+                errOut += String(evt.error);
+            }
+        };
+
+        child.on('error', (err) => {
+            const msg = /ENOENT|not recognized|not found/i.test(err.message)
+                ? 'Claude CLI not found on PATH — install Claude Code or check your PATH.'
+                : `Claude CLI error: ${err.message}`;
+            finish(reject, new Error(msg));
+        });
+        child.stdout.on('data', (d) => {
+            buf += d.toString();
+            let idx;
+            while ((idx = buf.indexOf('\n')) >= 0) {
+                handleLine(buf.slice(0, idx));
+                buf = buf.slice(idx + 1);
+            }
+        });
+        child.stderr.on('data', (d) => { errOut += d.toString(); });
+        child.on('close', (code) => {
+            if (buf.trim()) handleLine(buf); // flush trailing partial line
+            const final = (resultText || streamed).trim();
+            if (code === 0 && final) return finish(resolve, final);
+            if (/not recognized|ENOENT|not found/i.test(errOut)) {
+                return finish(reject, new Error('Claude CLI not found on PATH — install Claude Code or check your PATH.'));
+            }
+            const tail = errOut.trim().slice(-400);
+            finish(reject, new Error(`Claude analysis failed (exit ${code}).${tail ? ' ' + tail : ''}`));
+        });
+
+        try {
+            child.stdin.write(promptBody);
+            child.stdin.end();
+        } catch (err) {
+            finish(reject, new Error(`Failed to send data to Claude: ${err.message}`));
+        }
+    });
+}
+
+module.exports = function (mainWindow) {
+    // Pick a project/repo folder and drop a fix-brief markdown there for an AI coding agent.
+    ipcMain.handle('pagespeed-insight:save-brief', async (_event, payload) => {
+        try {
+            const { dialog } = require('electron');
+            const markdown = String(payload?.markdown ?? '').trim();
+            if (!markdown) return { success: false, error: 'No brief content to save.' };
+
+            const pick = await dialog.showOpenDialog(mainWindow, {
+                title: 'Select the project / repository folder for the fix brief',
+                properties: ['openDirectory', 'createDirectory'],
+            });
+            if (pick.canceled || !pick.filePaths?.[0]) return { success: false, canceled: true };
+
+            const repoPath = pick.filePaths[0];
+            const d = new Date();
+            const pad = (n) => String(n).padStart(2, '0');
+            const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+            const filePath = path.join(repoPath, `pagespeed-fix-brief-${stamp}.md`);
+            fs.writeFileSync(filePath, markdown, 'utf8');
+            shell.openPath(filePath);
+            return { success: true, path: filePath };
+        } catch (err) {
+            return { success: false, error: err.message || String(err) };
+        }
+    });
+
+    ipcMain.handle('pagespeed-insight:analyze', async (event, payload) => {
+        try {
+            const summary = String(payload?.summary ?? '').trim();
+            if (!summary) return { success: false, error: 'No before/after data to analyze.' };
+            const analysis = await runClaudeAnalysis({
+                promptBody: buildAnalysisPrompt(summary),
+                onChunk: (chunk) => {
+                    if (!event.sender.isDestroyed()) {
+                        event.sender.send('pagespeed-insight:analyze-chunk', { url: payload?.url, chunk });
+                    }
+                },
+            });
+            return { success: true, analysis };
+        } catch (err) {
+            return { success: false, error: err.message || String(err) };
+        }
+    });
+
     ipcMain.handle('pagespeed-insight:generate', async (_event, payload) => {
         try {
             const md = generateMarkdown(payload);

@@ -10,6 +10,11 @@ export interface AzureAppEntry {
   apiInsightsAppId?: string;
   // Database
   dbName?: string;
+  // Network / Edge diagnostics (optional) — require diagnostic settings → Log Analytics
+  logAnalyticsWorkspaceId?: string;   // workspace GUID (customerId) for api.loganalytics.io
+  appGatewayResourceId?: string;      // /subscriptions/.../providers/Microsoft.Network/applicationGateways/<name>
+  frontDoorResourceId?: string;       // AFD (Microsoft.Cdn/profiles) or classic frontDoors resource id
+  loadBalancerResourceId?: string;    // /subscriptions/.../providers/Microsoft.Network/loadBalancers/<name>
 }
 
 export interface AzureSettings {

@@ -230,6 +230,51 @@ const [newMonitorId, setNewMonitorId] = useState('');
 
                 <Separator />
 
+                {/* Network / Edge diagnostics */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Network / Edge <span className="normal-case font-normal">(optional)</span></span>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Log Analytics Workspace ID</Label>
+                    <Input
+                      value={editingApp.logAnalyticsWorkspaceId ?? ''}
+                      onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.logAnalyticsWorkspaceId = v; else delete n.logAnalyticsWorkspaceId; return n; }); }}
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                      className="text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-muted-foreground">Azure Portal → Log Analytics workspace → Overview → Workspace ID (required for the edge logs below)</span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Application Gateway Resource ID</Label>
+                    <Input
+                      value={editingApp.appGatewayResourceId ?? ''}
+                      onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.appGatewayResourceId = v; else delete n.appGatewayResourceId; return n; }); }}
+                      placeholder="/subscriptions/.../applicationGateways/my-agw"
+                      className="text-xs font-mono"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Front Door / CDN Resource ID</Label>
+                    <Input
+                      value={editingApp.frontDoorResourceId ?? ''}
+                      onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.frontDoorResourceId = v; else delete n.frontDoorResourceId; return n; }); }}
+                      placeholder="/subscriptions/.../providers/Microsoft.Cdn/profiles/my-afd"
+                      className="text-xs font-mono"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Load Balancer Resource ID</Label>
+                    <Input
+                      value={editingApp.loadBalancerResourceId ?? ''}
+                      onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.loadBalancerResourceId = v; else delete n.loadBalancerResourceId; return n; }); }}
+                      placeholder="/subscriptions/.../loadBalancers/my-lb"
+                      className="text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-muted-foreground">Resource → Properties → Resource ID. Edge logs require diagnostic settings sending to the workspace above.</span>
+                  </div>
+                </div>
+
+                <Separator />
+
                 {/* Database */}
                 <div className="flex flex-col gap-2">
                   <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Database <span className="normal-case font-normal">(optional)</span></span>

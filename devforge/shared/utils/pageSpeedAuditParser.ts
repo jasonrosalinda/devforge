@@ -6,6 +6,7 @@ type AuditEntry = {
     numericUnit?: string;
     score?: number | null;
     title?: string;
+    description?: string;
     scoreDisplayMode?: string;
     details?: AuditDetails;
     metricSavings?: Record<string, number>;
@@ -26,6 +27,16 @@ const METRIC_AUDIT_KEYS = new Set([
 ]);
 const SKIP_MODES = new Set(['notApplicable', 'manual']);
 
+// Audits that only carry raw data for other tools (filmstrip, treemap, metric dumps) — never shown.
+const DATA_ONLY_KEYS = new Set([
+    'screenshot-thumbnails', 'final-screenshot', 'full-page-screenshot',
+    'script-treemap-data', 'metrics',
+]);
+
+// New Lighthouse "insight" audits (keys end in -insight) + classic savings/opportunity audits.
+const isInsightAudit = (key: string): boolean => key.endsWith('-insight');
+const isSavingsAudit = (mode: string | undefined): boolean => mode === 'metricSavings' || mode === 'opportunity';
+
 export function parseToPageSpeedInsightResult(
     url: string,
     audits: RawAudits,
@@ -35,17 +46,21 @@ export function parseToPageSpeedInsightResult(
     const opps: PageSpeedOpportunity[] = Object.entries(audits)
         .filter(([key, a]) =>
             !METRIC_AUDIT_KEYS.has(key) &&
+            !DATA_ONLY_KEYS.has(key) &&
             !SKIP_MODES.has(a.scoreDisplayMode ?? '') &&
-            a.scoreDisplayMode !== 'informative' &&
-            a.score !== null && a.score !== undefined &&
-            a.score < 1 &&
-            a.title
+            !!a.title &&
+            (isInsightAudit(key) || isSavingsAudit(a.scoreDisplayMode)) &&
+            // Drop passing ("green") audits — but always keep the qualitative *-insight findings
+            // (e.g. forced reflow), which can score 1 yet still report a real issue.
+            (isInsightAudit(key) || !(typeof a.score === 'number' && a.score >= 0.9))
         )
+        // Worst first (score 0 → top); passing audits (score 1) sink to the bottom.
         .sort(([, a], [, b]) => (a.score ?? 1) - (b.score ?? 1))
         .map(([key, a]) => ({
             type: 'opportunity' as const,
             auditKey: key,
             title: a.title!,
+            description: a.description,
             displayValue: a.displayValue,
             score: a.score ?? null,
             scoreDisplayMode: a.scoreDisplayMode,
@@ -56,6 +71,8 @@ export function parseToPageSpeedInsightResult(
     const diags: PageSpeedOpportunity[] = Object.entries(audits)
         .filter(([key, a]) =>
             !METRIC_AUDIT_KEYS.has(key) &&
+            !DATA_ONLY_KEYS.has(key) &&
+            !isInsightAudit(key) &&
             a.scoreDisplayMode === 'informative' &&
             a.title
         )
@@ -63,6 +80,7 @@ export function parseToPageSpeedInsightResult(
             type: 'diagnostic' as const,
             auditKey: key,
             title: a.title!,
+            description: a.description,
             displayValue: a.displayValue,
             score: null,
             scoreDisplayMode: a.scoreDisplayMode,

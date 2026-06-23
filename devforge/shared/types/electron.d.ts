@@ -18,6 +18,9 @@ export interface IElectronAPI {
             desktop?: { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: Date | null; auditEnd: Date | null } | undefined;
             mobile?:  { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: Date | null; auditEnd: Date | null } | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
+        analyze: (payload: { url: string; summary: string }) => Promise<{ success: boolean; analysis?: string; error?: string }>;
+        saveBrief: (payload: { markdown: string }) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
+        onAnalyzeChunk: (cb: (data: { url?: string; chunk: string }) => void) => () => void;
     };
 
     // Auto-updater

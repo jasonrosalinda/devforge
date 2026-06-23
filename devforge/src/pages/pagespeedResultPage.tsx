@@ -65,22 +65,9 @@ export default function PageSpeedResultPage() {
                 subtitle="Run Lighthouse / PageSpeed Insights audits across desktop and mobile — single run, branch compare, or averaged."
             />
             <div className="flex items-center justify-end gap-2">
-                {canAnalyze && !isAuditing && (
-                    <Button variant="outline" onClick={analyzeAll}>Analyze</Button>
-                )}
                 {isAuditing && (
                     <Button variant="outline" onClick={cancelAll}>Cancel</Button>
                 )}
-                <Button
-                    variant="outline"
-                    onClick={exportInsights}
-                    disabled={exportingInsights || isAuditing || !hasResults}
-                >
-                    {exportingInsights
-                        ? <><Loader2 className="mr-1 h-4 w-4 animate-spin" />Exporting...</>
-                        : <><Sparkles className="mr-1 h-4 w-4" />AI Insights</>
-                    }
-                </Button>
                 <PageSpeedConfig configHasChanged={onConfigChanged} isAuditing={isAuditing} />
             </div>
             <PageSpeedResults ref={desktopRef} config={desktopConfig} onAuditingChange={setDesktopAuditing} />

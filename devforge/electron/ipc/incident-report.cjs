@@ -72,6 +72,84 @@ async function runKQL(appId, aiToken, timespan, query) {
   } catch { return null; }
 }
 
+// ── Log Analytics workspace KQL (edge / network diagnostic logs) ───────────────
+
+async function runLA(workspaceId, laToken, timespan, query) {
+  try {
+    const res = await fetch(`https://api.loganalytics.io/v1/workspaces/${workspaceId}/query`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${laToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, timespan }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.error) return null;
+    return data.tables?.[0]?.rows ?? null;
+  } catch { return null; }
+}
+
+// Pulls App Gateway / Front Door access logs (Log Analytics) and Load Balancer
+// availability/SNAT (ARM metrics) for the incident window. Each sub-result is null
+// when its resource isn't configured or no rows exist. Never throws.
+async function fetchEdgeDiagnostics(armToken, laToken, workspaceId, ids, startTime, endTime) {
+  const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
+  const { appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId } = ids;
+  const configured = {
+    workspace: !!workspaceId,
+    agw: !!appGatewayResourceId,
+    afd: !!frontDoorResourceId,
+    lb: !!loadBalancerResourceId,
+  };
+
+  const canLA = !!(workspaceId && laToken);
+
+  const agwQuery = (rid) => `union isfuzzy=true
+  (AzureDiagnostics | where Category == "ApplicationGatewayAccessLog" | extend status=toint(httpStatus_d), backendMs=todouble(timeTaken_d), rid=_ResourceId),
+  (AGWAccessLogs | extend status=toint(httpStatus), backendMs=todouble(timeTaken), rid=_ResourceId)
+| where rid =~ "${rid}"
+| summarize requests=count(), failed5xx=countif(status>=500), avgBackendMs=round(avg(backendMs),0), p99BackendMs=round(percentile(backendMs,99),0) by bin(TimeGenerated, 5m)
+| project TimeGenerated, requests, failed5xx, avgBackendMs, p99BackendMs
+| order by TimeGenerated asc | take 60`;
+
+  const afdQuery = (rid) => `union isfuzzy=true
+  (AzureDiagnostics | where Category in ("FrontdoorAccessLog","FrontDoorAccessLog") | extend status=toint(httpStatusCode_s), latencyMs=todouble(totalLatency_d), rid=_ResourceId),
+  (FrontDoorAccessLog | extend status=toint(httpStatusCode), latencyMs=todouble(totalLatency), rid=_ResourceId)
+| where rid =~ "${rid}"
+| summarize requests=count(), failed5xx=countif(status>=500), p99LatencyMs=round(percentile(latencyMs,99),0) by bin(TimeGenerated, 5m)
+| project TimeGenerated, requests, failed5xx, p99LatencyMs
+| order by TimeGenerated asc | take 60`;
+
+  const [agwRows, afdRows, lbDip, lbVip, lbSnat] = await Promise.all([
+    canLA && appGatewayResourceId ? runLA(workspaceId, laToken, timespan, agwQuery(appGatewayResourceId)) : Promise.resolve(null),
+    canLA && frontDoorResourceId ? runLA(workspaceId, laToken, timespan, afdQuery(frontDoorResourceId)) : Promise.resolve(null),
+    loadBalancerResourceId ? fetchMetric(armToken, loadBalancerResourceId, 'DipAvailability', startTime, endTime, 'PT5M', ['Average']).catch(() => []) : Promise.resolve([]),
+    loadBalancerResourceId ? fetchMetric(armToken, loadBalancerResourceId, 'VipAvailability', startTime, endTime, 'PT5M', ['Average']).catch(() => []) : Promise.resolve([]),
+    loadBalancerResourceId ? fetchMetric(armToken, loadBalancerResourceId, 'SnatConnectionCount', startTime, endTime, 'PT5M', ['Total']).catch(() => []) : Promise.resolve([]),
+  ]);
+
+  const appGateway = Array.isArray(agwRows) && agwRows.length
+    ? agwRows.map(([time, requests, failed5xx, avgBackendMs, p99BackendMs]) => ({
+        time: String(time ?? ''), requests: Number(requests) || 0, failed5xx: Number(failed5xx) || 0,
+        avgBackendMs: Number(avgBackendMs) || 0, p99BackendMs: Number(p99BackendMs) || 0,
+      }))
+    : null;
+
+  const frontDoor = Array.isArray(afdRows) && afdRows.length
+    ? afdRows.map(([time, requests, failed5xx, p99LatencyMs]) => ({
+        time: String(time ?? ''), requests: Number(requests) || 0, failed5xx: Number(failed5xx) || 0,
+        p99LatencyMs: Number(p99LatencyMs) || 0,
+      }))
+    : null;
+
+  const minAvg = (arr) => (Array.isArray(arr) && arr.length ? Math.min(...arr.map(p => p.average ?? 100)) : null);
+  const sumTotal = (arr) => (Array.isArray(arr) ? arr.reduce((s, p) => s + (p.total ?? 0), 0) : 0);
+  const loadBalancer = loadBalancerResourceId
+    ? { dipAvailMin: minAvg(lbDip), vipAvailMin: minAvg(lbVip), snatTotal: sumTotal(lbSnat) }
+    : null;
+
+  return { configured, appGateway, frontDoor, loadBalancer };
+}
+
 async function fetchExceptionAnalysis(appId, aiToken, timespan) {
   const rows = await runKQL(appId, aiToken, timespan, `
 exceptions
@@ -784,6 +862,42 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
   if (anomaly.score <= 10) md += `  - _No significant degradation signals._\n`;
   md += '\n';
 
+  // ── Category 13: Network / Edge Diagnostics ──
+  const edge = data.edge;
+  if (edge) {
+    md += `## 13. Network / Edge Diagnostics\n\n`;
+    md += `_Edge logs require diagnostic settings routing to a Log Analytics workspace. "No rows" means either no traffic/errors in the window or logging is not enabled._\n\n`;
+    const hhmm = (t) => { const ms = Date.parse(t); return isNaN(ms) ? String(t) : msToSGT(ms).display.slice(11); };
+
+    if (edge.configured.agw) {
+      md += `### Application Gateway\n\n`;
+      if (!edge.configured.workspace) md += `_Log Analytics Workspace ID not configured — App Gateway logs unavailable._\n\n`;
+      else if (!edge.appGateway) md += `_No App Gateway access-log rows for the window._\n\n`;
+      else md += mdTable(['Time (SGT)', 'Requests', '5xx', 'Avg Backend', 'P99 Backend'],
+        edge.appGateway.map(r => [hhmm(r.time), r.requests, r.failed5xx, msFormat(r.avgBackendMs), msFormat(r.p99BackendMs)])) + '\n';
+    }
+
+    if (edge.configured.afd) {
+      md += `### Front Door / CDN\n\n`;
+      if (!edge.configured.workspace) md += `_Log Analytics Workspace ID not configured — Front Door logs unavailable._\n\n`;
+      else if (!edge.frontDoor) md += `_No Front Door access-log rows for the window._\n\n`;
+      else md += mdTable(['Time (SGT)', 'Requests', '5xx', 'P99 Latency'],
+        edge.frontDoor.map(r => [hhmm(r.time), r.requests, r.failed5xx, msFormat(r.p99LatencyMs)])) + '\n';
+    }
+
+    if (edge.configured.lb) {
+      md += `### Load Balancer\n\n`;
+      if (!edge.loadBalancer) md += `_No Load Balancer metrics for the window._\n\n`;
+      else {
+        const lb = edge.loadBalancer;
+        md += `| Metric | Value |\n|---|---|\n`;
+        md += `| Data-path availability (VIP) min | ${lb.vipAvailMin == null ? '—' : lb.vipAvailMin.toFixed(1) + '%'} |\n`;
+        md += `| Backend health (DIP) min | ${lb.dipAvailMin == null ? '—' : lb.dipAvailMin.toFixed(1) + '%'} |\n`;
+        md += `| SNAT connections (total) | ${lb.snatTotal.toLocaleString()} |\n\n`;
+      }
+    }
+  }
+
   // ── API Section ──
   if (apiData && apiName) {
     md += `---\n\n## API: ${apiName}\n\n`;
@@ -941,17 +1055,21 @@ Scoring: avail<99% (+30) · CPU>80% (+15) · RT P99>5s (+15) · 5xx>2% (+20) · 
 
 async function collectIncident(opts) {
   const { DefaultAzureCredential } = require('@azure/identity');
-  const { startMs, endMs, subscriptionId, resourceGroup, appName, appInsightsAppId, appType, apiName, apiInsightsAppId } = opts;
+  const { startMs, endMs, subscriptionId, resourceGroup, appName, appInsightsAppId, appType, apiName, apiInsightsAppId,
+          logAnalyticsWorkspaceId, appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId } = opts;
   const isContainerApp = appType === 'containerapp';
   const cred = new DefaultAzureCredential();
 
   const needsAiToken = !!(appInsightsAppId || apiInsightsAppId);
-  const [tokenResp, aiTokenResp] = await Promise.all([
+  const needsLaToken = !!(logAnalyticsWorkspaceId && (appGatewayResourceId || frontDoorResourceId));
+  const [tokenResp, aiTokenResp, laTokenResp] = await Promise.all([
     cred.getToken('https://management.azure.com/.default'),
     needsAiToken ? cred.getToken('https://api.applicationinsights.io/.default').catch(() => null) : Promise.resolve(null),
+    needsLaToken ? cred.getToken('https://api.loganalytics.io/.default').catch(() => null) : Promise.resolve(null),
   ]);
   const token = tokenResp.token;
   const aiToken = aiTokenResp?.token ?? null;
+  const laToken = laTokenResp?.token ?? null;
 
   const startTime = new Date(startMs);
   const endTime = new Date(endMs);
@@ -961,12 +1079,19 @@ async function collectIncident(opts) {
     : `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}`;
   const planResId = isContainerApp ? null : await getPlanResId(token, appResId);
 
-  const [data, apiData] = await Promise.all([
+  const edgeIds = { appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId };
+  const hasEdgeConfig = !!(appGatewayResourceId || frontDoorResourceId || loadBalancerResourceId);
+
+  const [data, apiData, edge] = await Promise.all([
     fetchAllIncidentData(token, aiToken, appResId, planResId, appInsightsAppId, startTime, endTime, isContainerApp),
     (apiInsightsAppId && aiToken)
       ? fetchApiIncidentData(aiToken, apiInsightsAppId, startTime, endTime).catch(() => null)
       : Promise.resolve(null),
+    hasEdgeConfig
+      ? fetchEdgeDiagnostics(token, laToken, logAnalyticsWorkspaceId, edgeIds, startTime, endTime).catch(() => null)
+      : Promise.resolve(null),
   ]);
+  data.edge = edge;
   const anomaly = computeAnomalyScore(data);
   const hasAppInsights = !!(appInsightsAppId && aiToken);
 
@@ -1002,9 +1127,10 @@ Produce exactly these sections:
 3-5 sentences: what happened, when it started, peak severity, duration, and user impact. Lead with the anomaly score and verdict if present.
 
 ## 2. Root Cause Analysis
-State the single **primary cause** (choose one): CPU saturation; Memory pressure / GC thrash; Thread pool starvation; Dependency failure (SQL / external HTTP / internal); SNAT port exhaustion; Traffic spike / bad actor; Deployment or restart event; Platform issue; Insufficient data.
-Then an **evidence matrix** table with columns: Signal | Observed | Threshold | Status (use OK / WARN / CRIT). Cover anomaly score, CPU avg/peak, memory avg/peak, 5xx rate, response-time P99, SNAT indicators, SQL timeouts, deployment events, and top client IP.
+State the single **primary cause** (choose one): CPU saturation; Memory pressure / GC thrash; Thread pool starvation; Dependency failure (SQL / external HTTP / internal); Edge / network-path failure (Application Gateway / Front Door / Load Balancer / DNS); SNAT port exhaustion; Traffic spike / bad actor; Deployment or restart event; Platform issue; Insufficient data.
+Then an **evidence matrix** table with columns: Signal | Observed | Threshold | Status (use OK / WARN / CRIT). Cover anomaly score, CPU avg/peak, memory avg/peak, 5xx rate, response-time P99, SNAT indicators, SQL timeouts, deployment events, top client IP, and — when section 13 is present — edge signals (App Gateway/Front Door 5xx and backend latency, Load Balancer VIP/DIP availability).
 Then **contributing factors** as a bulleted list, each with a citation.
+When the app shows dependency timeouts but the dependency's own compute/SQL look healthy, consult section 13 (Network / Edge Diagnostics) to confirm or rule out an edge/network-path cause; if section 13 is absent or "not configured", state that the edge layer could not be assessed rather than guessing.
 
 ## 3. Blast Radius
 Services affected (frontend app and API), user impact (error rate, top failing endpoints, duration), downstream dependency/SQL impact, and SLA/availability versus the 99.5% threshold.

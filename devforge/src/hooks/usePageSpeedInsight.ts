@@ -6,9 +6,9 @@ import { isElectron } from "@/lib/environment";
 
 export const usePageSpeedInsight = (config: PageSpeedConfiguration): UsePageSpeedInsightHooks => {
 
-    const audit = async (url: string, signal?: AbortSignal): Promise<PageSpeedInsightResult> => {
+    const audit = async (url: string, signal?: AbortSignal, runMode: PageSpeedConfiguration['runMode'] = config.runMode): Promise<PageSpeedInsightResult> => {
         if (config.browserMode) {
-            const ipcPromise = window.electronAPI.runAudit(url, config.strategy, config.visitMode, config.runMode);
+            const ipcPromise = window.electronAPI.runAudit(url, config.strategy, config.visitMode, runMode);
             if (signal) {
                 return await Promise.race([
                     ipcPromise,
@@ -20,7 +20,7 @@ export const usePageSpeedInsight = (config: PageSpeedConfiguration): UsePageSpee
             }
             return await ipcPromise;
         }
-        return await googleApi.runPagespeed(url, config.apiKey, config.strategy, config.runMode, signal);
+        return await googleApi.runPagespeed(url, config.apiKey, config.strategy, runMode, signal);
     };
 
     const clearCache = async () => {

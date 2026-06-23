@@ -26,6 +26,7 @@ export interface PageSpeedOpportunity {
     type: 'opportunity' | 'diagnostic';
     auditKey?: string;
     title: string;
+    description?: string | undefined;
     displayValue?: string | undefined;
     score: number | null;
     scoreDisplayMode?: string | undefined;
@@ -74,7 +75,7 @@ export interface PageSpeedConfiguration {
 }
 
 export interface UsePageSpeedInsightHooks {
-    audit: (url: string, signal?: AbortSignal) => Promise<PageSpeedInsightResult>;
+    audit: (url: string, signal?: AbortSignal, runMode?: PageSpeedConfiguration['runMode']) => Promise<PageSpeedInsightResult>;
     clearCache: () => Promise<{ success: boolean }>;
 }
 
@@ -86,6 +87,7 @@ export interface PageSpeedApiResponse {
             numericUnit?: string;
             score?: number | null;
             title?: string;
+            description?: string;
             scoreDisplayMode?: string;
             details?: AuditDetails;
             metricSavings?: Record<string, number>;
