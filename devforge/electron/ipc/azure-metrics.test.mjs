@@ -13,8 +13,8 @@ describe('getGranularity', () => {
   it('returns PT15M for 6h', () => {
     expect(_getGranularity('6h')).toBe('PT15M');
   });
-  it('returns PT15M for 24h', () => {
-    expect(_getGranularity('24h')).toBe('PT15M');
+  it('returns PT15M for 1d (24h)', () => {
+    expect(_getGranularity('1d')).toBe('PT15M');
   });
   it('returns PT1H for 7d', () => {
     expect(_getGranularity('7d')).toBe('PT1H');

@@ -57,7 +57,23 @@ function sniffImageMime(buf) {
 // net stack, follows the /wiki/download → signed-media redirect like a browser).
 async function fetchImageViaSession(url) {
   try {
-    const res = await sess().fetch(url, { credentials: 'include' });
+    // Atlassian's download edge 403s cookie-auth'd requests that don't look like
+    // a real in-page image load — send the same-origin Referer + browser fetch
+    // metadata a Chromium <img> would. (REST _links.download tolerates bare
+    // requests; the raw /wiki/download/attachments/…?api=v2 URLs do not.)
+    let headers;
+    try {
+      const u = new URL(url);
+      headers = {
+        Accept: 'image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8',
+        Referer: `${u.origin}/wiki/`,
+        'X-Atlassian-Token': 'no-check',
+        'Sec-Fetch-Dest': 'image',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Site': 'same-origin',
+      };
+    } catch { headers = undefined; }
+    const res = await sess().fetch(url, { credentials: 'include', ...(headers ? { headers } : {}) });
     if (!res.ok) return { ok: false, status: res.status };
     const buf = Buffer.from(await res.arrayBuffer());
     const mime = sniffImageMime(buf);
@@ -66,6 +82,52 @@ async function fetchImageViaSession(url) {
   } catch (err) {
     return { ok: false, status: 0, error: (err && err.message) || String(err) };
   }
+}
+
+// Download image bytes over plain HTTP with explicit headers (e.g. the REST API
+// token via Basic auth). Use this when the API token has access but the browser
+// session cookies don't — the common case for restricted Confluence spaces.
+async function fetchImageWithHeaders(url, hdrs) {
+  try {
+    const res = await fetch(url, { headers: hdrs });
+    if (!res.ok) return { ok: false, status: res.status };
+    const buf = Buffer.from(await res.arrayBuffer());
+    const mime = sniffImageMime(buf);
+    if (!mime) return { ok: false, status: res.status, notImage: true, buf };
+    return { ok: true, status: res.status, mime, buf };
+  } catch (err) {
+    return { ok: false, status: 0, error: (err && err.message) || String(err) };
+  }
+}
+
+// GET JSON via the logged-in session cookies (the browser's auth). The REST
+// API token can see a narrower set of attachments than the signed-in user, so
+// listing through the session surfaces the same images the browser renders.
+async function sessGetJson(url) {
+  try {
+    const res = await sess().fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+    if (!res.ok) return { ok: false, status: res.status };
+    return { ok: true, status: res.status, json: await res.json() };
+  } catch (err) {
+    return { ok: false, status: 0, error: (err && err.message) || String(err) };
+  }
+}
+
+// Run fn over items with a bounded number of concurrent workers; preserves
+// input order in the returned results array.
+async function mapPool(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= items.length) break;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
@@ -152,41 +214,171 @@ module.exports = function registerConfluenceHandlers() {
       const html = (c.body && c.body.export_view && c.body.export_view.value) ||
                    (c.body && c.body.storage && c.body.storage.value) || '';
 
-      // Download attachments via session cookies.
-      const attachments = [];
-      const attDebug = { connected, listStatus: 0, listed: 0, downloaded: 0, firstErr: undefined };
-      let next = `/rest/api/content/${pageId}/child/attachment?limit=50&expand=extensions`;
-      let guard = 0;
-      while (next && guard < 20 && attachments.length < 300) {
-        guard += 1;
-        const aRes = await fetch(`${wiki}${next}`, { headers });
-        attDebug.listStatus = aRes.status;
-        if (!aRes.ok) break;
-        const a = await aRes.json();
-        const items = a.results || [];
-        attDebug.listed += items.length;
-        for (const att of items) {
-          const dl = att && att._links && att._links.download;
-          if (!dl) continue;
-          const absolute = dl.startsWith('http') ? dl : `${wiki}${dl}`;
-          const r = await fetchImageViaSession(absolute);
-          if (!r.ok) {
-            if (attDebug.firstErr === undefined) {
-              attDebug.firstErr = `${att.title}: status ${r.status}${r.notImage ? ' (not-image)' : ''}`;
-            }
-            continue;
+      // Token-auth JSON GET (REST API token); pairs with sessGetJson (cookies).
+      const tokenGetJson = async (u) => {
+        try {
+          const r = await fetch(u, { headers });
+          return r.ok ? { ok: true, status: r.status, json: await r.json() } : { ok: false, status: r.status };
+        } catch (err) { return { ok: false, status: 0, error: (err && err.message) || String(err) }; }
+      };
+
+      // Page v1 child/attachment with a given JSON getter → download descriptors.
+      const listV1 = async (getJson) => {
+        const out = [];
+        let next = `/rest/api/content/${pageId}/child/attachment?limit=100&expand=extensions`;
+        let guard = 0;
+        while (next && guard < 20 && out.length < 300) {
+          guard += 1;
+          const res = await getJson(`${wiki}${next}`);
+          attDebug.listStatus = res.status;
+          if (!res.ok) break;
+          const a = res.json || {};
+          for (const att of (a.results || [])) {
+            const dl = att && att._links && att._links.download;
+            if (!dl) continue;
+            out.push({
+              title: att.title,
+              absolute: dl.startsWith('http') ? dl : `${wiki}${dl}`,
+              id: att.id != null ? String(att.id) : undefined,
+              fileId: (att.extensions && att.extensions.fileId) ? String(att.extensions.fileId) : undefined,
+            });
           }
-          attDebug.downloaded += 1;
-          attachments.push({
-            filename: att.title,
-            mediaType: r.mime,
-            isImage: true,
-            dataUri: `data:${r.mime};base64,${r.buf.toString('base64')}`,
-            id: att.id != null ? String(att.id) : undefined,
-            fileId: (att.extensions && att.extensions.fileId) ? String(att.extensions.fileId) : undefined,
-          });
+          next = (a._links && a._links.next) || null;
         }
-        next = (a._links && a._links.next) || null;
+        return out;
+      };
+
+      // Phase 1: list attachments. The signed-in user (session cookies) usually
+      // sees more attachments than the REST API token — list via the session
+      // first, fall back to the token only if the session sees nothing.
+      const attDebug = { connected, listStatus: 0, listed: 0, downloaded: 0, firstErr: undefined };
+      let pending = await listV1(sessGetJson);
+      attDebug.sessListed = pending.length;
+      if (pending.length === 0) {
+        pending = await listV1(tokenGetJson);
+        attDebug.tokenListed = pending.length;
+      }
+      attDebug.listed = pending.length;
+      const toDownload = pending.slice(0, 300);
+
+      // Download attachment bytes with the API token (Basic auth) — it has the
+      // access the browser session lacks here. Fall back to session cookies (for
+      // anonymously-downloadable assets like macro icons).
+      const dlHeaders = {
+        Accept: 'image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8',
+        ...(headers.Authorization ? { Authorization: headers.Authorization } : {}),
+      };
+      const downloadImage = async (url) => {
+        const t = await fetchImageWithHeaders(url, dlHeaders);
+        if (t.ok) return t;
+        const s = await fetchImageViaSession(url);
+        return s.ok ? s : t; // surface the token error if both fail
+      };
+
+      // Phase 2: download attachment bytes in parallel (bounded concurrency) —
+      // this is the dominant cost; serial fetching made loads take 15-30s+.
+      const downloaded = await mapPool(toDownload, 8, async (att) => {
+        const r = await downloadImage(att.absolute);
+        return { att, r };
+      });
+
+      const attachments = [];
+      for (const { att, r } of downloaded) {
+        if (!r.ok) {
+          if (attDebug.firstErr === undefined) {
+            attDebug.firstErr = `${att.title}: status ${r.status}${r.notImage ? ' (not-image)' : ''}`;
+          }
+          continue;
+        }
+        attDebug.downloaded += 1;
+        attachments.push({
+          filename: att.title,
+          mediaType: r.mime,
+          isImage: true,
+          dataUri: `data:${r.mime};base64,${r.buf.toString('base64')}`,
+          id: att.id,
+          fileId: att.fileId,
+        });
+      }
+
+      // Phase 3: editor "media" images frequently aren't returned by
+      // child/attachment (REST may list only macro icons). Pull every <img>
+      // download URL straight from the page HTML and fetch it via the SAME
+      // session that worked above, then key it by its source URL.
+      const haveNames = new Set(attachments.map(a => String(a.filename).toLowerCase()));
+      const seenUrls = new Set();
+      const htmlImgs = [];
+      const imgRe = /<img\b[^>]*?\ssrc=["']([^"']+)["']/gi;
+      let m;
+      while ((m = imgRe.exec(html)) !== null) {
+        const u = m[1].replace(/&amp;/g, '&');
+        if (!/^https?:\/\//i.test(u) || seenUrls.has(u)) continue;
+        const base = decodeURIComponent((u.split('?')[0].split('/').pop()) || '');
+        if (!base || haveNames.has(base.toLowerCase())) continue; // already have it via REST
+        // The container page id is embedded in /download/attachments/{id}/…
+        const cidMatch = u.match(/\/download\/attachments\/(\d+)\//);
+        seenUrls.add(u);
+        htmlImgs.push({ url: u, base, cid: cidMatch ? cidMatch[1] : pageId });
+      }
+
+      // A bare /wiki/download/attachments/…?api=v2 URL 403s for non-browser
+      // clients; the signed _links.download (with version/modificationDate) does
+      // not. Look that up per filename (session cookies first, then token), then
+      // download the signed link.
+      const resolveSignedDownload = async (containerId, name) => {
+        const q = `${wiki}/rest/api/content/${containerId}/child/attachment?filename=${encodeURIComponent(name)}&expand=version`;
+        for (const getJson of [sessGetJson, tokenGetJson]) {
+          const res = await getJson(q);
+          if (!res.ok) continue;
+          const att = ((res.json && res.json.results) || [])[0];
+          const dl = att && att._links && att._links.download;
+          if (dl) return dl.startsWith('http') ? dl : `${wiki}${dl}`;
+        }
+        return null;
+      };
+
+      // One-shot probe of the first unmatched image — pins exactly which path
+      // (session vs token list, signed vs raw download) works, so we stop guessing.
+      if (htmlImgs[0]) {
+        const it = htmlImgs[0];
+        const q = `${wiki}/rest/api/content/${it.cid}/child/attachment?filename=${encodeURIComponent(it.base)}`;
+        const sf = await sessGetJson(q);
+        const tf = await tokenGetJson(q);
+        const cnt = (res) => (res.ok && res.json && res.json.results) ? res.json.results.length : 0;
+        const signed = await resolveSignedDownload(it.cid, it.base);
+        const rawDl = await fetchImageViaSession(it.url);
+        const signedDl = signed ? await fetchImageViaSession(signed) : null;
+        attDebug.probe = {
+          base: it.base,
+          sessFilename: `${sf.status}/${cnt(sf)}`,
+          tokenFilename: `${tf.status}/${cnt(tf)}`,
+          signedUrl: signed ? 'found' : 'none',
+          rawDownload: `${rawDl.status}${rawDl.ok ? ' OK' : rawDl.notImage ? ' notImage' : ''}`,
+          signedDownload: signedDl ? `${signedDl.status}${signedDl.ok ? ' OK' : signedDl.notImage ? ' notImage' : ''}` : 'n/a',
+        };
+      }
+
+      const htmlDownloaded = await mapPool(htmlImgs, 6, async (it) => {
+        const signed = await resolveSignedDownload(it.cid, it.base);
+        const r = await downloadImage(signed || it.url);
+        return { it, r };
+      });
+      for (const { it, r } of htmlDownloaded) {
+        attDebug.listed += 1;
+        if (!r.ok) {
+          if (attDebug.firstErr === undefined) {
+            attDebug.firstErr = `${it.base}: status ${r.status}${r.notImage ? ' (not-image)' : ''}`;
+          }
+          continue;
+        }
+        attDebug.downloaded += 1;
+        attachments.push({
+          filename: it.base,
+          mediaType: r.mime,
+          isImage: true,
+          dataUri: `data:${r.mime};base64,${r.buf.toString('base64')}`,
+          srcUrl: it.url,
+        });
       }
 
       return {

@@ -394,6 +394,15 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         }
     }, [auditWithRetry, config.urls, results1, results2]);
 
+    // Use the value as DISPLAYED (rounded) so the improvement % is consistent
+    // with the numbers shown — e.g. "1.3 s" vs "1.3 s" reads 0%, not a delta
+    // hidden by rounding. Falls back to the raw numericValue if unparseable.
+    const displayNum = (m?: PageSpeedMetrics): number => {
+        if (!m) return 0;
+        const n = parseFloat(String(m.displayValue).replace(/,/g, ''));
+        return Number.isFinite(n) ? n : m.numericValue;
+    };
+
     const calculateImprovement = (before: number, after: number): React.ReactNode => {
         if (!before || !after) return <div>-</div>;
         const improvement = ((before - after) / before) * 100;
@@ -462,7 +471,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 if (single) tds += td(v1);
                 else {
                     tds += td(v1) + td(v2);
-                    if (showImp) tds += impCell(r1?.[m.key]?.numericValue, r2?.[m.key]?.numericValue);
+                    if (showImp) tds += impCell(displayNum(r1?.[m.key]), displayNum(r2?.[m.key]));
                 }
             }
             return `<tr>${tds}</tr>`;
@@ -575,6 +584,29 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 onClick={() => retryRow(index, setResults, slotKey)}
             >
                 <RotateCcw className={`h-2 w-2 ${isRetrying ? 'animate-spin' : ''}`} />
+            </Button>
+        );
+    };
+
+    // Re-run a single (non-accuracy) slot — reuses retryRow, which re-audits the
+    // whole URL for that slot when there's no run history.
+    const singleRunRerunButton = (
+        index: number,
+        setResults: React.Dispatch<React.SetStateAction<AuditSlot[]>>,
+        slotKey: '1' | '2',
+    ): React.ReactNode => {
+        const busy = retryingRows.has(`${slotKey}-${index}`);
+        return (
+            <Button
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                disabled={busy || isAuditing || isRetryingAny}
+                onClick={() => retryRow(index, setResults, slotKey)}
+                data-html2canvas-ignore="true"
+            >
+                <RotateCw className={`mr-1 h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
+                Re-run
             </Button>
         );
     };
@@ -1284,7 +1316,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     {!displayAudit.singleResult && displayAudit.improvement && (
                         <TableCell className="text-center border">
                             {metrics1 && metrics2
-                                ? calculateImprovement(metrics1.numericValue, metrics2.numericValue)
+                                ? calculateImprovement(displayNum(metrics1), displayNum(metrics2))
                                 : isAuditing
                                     ? <Loader2 className="animate-spin mx-auto" size={20} />
                                     : '-'}
@@ -1404,7 +1436,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                     result1?.opportunities?.some(o => o.type === 'opportunity') ||
                                     result2?.opportunities?.some(o => o.type === 'opportunity')
                                 );
-                                const hasDrawer = hasHistory || hasInsights;
+                                // Single-run rows expand too, so each slot's Re-run is always reachable.
+                                const hasSingleRun = !isAccuracyMode && !!(result1 || result2);
+                                const hasDrawer = hasHistory || hasInsights || hasSingleRun;
                                 const isExpanded = expandedHistory.has(index);
 
                                 return (
@@ -1472,12 +1506,26 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             </div>
                                                         )}
 
-                                                        {/* Single-run insights (no run history to consolidate) */}
-                                                        {!history1 && result1?.opportunities?.some(o => o.type === 'opportunity') &&
-                                                            renderInsights(result1, `${index}-1`, !displayAudit.singleResult ? config.beforeLabel : undefined)}
+                                                        {/* Single-run slots (no run history): per-slot label + Re-run, then insights */}
+                                                        {!history1 && result1 && (
+                                                            <div className="mt-3">
+                                                                <div className="mb-1.5 flex items-center gap-2">
+                                                                    {!displayAudit.singleResult && <p className="text-xs font-semibold text-foreground">{config.beforeLabel}</p>}
+                                                                    {singleRunRerunButton(index, setResults1, '1')}
+                                                                </div>
+                                                                {renderInsights(result1, `${index}-1`)}
+                                                            </div>
+                                                        )}
 
-                                                        {!history2 && !displayAudit.singleResult && result2?.opportunities?.some(o => o.type === 'opportunity') &&
-                                                            renderInsights(result2, `${index}-2`, config.afterLabel)}
+                                                        {!history2 && result2 && !displayAudit.singleResult && (
+                                                            <div className="mt-3">
+                                                                <div className="mb-1.5 flex items-center gap-2">
+                                                                    <p className="text-xs font-semibold text-foreground">{config.afterLabel}</p>
+                                                                    {singleRunRerunButton(index, setResults2, '2')}
+                                                                </div>
+                                                                {renderInsights(result2, `${index}-2`)}
+                                                            </div>
+                                                        )}
 
                                                         {/* Claude before/after analysis (comparison mode, both sides audited) */}
                                                         {!copying && renderAnalysisSection(index)}

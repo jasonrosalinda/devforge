@@ -51,7 +51,7 @@ export interface IElectronAPI {
             spaceKey?: string;
             connected?: boolean;
             html?: string;
-            attachments?: { filename: string; mediaType: string; isImage: boolean; dataUri: string; id?: string; fileId?: string }[];
+            attachments?: { filename: string; mediaType: string; isImage: boolean; dataUri: string; id?: string; fileId?: string; srcUrl?: string }[];
             attDebug?: { connected: boolean; listStatus: number; listed: number; downloaded: number; firstErr?: string };
         }>;
         fetchImages(opts: { urls: string[] }): Promise<{

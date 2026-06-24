@@ -211,6 +211,22 @@ export default function ReleasePilotPage() {
     return parseRunbookSections(result.html, result.attachments ?? []);
   }, [result]);
 
+  // Screenshots present in the runbook HTML that matched no downloaded
+  // attachment (dropped during parse). Non-zero → a fetch/match gap, not "no image".
+  const dropped = useMemo(() => {
+    const keys: string[] = [];
+    for (const s of sections) for (const row of s.table.rows) for (const c of row) {
+      if (c.droppedImageKeys) keys.push(...c.droppedImageKeys);
+    }
+    return keys;
+  }, [sections]);
+  const droppedImages = dropped.length;
+  // Filenames of attachments we actually downloaded (to compare against the keys).
+  const attachmentNames = useMemo(
+    () => (result?.attachments ?? []).map(a => a.filename),
+    [result],
+  );
+
 
   async function handleLoad() {
     if (!url.trim() || loading) return;
@@ -258,6 +274,7 @@ export default function ReleasePilotPage() {
           dataUri: a.dataUri,
           id: a.id,
           fileId: a.fileId,
+          srcUrl: a.srcUrl,
         }));
 
         const dbg: NonNullable<typeof imgDebug> = {
@@ -268,30 +285,43 @@ export default function ReleasePilotPage() {
           sampleUrl: 'REST _links.download',
         };
 
-        // Fallback: if REST download yielded nothing, try fetching the raw
-        // export_view image URLs directly.
-        if (attachments.length === 0 && res.html) {
-          const imageUrls = collectImageUrls(res.html);
-          if (imageUrls.length > 0) {
-            const imgRes = await window.electronAPI?.confluence?.fetchImages({ urls: imageUrls });
+        // The REST child/attachment list is unreliable — editor "media" images
+        // (download-link <img>s) often aren't listed, so REST may return only a
+        // macro icon. Fetch every <img> URL in the HTML that REST didn't already
+        // cover (by filename) and merge it in, keyed by its source URL.
+        if (res.html) {
+          const restNames = new Set(attachments.map(a => a.filename.toLowerCase()));
+          const baseOf = (u: string) =>
+            decodeURIComponent((u.split('?')[0]?.split('/').pop()) || '').toLowerCase();
+          const missing = collectImageUrls(res.html).filter(u => {
+            const b = baseOf(u);
+            return b && !restNames.has(b);
+          });
+          if (missing.length > 0) {
+            const imgRes = await window.electronAPI?.confluence?.fetchImages({ urls: missing });
             const results = imgRes?.results ?? [];
             const failed = results.filter(r => !r.ok);
             const firstFail = failed[0];
-            dbg.fetched = results.length - failed.length;
-            dbg.total = imageUrls.length;
-            dbg.sampleUrl = firstFail?.url;
-            dbg.status = firstFail?.status;
-            dbg.err = firstFail?.error;
-            dbg.textHead = firstFail?.textHead;
-            attachments = results
-              .filter(r => r.ok && r.dataUri)
-              .map(r => ({
-                filename: r.url.split('/').pop()?.split('?')[0] || 'image',
-                mediaType: r.mediaType || 'image/png',
-                isImage: r.isImage ?? true,
-                dataUri: r.dataUri as string,
-                srcUrl: r.url,
-              }));
+            dbg.fetched += results.length - failed.length;
+            dbg.total += missing.length;
+            if (firstFail) {
+              dbg.sampleUrl = firstFail.url;
+              dbg.status = firstFail.status;
+              dbg.err = firstFail.error;
+              dbg.textHead = firstFail.textHead;
+            }
+            attachments = [
+              ...attachments,
+              ...results
+                .filter(r => r.ok && r.dataUri)
+                .map(r => ({
+                  filename: r.url.split('/').pop()?.split('?')[0] || 'image',
+                  mediaType: r.mediaType || 'image/png',
+                  isImage: r.isImage ?? true,
+                  dataUri: r.dataUri as string,
+                  srcUrl: r.url,
+                })),
+            ];
           }
         }
 
@@ -417,6 +447,31 @@ export default function ReleasePilotPage() {
               <span className="font-mono break-all whitespace-pre-wrap">textHead: {imgDebug.textHead || '(none)'}</span>
             </div>
           )}
+        </details>
+      )}
+
+      {/* Unmatched-screenshot diagnostics — images in the runbook that no
+          downloaded attachment matched (so they were dropped during parse). */}
+      {droppedImages > 0 && (
+        <details className="rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+          <summary className="cursor-pointer select-none px-3 py-2.5 list-none flex items-start gap-2">
+            <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              {droppedImages} screenshot{droppedImages === 1 ? '' : 's'} couldn’t be matched to a downloaded attachment and {droppedImages === 1 ? 'was' : 'were'} dropped. ▼ keys
+            </span>
+          </summary>
+          <div className="flex flex-col gap-2 border-t border-amber-500/20 px-3 pb-2.5 pt-2">
+            <div>
+              <div className="font-semibold">Dropped image attributes:</div>
+              {dropped.map((k, i) => <div key={i} className="font-mono break-all">{k}</div>)}
+            </div>
+            <div>
+              <div className="font-semibold">Downloaded attachment filenames ({attachmentNames.length}):</div>
+              {attachmentNames.length
+                ? attachmentNames.map((n, i) => <div key={i} className="font-mono break-all">{n}</div>)
+                : <div className="font-mono">(none)</div>}
+            </div>
+          </div>
         </details>
       )}
 

@@ -32,6 +32,28 @@ function firstNames(pics: string[]): string {
   return pics.map(p => p.split(' ')[0]).filter(Boolean).join('/');
 }
 
+// Some runbooks put responsible people in the Status column, so they surface as
+// a "/"-separated name pill (e.g. "SHANDY WIBAWA / CAREN CONRADO"). Reduce each
+// multi-word name to its first name. Real statuses ("Done", "In Progress") have
+// no "/" and pass through untouched.
+function shortenNames(text: string): string {
+  if (!text.includes('/')) return text;
+  return text
+    .split('/')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(p => (p.includes(' ') ? p.split(/\s+/)[0] : p))
+    .join(' / ');
+}
+
+// A real status is a short keyword (rendered UPPERCASE by convention). Anything
+// else in the status slot is a person/PIC name → keep its original Confluence
+// casing instead of uppercasing it.
+const STATUS_KEYWORD_RE = /^(done|complete[d]?|success|pass(ed)?|ok|deployed|fail(ed)?|error|blocked|cancel(led)?|reject(ed)?|pending|in[\s-]?progress|wip|to[\s-]?do|on[\s-]?hold|hold|wait(ing)?|n\/?a|yes|no)$/i;
+function isStatusName(text: string): boolean {
+  return !STATUS_KEYWORD_RE.test(text.trim());
+}
+
 function normTime(t: string): string {
   return t.toLowerCase().replace(/\s*(am|pm)/g, '$1').trim();
 }
@@ -112,7 +134,10 @@ interface SummarySection { heading: string; dates: DateGroup[] }
 // like "…during internal testing/sanity check" elsewhere don't match.
 const SANITY_RE = /\bit\s+internal\s+testing\b/i;
 const QC_RE = /start[:\s]+qc\s*testing/i;
-const GA_RE = /\bga\b.*monitor|realtime\s+traffic\s+monitor/i;
+// Monitoring rows — GA real-time + PSM checking/monitoring — whose 15-min
+// screenshots feed this section. Postproduction monitoring is explicitly
+// excluded. (QC_RE / SANITY_RE never contain "monitor", no overlap.)
+const GA_RE = /^(?!.*postproduction).*\bmonitor/i;
 
 interface LogEntry {
   html: string;             // logbook cell HTML (drawers + images preserved)
@@ -250,7 +275,7 @@ function buildSummary(sections: RunbookSection[]): SummarySection[] {
 function lineFor(item: SummaryItem): string {
   const pics = firstNames(item.pics);
   const picPart = pics ? ` (${pics})` : '';
-  const statusPart = item.status?.text ? ` - ${item.status.text}` : '';
+  const statusPart = item.status?.text ? ` - ${shortenNames(item.status.text)}` : '';
   return `${item.title}${picPart}${statusPart}`;
 }
 
@@ -361,7 +386,7 @@ function stripMarkup(html: string): string {
 
 function statusHtml(item: SummaryItem): string {
   if (!item.status?.text) return '';
-  return ` - <span style="color:${STATUS_HEX[item.status.color]};font-weight:600">${esc(item.status.text)}</span>`;
+  return ` - <span style="color:${STATUS_HEX[item.status.color]};font-weight:600">${esc(shortenNames(item.status.text))}</span>`;
 }
 
 function lineHtml(item: SummaryItem): string {
@@ -478,19 +503,22 @@ function toHtml(model: SummarySection[], goals: string[] = [], notice = '', qc: 
   }
   for (const section of model) {
     p.push(`<p style="margin:8px 0 2px"><strong>${esc(section.heading)}</strong></p>`);
+    // A 2-column table (time | activity) keeps the time column aligned when
+    // pasted into Teams/Outlook — &nbsp; indentation collapses in their fonts.
+    p.push('<table style="border-collapse:collapse;margin:2px 0">');
     for (const dg of section.dates) {
-      p.push(`<p style="margin:2px 0;color:#6b7280">----${esc(dg.date)}----</p>`);
+      p.push(`<tr><td colspan="2" style="padding:4px 0 1px;color:#6b7280">----${esc(dg.date)}----</td></tr>`);
       for (const tg of dg.timeGroups) {
-        const indent = '&nbsp;'.repeat(`${tg.time} - `.length + 4);
         tg.items.forEach((item, i) => {
-          if (i === 0) {
-            p.push(`<p style="margin:1px 0"><strong>${esc(tg.time)}</strong> - ${lineHtml(item)}</p>`);
-          } else {
-            p.push(`<p style="margin:1px 0">${indent}- ${lineHtml(item)}</p>`);
-          }
+          const timeCell = i === 0 ? `<strong>${esc(tg.time)}</strong>` : '';
+          p.push(
+            `<tr><td style="padding:1px 14px 1px 0;vertical-align:top;white-space:nowrap">${timeCell}</td>` +
+            `<td style="padding:1px 0;vertical-align:top">- ${lineHtml(item)}</td></tr>`,
+          );
         });
       }
     }
+    p.push('</table>');
     p.push(HR);
   }
   if (includeTesting && (model.length || qc.length || sanity.length || ga.length)) {
@@ -747,7 +775,7 @@ export function ReleaseSummary({ sections, goals = [], releaseTitle, releaseLabe
                               {item.title}
                               {firstNames(item.pics) && <span className="text-muted-foreground"> ({firstNames(item.pics)})</span>}
                             </span>
-                            {item.status && <StatusPill text={item.status.text} color={item.status.color} />}
+                            {item.status && <StatusPill text={shortenNames(item.status.text)} color={item.status.color} preserveCase={isStatusName(item.status.text)} />}
                           </div>
                         ))}
                       </div>

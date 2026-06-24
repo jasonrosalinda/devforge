@@ -16,6 +16,8 @@ export interface RunbookCell {
   text: string;        // plain-text fallback (status detection)
   images: RunbookImage[];
   status?: { text: string; color: StatusColor }; // Confluence status lozenge, if present
+  droppedImages?: number;      // count of <img> that matched no downloaded attachment
+  droppedImageKeys?: string[]; // the keys those dropped <img> exposed (for diagnostics)
 }
 
 export interface ParsedRunbook {
@@ -213,6 +215,7 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
 
   // Rewrite images → data URIs; collect for gallery/lightbox.
   const images: RunbookImage[] = [];
+  const droppedKeys: string[] = [];
   clone.querySelectorAll('img').forEach(img => {
     const orig = img.getAttribute('src') || '';
     const resolved = resolveImg(img as HTMLImageElement, map);
@@ -224,9 +227,22 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
       img.setAttribute('alt', resolved.name);
       images.push({ ...resolved, orig });
     } else {
+      // No attachment matched — record the identifying attributes we tried, so a
+      // present-but-unmatched screenshot is visible in diagnostics, not silent.
+      const desc = [
+        ['src', orig],
+        ['media-id', img.getAttribute('data-media-id')],
+        ['resource-id', img.getAttribute('data-linked-resource-id')],
+        ['alias', img.getAttribute('data-linked-resource-default-alias') || img.getAttribute('data-media-name')],
+        ['alt', img.getAttribute('alt')],
+      ].filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join(' ');
+      droppedKeys.push(desc || '(no key)');
       img.remove();
     }
   });
+  if (droppedKeys.length) {
+    console.warn(`[release-pilot] ${droppedKeys.length} image(s) had no matching attachment, dropped:`, droppedKeys);
+  }
 
   // Convert Confluence expand macros → native <details>/<summary>.
   const doc = clone.ownerDocument;
@@ -266,38 +282,79 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
     text: collapse(clone.textContent || ''),
     images,
     ...(status ? { status } : {}),
+    ...(droppedKeys.length ? { droppedImages: droppedKeys.length, droppedImageKeys: droppedKeys } : {}),
   };
 }
 
-const ROLLBACK_ROW = /rollback/i;
+// Drop "rollback confirmation" rows. Matched across the whole row (not just the
+// activity column) because merged cells can shift the text out of that column.
+const ROLLBACK_ROW = /rollback\s*confirmation/i;
+
+// Direct th/td children of a row (ignores cells from any nested table).
+function directCells(tr: Element): Element[] {
+  return Array.from(tr.children).filter(c => c.tagName === 'TD' || c.tagName === 'TH');
+}
+
+function spanOf(cell: Element, attr: 'colspan' | 'rowspan'): number {
+  const v = parseInt(cell.getAttribute(attr) || '1', 10);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+// Normalize an HTML table with merged cells (colspan/rowspan) into a dense,
+// rectangular matrix so every logical column lines up. A slot covered by a
+// span continuation is `null` (rendered as an empty cell). Without this, a
+// single merged cell shifts every column to its right.
+function tableMatrix(rows: Element[]): (Element | null)[][] {
+  const matrix: (Element | null)[][] = [];
+  rows.forEach((tr, r) => {
+    if (!matrix[r]) matrix[r] = [];
+    let c = 0;
+    for (const cell of directCells(tr)) {
+      while (matrix[r]![c] !== undefined) c++; // skip slots claimed by spans above/left
+      const cs = spanOf(cell, 'colspan');
+      const rs = spanOf(cell, 'rowspan');
+      for (let i = 0; i < rs; i++) {
+        const rr = r + i;
+        if (!matrix[rr]) matrix[rr] = [];
+        for (let j = 0; j < cs; j++) {
+          matrix[rr]![c + j] = i === 0 && j === 0 ? cell : null;
+        }
+      }
+      c += cs;
+    }
+  });
+  // Pad every row to the widest so columns and body rows share one width.
+  const width = matrix.reduce((m, row) => Math.max(m, row.length), 0);
+  for (const row of matrix) for (let c = 0; c < width; c++) if (row[c] === undefined) row[c] = null;
+  return matrix;
+}
+
+const emptyCell = (): RunbookCell => ({ html: '', text: '', images: [] });
 
 function parseTable(table: HTMLTableElement, map: Map<string, string>): ParsedRunbook {
-  const allRows = Array.from(table.querySelectorAll('tr'));
-  if (allRows.length === 0) return { columns: [], rows: [] };
+  // Only this table's own rows (exclude rows belonging to a nested table).
+  const ownRows = Array.from(table.querySelectorAll('tr')).filter(tr => tr.closest('table') === table);
+  if (ownRows.length === 0) return { columns: [], rows: [] };
 
   // Header: explicit thead, else the first row.
   const thead = table.querySelector('thead');
-  let headerRow: Element | undefined;
+  let headerRow: Element;
   let bodyRows: Element[];
   if (thead && thead.querySelector('tr')) {
     headerRow = thead.querySelector('tr') as Element;
-    bodyRows = allRows.filter(r => !thead.contains(r));
+    bodyRows = ownRows.filter(r => !thead.contains(r));
   } else {
-    headerRow = allRows[0];
-    bodyRows = allRows.slice(1);
+    headerRow = ownRows[0]!;
+    bodyRows = ownRows.slice(1);
   }
 
-  const columns = Array.from(headerRow?.querySelectorAll('th, td') || [])
-    .map(c => collapse(c.textContent || ''));
+  // Build one matrix over header + body so widths align and spans resolve.
+  const matrix = tableMatrix([headerRow, ...bodyRows]);
+  const columns = (matrix[0] || []).map(el => (el ? collapse(el.textContent || '') : ''));
 
-  const activityIdx = columns.findIndex(c => /activity/i.test(c));
-
-  const rows = bodyRows
-    .map(tr => Array.from(tr.querySelectorAll('th, td')).map(cell => cellToRunbookCell(cell, map)))
-    .filter(cells => {
-      const actCell = activityIdx >= 0 ? cells[activityIdx] : cells[2];
-      return !actCell || !ROLLBACK_ROW.test(actCell.text);
-    });
+  const rows = matrix.slice(1)
+    .map(row => row.map(el => (el ? cellToRunbookCell(el, map) : emptyCell())))
+    .filter(cells => !cells.some(c => ROLLBACK_ROW.test(c.text)));
 
   return { columns, rows };
 }
@@ -475,15 +532,19 @@ function cellLines(cell: Element): string[] {
 // Extracts release goals from the plan page. Primary: a table with a "Goals"
 // column → that column's cells. Fallback: a "Goals"/"Objectives" heading
 // followed by list items / paragraphs (until the next heading).
+// Matches the headings/columns teams use for the release goals — "Goals",
+// "Objectives", and "What to Expect[ in This Release]" / "Highlights" / "Scope".
+const GOALS_LABEL_RE = /goal|objective|what'?s?\s*(to\s*expect|new)|expect|highlight|scope/i;
+
 export function extractGoals(html: string): string[] {
   const doc = new DOMParser().parseFromString(html, 'text/html');
 
-  // Primary — "Goals" table column.
+  // Primary — goals table column.
   for (const table of Array.from(doc.querySelectorAll('table'))) {
     const allRows = Array.from(table.querySelectorAll('tr'));
     if (!allRows.length) continue;
     const headerCells = Array.from((allRows[0] as Element).querySelectorAll('th, td'));
-    const goalIdx = headerCells.findIndex(c => /goal/i.test(collapse(c.textContent || '')));
+    const goalIdx = headerCells.findIndex(c => GOALS_LABEL_RE.test(collapse(c.textContent || '')));
     if (goalIdx < 0) continue;
 
     const goals: string[] = [];
@@ -494,7 +555,7 @@ export function extractGoals(html: string): string[] {
     if (goals.length) return goals;
   }
 
-  // Fallback — "Goals"/"Objectives" heading + following list/paragraphs.
+  // Fallback — goals heading ("What to Expect…", "Goals", …) + following list/paragraphs.
   const nodes = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, ul, ol, p'));
   const goals: string[] = [];
   let capturing = false;
@@ -502,7 +563,7 @@ export function extractGoals(html: string): string[] {
     const tag = el.tagName.toLowerCase();
     if (/^h[1-6]$/.test(tag)) {
       if (capturing) break;
-      if (/goal|objective/i.test(collapse(el.textContent || ''))) capturing = true;
+      if (GOALS_LABEL_RE.test(collapse(el.textContent || ''))) capturing = true;
       continue;
     }
     if (!capturing) continue;

@@ -10,9 +10,9 @@ export const STATUS_CLASS: Record<StatusColor, string> = {
   grey:   'bg-muted text-muted-foreground border-border',
 };
 
-export function StatusPill({ text, color }: { text: string; color: StatusColor }) {
+export function StatusPill({ text, color, preserveCase = false }: { text: string; color: StatusColor; preserveCase?: boolean }) {
   return (
-    <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${STATUS_CLASS[color]}`}>
+    <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold tracking-wide ${preserveCase ? '' : 'uppercase'} ${STATUS_CLASS[color]}`}>
       {text}
     </span>
   );
