@@ -11,7 +11,9 @@ import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, 
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, getPageSpeedInsightResultAverage } from '@/lib/pageSpeedUtils';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
+import type { StrategySnapshot } from '@/lib/pagespeed-history';
 type AuditSlot = PageSpeedInsightResult | null | false | undefined;
+type AuditTimes = { start: Date | null; end: Date | null };
 
 export interface PageSpeedResultsHandle {
     startAudit: () => void;
@@ -22,7 +24,11 @@ export interface PageSpeedResultsHandle {
         config: PageSpeedConfiguration;
         auditStart: Date | null;
         auditEnd: Date | null;
+        times1: AuditTimes;
+        times2: AuditTimes;
+        analyses: Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>;
     };
+    restoreSnapshot: (snapshot: StrategySnapshot) => void;
 }
 
 interface PageSpeedResultsProps {
@@ -103,6 +109,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [auditing1, setAuditing1] = useState(false);
     const [auditing2, setAuditing2] = useState(false);
     const [retryingRows, setRetryingRows] = useState<Set<string>>(new Set());
+    const [rerunningRuns, setRerunningRuns] = useState<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
     const [expandedInsights, setExpandedInsights] = useState<Set<string>>(new Set());
     const [analyses, setAnalyses] = useState<Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>>({});
@@ -240,10 +247,40 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const audit1 = () => runAudit(setResults1, setAuditing1, auditing2, '1');
     const audit2 = () => runAudit(setResults2, setAuditing2, auditing1, '2');
 
+    const restoreSnapshot = (snapshot: StrategySnapshot) => {
+        // Saved runs never carry `null` (loading); JSON turned `undefined` slots
+        // into `null`, so map them back so the table renders "no run" not a spinner.
+        const reviveSlots = (slots: StrategySnapshot['results1']): AuditSlot[] =>
+            slots.map(s => (s === null ? undefined : s));
+        const reviveTimes = (t: StrategySnapshot['times1']): AuditTimes => ({
+            start: t.start ? new Date(t.start) : null,
+            end: t.end ? new Date(t.end) : null,
+        });
+        const reviveAnalyses = (a: StrategySnapshot['analyses']): Record<number, { status: AnalysisStatus; markdown: string; error: string | null }> => {
+            const out: Record<number, { status: AnalysisStatus; markdown: string; error: string | null }> = {};
+            for (const [k, v] of Object.entries(a)) out[Number(k)] = v;
+            return out;
+        };
+
+        abortControllerRef.current?.abort();
+        setResults1(reviveSlots(snapshot.results1));
+        setResults2(reviveSlots(snapshot.results2));
+        setTimes1(reviveTimes(snapshot.times1));
+        setTimes2(reviveTimes(snapshot.times2));
+        setAuditStart(snapshot.auditStart ? new Date(snapshot.auditStart) : null);
+        setAuditEnd(snapshot.auditEnd ? new Date(snapshot.auditEnd) : null);
+        setAnalyses(reviveAnalyses(snapshot.analyses));
+        setRetryingRows(new Set());
+        setRerunningRuns(new Set());
+        setExpandedHistory(new Set());
+        setExpandedInsights(new Set());
+    };
+
     useImperativeHandle(ref, () => ({
         startAudit: audit1,
         cancelAudit: () => abortControllerRef.current?.abort(),
-        getResults: () => ({ results1, results2, config, auditStart, auditEnd }),
+        getResults: () => ({ results1, results2, config, auditStart, auditEnd, times1, times2, analyses }),
+        restoreSnapshot,
     }));
 
     const retryRow = useCallback(async (
@@ -309,6 +346,49 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             setRetryingRows(prev => {
                 const next = new Set(prev);
                 next.delete(rowKey);
+                return next;
+            });
+        }
+    }, [auditWithRetry, config.urls, results1, results2]);
+
+    // Re-run a single run within an accuracy-mode row: audit once, splice the fresh
+    // result into that slot's run list at runIdx, then re-average the row.
+    const rerunSingleRun = useCallback(async (
+        index: number,
+        runIdx: number,
+        slotKey: '1' | '2',
+    ) => {
+        const url = config.urls[index];
+        if (!url) return;
+        const setResults = slotKey === '1' ? setResults1 : setResults2;
+        const existing = (slotKey === '1' ? results1 : results2)[index];
+        const history = (existing && typeof existing === 'object') ? existing.runHistory : undefined;
+        if (!history || !history[runIdx]) return;
+
+        const runKey = `${slotKey}-${index}-${runIdx}`;
+        if (activeAuditsRef.current === 0) setAuditEnd(null);
+        activeAuditsRef.current++;
+        setRerunningRuns(prev => new Set(prev).add(runKey));
+
+        try {
+            const fresh = await auditWithRetry(url, undefined, 'single');
+            const merged = [...history];
+            merged[runIdx] = fresh;
+            const result = getPageSpeedInsightResultAverage(url, merged);
+            setResults(prev => {
+                const next = [...prev];
+                next[index] = result;
+                return next;
+            });
+        } catch (error) {
+            console.error(`Re-run failed for ${url} (run ${runIdx + 1}):`, error);
+        } finally {
+            (slotKey === '1' ? setTimes1 : setTimes2)(prev => ({ ...prev, end: new Date() }));
+            activeAuditsRef.current--;
+            if (activeAuditsRef.current === 0) setAuditEnd(new Date());
+            setRerunningRuns(prev => {
+                const next = new Set(prev);
+                next.delete(runKey);
                 return next;
             });
         }
@@ -1129,7 +1209,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     };
 
     // Individual-runs metrics table. Insights are consolidated separately, below the table.
-    const renderRunHistory = (history: PageSpeedInsightResult[]): React.ReactNode => {
+    const renderRunHistory = (history: PageSpeedInsightResult[], index: number, slotKey: '1' | '2'): React.ReactNode => {
         return (
             <table className="w-full text-xs">
                 <thead>
@@ -1140,21 +1220,37 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         {displayAudit.CLS && <th className="text-center py-1 px-2 font-medium text-muted-foreground">CLS</th>}
                         {displayAudit.TBT && <th className="text-center py-1 px-2 font-medium text-muted-foreground">TBT</th>}
                         {displayAudit.FCP && <th className="text-center py-1 px-2 font-medium text-muted-foreground">FCP</th>}
+                        {!copying && <th className="w-px" data-html2canvas-ignore="true" />}
                     </tr>
                 </thead>
                 <tbody>
-                    {history.map((run, runIdx) => (
-                        <tr key={runIdx} className="border-b border-border/50 last:border-0">
-                            <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
-                                #{runIdx + 1}<span className="ml-1 text-[10px] opacity-70">{formatRunTime(run.fetchTime)}</span>
-                            </td>
-                            {displayAudit.SI && <td className="text-center py-1 px-2">{historyMetricValue(run.speedIndex)}</td>}
-                            {displayAudit.LCP && <td className="text-center py-1 px-2">{historyMetricValue(run.largestContentfulPaint)}</td>}
-                            {displayAudit.CLS && <td className="text-center py-1 px-2">{historyMetricValue(run.cumulativeLayoutShift)}</td>}
-                            {displayAudit.TBT && <td className="text-center py-1 px-2">{historyMetricValue(run.totalBlockingTime)}</td>}
-                            {displayAudit.FCP && <td className="text-center py-1 px-2">{historyMetricValue(run.firstContentfulPaint)}</td>}
-                        </tr>
-                    ))}
+                    {history.map((run, runIdx) => {
+                        const rerunning = rerunningRuns.has(`${slotKey}-${index}-${runIdx}`);
+                        return (
+                            <tr key={runIdx} className="border-b border-border/50 last:border-0">
+                                <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
+                                    #{runIdx + 1}<span className="ml-1 text-[10px] opacity-70">{formatRunTime(run.fetchTime)}</span>
+                                </td>
+                                {displayAudit.SI && <td className="text-center py-1 px-2">{historyMetricValue(run.speedIndex)}</td>}
+                                {displayAudit.LCP && <td className="text-center py-1 px-2">{historyMetricValue(run.largestContentfulPaint)}</td>}
+                                {displayAudit.CLS && <td className="text-center py-1 px-2">{historyMetricValue(run.cumulativeLayoutShift)}</td>}
+                                {displayAudit.TBT && <td className="text-center py-1 px-2">{historyMetricValue(run.totalBlockingTime)}</td>}
+                                {displayAudit.FCP && <td className="text-center py-1 px-2">{historyMetricValue(run.firstContentfulPaint)}</td>}
+                                {!copying && (
+                                    <td className="py-1 px-2 w-px whitespace-nowrap text-right" data-html2canvas-ignore="true">
+                                        <button
+                                            onClick={() => rerunSingleRun(index, runIdx, slotKey)}
+                                            disabled={isAuditing || isRetryingAny || rerunning}
+                                            title={`Re-run run #${runIdx + 1}`}
+                                            className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                        >
+                                            <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
+                                        </button>
+                                    </td>
+                                )}
+                            </tr>
+                        );
+                    })}
                 </tbody>
             </table>
         );
@@ -1362,7 +1458,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                 {!displayAudit.singleResult && (
                                                                     <p className="text-xs font-medium text-muted-foreground mb-1.5">{config.beforeLabel} — Individual Runs</p>
                                                                 )}
-                                                                {renderRunHistory(history1)}
+                                                                {renderRunHistory(history1, index, '1')}
                                                                 {renderConsolidatedInsights(history1, `${index}-1`, undefined)}
                                                             </div>
                                                         )}
@@ -1371,7 +1467,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         {history2 && !displayAudit.singleResult && (
                                                             <div>
                                                                 <p className="text-xs font-medium text-muted-foreground mb-1.5">{config.afterLabel} — Individual Runs</p>
-                                                                {renderRunHistory(history2)}
+                                                                {renderRunHistory(history2, index, '2')}
                                                                 {renderConsolidatedInsights(history2, `${index}-2`, undefined)}
                                                             </div>
                                                         )}

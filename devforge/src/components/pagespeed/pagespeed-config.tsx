@@ -1,6 +1,6 @@
 import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
 import { defaultPageSpeedConfiguration } from "@/lib/pageSpeedUtils";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@/components/ui";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from "@/components/ui/drawer";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSet, FieldTitle } from "@/components/ui/field";
@@ -10,11 +10,18 @@ import { Item, ItemActions, ItemContent, ItemTitle, } from "@/components/ui/item
 import { Switch } from "../ui/switch";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../ui/accordion";
 
-export default function PageSpeedConfig({ configHasChanged, isAuditing }: { configHasChanged: (config: PageSpeedConfiguration) => void, isAuditing: boolean }) {
+export default function PageSpeedConfig({ configHasChanged, isAuditing, value, restoreToken }: { configHasChanged: (config: PageSpeedConfiguration) => void, isAuditing: boolean, value?: PageSpeedConfiguration | undefined, restoreToken?: number | undefined }) {
     const [config, setConfig] = useState(defaultPageSpeedConfiguration());
     const [url, setUrl] = useState('');
     const [isInvalidUrl, setIsInvalidUrl] = useState(false);
     const webUrlsInputUpload = useRef<HTMLInputElement>(null);
+
+    // Sync drawer to a restored config snapshot. Keyed on restoreToken (not value
+    // identity) so it fires only on an explicit restore, never clobbering live edits.
+    useEffect(() => {
+        if (restoreToken && value) setConfig(value);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [restoreToken]);
 
     // #region Event Handlers
 
