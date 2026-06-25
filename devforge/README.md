@@ -1,6 +1,6 @@
 # devForge
 
-Developer toolkit built with Electron, React, and TypeScript. Bundles utilities for performance auditing, Azure App Service monitoring, asset conversion, and quick-reference cheatsheets into a single cross-platform desktop app.
+Developer toolkit built with Electron, React, and TypeScript. Bundles utilities for performance auditing, Azure App Service / Container Apps monitoring, release runbook prep, asset conversion, and quick-reference cheatsheets into a single cross-platform desktop app.
 
 ---
 
@@ -8,8 +8,9 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 | Tool | Description |
 |------|-------------|
-| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
-| **App Health Check** | Azure App Service health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor. |
+| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
+| **App Health Check** | Azure App Service + Container Apps health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor, optional network/edge diagnostics (App Gateway, Front Door, Load Balancer via Log Analytics). |
+| **Release Pilot** | Fetch a Confluence release runbook, parse sections/goals/schedule, surface attachment images in a lightbox, and generate a Teams-ready release summary on the clipboard. |
 | **Translation** | Localization key viewer/editor with searchable table. |
 | **CSS Audit** | Upload stylesheets, analyze selectors, detect unused/duplicate rules. |
 | **Image to SVG** | Convert raster images to optimized SVG. |
@@ -23,9 +24,12 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 - **Runtime** — Electron 35, Node 20+
 - **Frontend** — React 19, TypeScript, Vite (rolldown-vite), Tailwind CSS
-- **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts
+- **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts, `@tanstack/react-table`
 - **Performance** — Lighthouse 13, chrome-launcher (warm-cache + LCP capture via CDP)
-- **Azure** — `@azure/identity`, `@azure/monitor-query`
+- **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
+- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST
+- **Markdown / capture** — `marked`, `html2canvas`
+- **Testing** — Vitest + happy-dom
 - **Auto-update** — `electron-updater` via GitHub Releases
 - **Release automation** — `release-please` (conventional commits → version bumps + CHANGELOG)
 - **Packaging** — `electron-builder` (NSIS / DMG / AppImage / deb)
@@ -136,15 +140,17 @@ devforge/
 │   │   ├── pagespeed.cjs           # Lighthouse runner
 │   │   ├── pagespeed-insight.cjs   # AI Markdown report generator
 │   │   ├── azure-metrics.cjs       # Azure Monitor queries
-│   │   └── incident-report.cjs     # Downtime report builder
+│   │   ├── incident-report.cjs     # Downtime report builder
+│   │   ├── confluence.cjs          # Release runbook fetch (session + REST)
+│   │   └── commands.cjs            # Shared command helpers
 │   └── utils/               # CDP / browser / Lighthouse helpers
 ├── src/
 │   ├── app.tsx              # App shell, providers, modals
 │   ├── pages/               # Top-level feature pages
-│   ├── components/          # Feature + UI components
+│   ├── components/          # Feature + UI components (pagespeed, app-health-check, release-pilot, …)
 │   ├── hooks/               # Custom hooks (useAppUpdater, useAzureMetrics, etc.)
 │   ├── services/            # External API clients (googleApi)
-│   ├── lib/                 # Utilities, environment detection
+│   ├── lib/                 # Utilities (parse-runbook, settings-store, env detection)
 │   ├── context/             # Settings provider
 │   └── routes/              # Page registry
 ├── shared/                  # Types + utils shared by main + renderer
@@ -157,8 +163,9 @@ devforge/
 
 Open the in-app **Settings** modal to configure:
 
-- **Azure apps** — resource group + name for each App Service to monitor
-- **API keys** — Google PageSpeed, Anthropic, UptimeRobot
+- **Azure** — subscription ID + per-app entries (App Service or Container App, optional API + DB, optional network/edge diagnostics: Log Analytics workspace, App Gateway, Front Door, Load Balancer)
+- **API keys** — Google PageSpeed, UptimeRobot
+- **Atlassian** — Confluence base URL, account email, API token (for Release Pilot)
 
 Settings are stored locally in the OS user-data directory (no cloud sync).
 
@@ -174,6 +181,7 @@ Settings are stored locally in the OS user-data directory (no cloud sync).
 | `npm run electron:pack` | Unpacked build (no installer) |
 | `npm run electron:release` | Build + publish to GitHub Releases |
 | `npm run lint` | ESLint over the codebase |
+| `npm run typecheck` | `tsc --noEmit` type check |
 | `npm run test` | Vitest unit tests |
 | `npm run test:watch` | Vitest in watch mode |
 
