@@ -52,6 +52,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         sync: (opts) => ipcRenderer.invoke('commands:sync', opts),
     },
 
+    unusedAssets: {
+        gitBranch: (opts) => ipcRenderer.invoke('unused-assets:git-branch', opts),
+        review: (opts) => ipcRenderer.invoke('unused-assets:review', opts),
+        cancelReview: () => ipcRenderer.invoke('unused-assets:review-cancel'),
+        onReviewProgress: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('unused-assets:review-progress', fn);
+            return () => ipcRenderer.removeListener('unused-assets:review-progress', fn);
+        },
+    },
+
     confluence: {
         fetchRunbook: (opts) => ipcRenderer.invoke('confluence:fetchRunbook', opts),
         fetchImages: (opts) => ipcRenderer.invoke('confluence:fetchImages', opts),

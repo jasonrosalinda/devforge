@@ -1,6 +1,6 @@
 # devForge
 
-Developer toolkit built with Electron, React, and TypeScript. Bundles utilities for performance auditing, Azure App Service / Container Apps monitoring, release runbook prep, asset conversion, and quick-reference cheatsheets into a single cross-platform desktop app.
+Developer toolkit built with Electron, React, and TypeScript. Bundles utilities for performance auditing, Azure App Service / Container Apps monitoring, release runbook prep, and unused-asset scanning into a single cross-platform desktop app.
 
 ---
 
@@ -8,15 +8,11 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 | Tool | Description |
 |------|-------------|
-| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
 | **App Health Check** | Azure App Service + Container Apps health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor, optional network/edge diagnostics (App Gateway, Front Door, Load Balancer via Log Analytics). |
+| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
+| **Unused Assets** | Scan a project folder for unused CSS classes/ids and unused JS functions. |
 | **Release Pilot** | Fetch a Confluence release runbook, parse sections/goals/schedule, surface attachment images in a lightbox, and generate a Teams-ready release summary on the clipboard. |
 | **Translation** | Localization key viewer/editor with searchable table. |
-| **CSS Audit** | Upload stylesheets, analyze selectors, detect unused/duplicate rules. |
-| **Image to SVG** | Convert raster images to optimized SVG. |
-| **Time Converter** | Multi-timezone conversion with live clocks. |
-| **React Cheatsheet** | Quick reference for React hooks, patterns, and APIs. |
-| **Blazor Cheatsheet** | Quick reference for Blazor components and lifecycle. |
 
 ---
 

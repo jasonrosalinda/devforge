@@ -102,6 +102,22 @@ export interface IElectronAPI {
         onRcaChunk: (cb: (data: { appKey: string; chunk: string }) => void) => () => void;
         onRcaProgress: (cb: (data: { appKey: string; stage: string }) => void) => () => void;
     };
+
+    // Unused Assets — Claude review pass
+    unusedAssets: {
+        gitBranch: (opts: { folderPath: string }) => Promise<{ success: boolean; branch?: string | null; error?: string }>;
+        review: (opts: {
+            candidates: { id: string; kind: string; name: string; file: string; line: number }[];
+            evidence: Record<string, { file: string; line: number; text: string }[]>;
+        }) => Promise<{
+            success: boolean;
+            cancelled?: boolean;
+            verdicts?: { id: string; verdict: 'confirmed-unused' | 'false-positive' | 'needs-review'; reason: string }[];
+            error?: string;
+        }>;
+        cancelReview: () => Promise<{ success: boolean; error?: string }>;
+        onReviewProgress: (cb: (data: { stage: string }) => void) => () => void;
+    };
 }
 
 declare global {

@@ -1,6 +1,7 @@
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { ThemeModeToggle } from "../ui/theme-mode-toggle"
+import { QuickTimeConverter } from "./quick-time-converter"
 import { ChevronLeft, Download, ScrollText, Search, Settings, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -103,6 +104,8 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                             )}
                         </div>
                     )}
+
+                    <QuickTimeConverter />
 
                     {/* Local Timezone Clock */}
                     <div className="hidden sm:flex flex-col items-end leading-none">

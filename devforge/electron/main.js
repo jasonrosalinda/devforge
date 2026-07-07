@@ -96,6 +96,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load confluence.cjs:', err);
     }
 
+    try {
+        require('./ipc/unused-assets.cjs')(mainWindow);
+        console.log('✅ unused-assets handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load unused-assets.cjs:', err);
+    }
+
     // ── Auto-updater ──────────────────────────────────────────────────────────
     if (!isDev) {
         const send = (channel, data) => {

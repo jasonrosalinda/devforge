@@ -1,17 +1,13 @@
 import type { Page } from "@/types/pages.types";
-import { BarChart, Clock, DatabaseZap, Eclipse, Home, Image, Languages, Rocket } from "lucide-react";
-import { SiPagespeedinsights, SiCss3, SiReact, SiBlazor } from "react-icons/si";
-import { AiOutlineTranslation, AiOutlineFileImage } from "react-icons/ai";
+import { Home, Rocket, ScanSearch } from "lucide-react";
+import { SiPagespeedinsights } from "react-icons/si";
+import { AiOutlineTranslation } from "react-icons/ai";
 import { TbActivity } from "react-icons/tb";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
 import PageSpeedResultPage from "@/pages/pagespeedResultPage";
-import CSSAuditPage from "@/pages/cssAuditPage";
-import ImageToSvgPage from "@/pages/imageToSvgPage";
-import ReactCheatsheetPage from "@/pages/reactCheatsheetPage";
-import BlazorCheatsheetPage from "@/pages/blazorCheatsheetPage";
-import TimeConverterPage from "@/pages/timeConverterPage";
+import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
 
@@ -23,10 +19,10 @@ export const pages: Page[] = [
         component: HomePage
     },
     {
-        title: "Translation",
+        title: "App Health Check",
         url: "#",
-        icon: AiOutlineTranslation,
-        component: LocalizationPage
+        icon: TbActivity,
+        component: AppHealthCheckPage
     },
     {
         title: "PageSpeed",
@@ -35,10 +31,10 @@ export const pages: Page[] = [
         component: PageSpeedResultPage
     },
     {
-        title: "App Health Check",
+        title: "Unused Assets",
         url: "#",
-        icon: TbActivity,
-        component: AppHealthCheckPage
+        icon: ScanSearch,
+        component: UnusedAssetsPage
     },
     {
         title: "Release Pilot",
@@ -47,34 +43,10 @@ export const pages: Page[] = [
         component: ReleasePilotPage
     },
     {
-        title: "CSS Audit",
+        title: "Translation",
         url: "#",
-        icon: SiCss3,
-        component: CSSAuditPage
-    },
-    {
-        title: "Image to SVG",
-        url: "#",
-        icon: AiOutlineFileImage,
-        component: ImageToSvgPage
-    },
-    {
-        title: "Time Converter",
-        url: "#",
-        icon: Clock,
-        component: TimeConverterPage
-    },
-    {
-        title: "React Cheatsheet",
-        url: "#",
-        icon: SiReact,
-        component: ReactCheatsheetPage
-    },
-    {
-        title: "Blazor Cheatsheet",
-        url: "#",
-        icon: SiBlazor,
-        component: BlazorCheatsheetPage
+        icon: AiOutlineTranslation,
+        component: LocalizationPage
     }
 ]
 
