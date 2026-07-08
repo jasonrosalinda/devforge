@@ -32,7 +32,6 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [saving, setSaving] = useState(false);
   const [showPagespeed, setShowPagespeed] = useState(false);
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
-  const [showIpapiIs, setShowIpapiIs] = useState(false);
   const [showAtlassianToken, setShowAtlassianToken] = useState(false);
 const [newMonitorId, setNewMonitorId] = useState('');
 
@@ -406,27 +405,6 @@ const [newMonitorId, setNewMonitorId] = useState('');
               </div>
               <p className="text-xs text-muted-foreground">Used to fetch monitor status and downtime logs per app. UptimeRobot → Integration & API → Main API Keys → Read-only API key</p>
             </div>
-
-            <Separator />
-
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-xs">ipapi.is API Key</Label>
-              <div className="relative">
-                <Input
-                  type={showIpapiIs ? 'text' : 'password'}
-                  value={draft.apiKeys.ipapiIsApiKey}
-                  onChange={e => setDraft(d => ({ ...d, apiKeys: { ...d.apiKeys, ipapiIsApiKey: e.target.value } }))}
-                  placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="text-xs font-mono pr-8"
-                />
-                <button type="button" onClick={() => setShowIpapiIs(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                  {showIpapiIs ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground">Used to flag bot/crawler/datacenter IPs in the High Freq tab. Results are cached locally for 14 days to minimize API usage. Get your key at <a href="https://ipapi.is/pricing.html" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">ipapi.is</a>.</p>
-            </div>
-
-
           </div>
         )}
 

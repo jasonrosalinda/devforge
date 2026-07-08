@@ -39,9 +39,12 @@ export interface IElectronAPI {
 
     // ipapi.is — bot/crawler/datacenter reputation lookup (proxied through main)
     ipapi: {
-        lookup(opts: { ip: string; apiKey: string }): Promise<{
+        lookup(opts: { ip: string }): Promise<{
             success: boolean;
             error?: string;
+            isBogon?: boolean;
+            isMobile?: boolean;
+            isSatellite?: boolean;
             isCrawler?: boolean;
             isDatacenter?: boolean;
             isProxy?: boolean;

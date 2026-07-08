@@ -70,6 +70,26 @@ function resourceId(subscriptionId, app) {
   return `/subscriptions/${subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.App/containerApps/${app.name}`;
 }
 
+// Fetches the real hostnames (default + custom domains) bound to an App Service or Container App,
+// so dependency `target` classification can match the app's actual domain, not just its Azure resource name.
+async function getAppHostnames(token, resId, type) {
+  try {
+    if (type === 'containerapp') {
+      const res = await fetch(`https://management.azure.com${resId}?api-version=2023-05-01`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return [];
+      const data = await res.json();
+      const ingress = data.properties?.configuration?.ingress;
+      const customDomains = (ingress?.customDomains ?? []).map(d => d.name).filter(Boolean);
+      return [ingress?.fqdn, ...customDomains].filter(Boolean);
+    }
+    const res = await fetch(`https://management.azure.com${resId}?api-version=2022-03-01`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const hostNames = data.properties?.hostNames ?? [];
+    return [...new Set([data.properties?.defaultHostName, ...hostNames].filter(Boolean))];
+  } catch { return []; }
+}
+
 // ─── Azure SDK helpers ────────────────────────────────────────────────────────
 
 async function getToken(credential) {
@@ -561,19 +581,46 @@ async function getContainerAppTimeSeries(appId, credential, range, customStart, 
   } catch { return null; }
 }
 
-async function getFailedDependencies(appId, credential, range, customStart, customEnd) {
+function kqlLit(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// Builds a KQL boolean expression classifying a dependency as internal: either `target`
+// matches one of the app's own resource names or real bound hostnames (default + custom
+// domains), `target` is hostless (no "." — an in-proc call or bare server name), or (for
+// HTTP deps) `name` is a bare path like "GET /api/x" with no "://" scheme — App Insights
+// records same-origin/correlated calls this way, vs. a full absolute URL
+// ("POST https://px.ads.linkedin.com/...") for genuine third parties.
+function buildInternalCondition(app, hostnames = []) {
+  const needles = [app?.apiName, app?.dbName, app?.name, ...hostnames].filter(n => n && String(n).trim());
+  const conds = [
+    `(type has "Http" and name !contains "://")`,
+    `target !contains "."`,
+    ...needles.map(n => `target contains "${kqlLit(n)}"`),
+  ];
+  return conds.join(' or ');
+}
+
+async function getFailedDependencies(appId, credential, range, customStart, customEnd, internalCondition = null) {
   try {
     const aiToken = await credential.getToken('https://api.applicationinsights.io/.default');
     const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
     const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
+    const classifyExpr = internalCondition
+      ? `extend classification = iff(${internalCondition}, "internal", "thirdParty")`
+      : `extend classification = "thirdParty"`;
     const query = `dependencies
 | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
+| ${classifyExpr}
 | where success == false
-| summarize failCount=count(), p95=percentile(duration, 95), p99=percentile(duration, 99), avgDuration=avg(duration) by nameClean, type, target
-| join kind=leftouter (dependencies | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean, type, target) on nameClean, type, target
-| project name=nameClean, type, target, totalCount=coalesce(totalCount, failCount), failCount, avgDuration, p95, p99
-| order by failCount desc
-| take 50`;
+| summarize failCount=count(), p95=percentile(duration, 95), p99=percentile(duration, 99), avgDuration=avg(duration) by classification, nameClean, type, target
+| join kind=leftouter (dependencies | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | ${classifyExpr} | summarize totalCount=count() by classification, nameClean, type, target) on classification, nameClean, type, target
+| project classification, name=nameClean, type, target, totalCount=coalesce(totalCount, failCount), failCount, avgDuration, p95, p99
+| order by classification asc, failCount desc
+| serialize
+| extend rn = row_number(1, prev(classification) != classification)
+| where rn <= 25
+| project-away rn`;
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
@@ -583,8 +630,9 @@ async function getFailedDependencies(appId, credential, range, customStart, cust
     const data = await res.json();
     const rows = data.tables?.[0]?.rows || [];
     const t = startTime.toISOString();
-    return rows.map(([name, depType, depTarget, totalCount, failCount, avgDuration, p95, p99]) => ({
+    return rows.map(([classification, name, depType, depTarget, totalCount, failCount, avgDuration, p95, p99]) => ({
       t,
+      classification: classification === 'internal' ? 'internal' : 'thirdParty',
       name:        name      ?? '(unknown)',
       type:        depType   ?? '(unknown)',
       target:      depTarget ?? '',
@@ -700,7 +748,7 @@ async function findAppInsightsAppId(token, subscriptionId, resourceGroup, appNam
   } catch { return null; }
 }
 
-async function getRequestInsights(appId, credential, range, customStart, customEnd, summaryOnly = false) {
+async function getRequestInsights(appId, credential, range, customStart, customEnd, summaryOnly = false, internalCondition = null) {
   const msMap = { '30m': 30*60e3, '1h': 3600e3, '6h': 6*3600e3, '12h': 12*3600e3, '1d': 24*3600e3, '3d': 72*3600e3, '7d': 168*3600e3, '30d': 720*3600e3 };
   const spanMs = customStart && customEnd ? new Date(customEnd) - new Date(customStart) : (msMap[range] || msMap['1d']);
   const spanMins = spanMs / 60000;
@@ -764,6 +812,12 @@ async function getRequestInsights(appId, credential, range, customStart, customE
   const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
 
   // Group A: request/dependency-based (8 queries → 1 HTTP call)
+  const depsClassifyExpr = internalCondition
+    ? `extend classification = iff(${internalCondition}, "internal", "thirdParty") | `
+    : `extend classification = "thirdParty" | `;
+  const topDepsKql =
+    `dependencies | ${depsClassifyExpr}summarize totalCount=count(), failCount=countif(success==false), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0), p99=round(percentile(duration,99),0) by classification, name, type, target ` +
+    `| order by classification asc, totalCount desc | serialize | extend rn=row_number(1, prev(classification) != classification) | where rn <= 10 | project-away rn`;
   const groupAKqls = [
     `requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     `requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | where success == false | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
@@ -772,7 +826,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `requests | extend rc=toint(resultCode) | where rc >= 500 or (success == false and (isempty(resultCode) or rc == 0 or isnull(rc))) | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
     `requests | extend rc=toint(resultCode) | where rc >= 400 and rc < 500 | count`,
     `requests | extend rc=toint(resultCode) | where rc >= 500 or (success == false and (isempty(resultCode) or rc == 0 or isnull(rc))) | count`,
-    `dependencies | summarize totalCount=count(), failCount=countif(success==false), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0), p99=round(percentile(duration,99),0) by name, type, target | order by totalCount desc | take 10`,
+    topDepsKql,
     `exceptions | summarize count=count() by type | order by count desc | take 10`,
     `exceptions | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
     `dependencies | where success == false | where resultCode in ("408","500","502","503","504") | summarize timeoutCount=count() by name | project name, timeoutCount`,
@@ -849,7 +903,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     total5xx: Array.isArray(total5xxRows) && total5xxRows[0] ? Number(total5xxRows[0][0]) || 0 : null,
     snatDetails: Array.isArray(snatDetailRows) ? snatDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
     sqlHttpDetails: Array.isArray(sqlHttpDetailRows) ? sqlHttpDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
-    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
+    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([classification, name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ classification: classification === 'internal' ? 'internal' : 'thirdParty', name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
     errorTypes: Array.isArray(errorTypeRows) ? errorTypeRows.map(([type, count]) => ({ type: String(type || 'Unknown'), count: Number(count) || 0 })) : null,
     errorCount: Array.isArray(errorTypeRows) ? errorTypeRows.reduce((s, [, c]) => s + (Number(c) || 0), 0) : null,
     errorDetails: Array.isArray(errorDetailRows) ? errorDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), client_Browser: String(client_Browser ?? ''), client_OS: String(client_OS ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
@@ -1124,11 +1178,20 @@ async function fetchAppDetailsData(app, subscriptionId, credential, range, custo
 
   if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, failedDependencies: null, apiFailedDependencies: null };
 
+  const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
+  const [appHostnames, apiHostnames] = await Promise.all([
+    getAppHostnames(token, resourceId(subscriptionId, app), app.type),
+    app.apiName
+      ? getAppHostnames(token, resourceId(subscriptionId, { name: app.apiName, resourceGroup: app.resourceGroup, type: apiIsContainerApp ? 'containerapp' : 'appservice' }), apiIsContainerApp ? 'containerapp' : 'appservice')
+      : Promise.resolve([]),
+  ]);
+  const internalCondition = buildInternalCondition(app, [...appHostnames, ...apiHostnames]);
+
   const [requestInsights, apiRequestInsights, failedDependencies, apiFailedDependencies] = await Promise.all([
-    getRequestInsights(aiAppId, credential, range, customStart, customEnd, false).catch(() => null),
-    apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false).catch(() => null) : Promise.resolve(null),
-    getFailedDependencies(aiAppId, credential, range, customStart, customEnd).catch(() => null),
-    apiAiAppId ? getFailedDependencies(apiAiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    getRequestInsights(aiAppId, credential, range, customStart, customEnd, false, internalCondition).catch(() => null),
+    apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false, internalCondition).catch(() => null) : Promise.resolve(null),
+    getFailedDependencies(aiAppId, credential, range, customStart, customEnd, internalCondition).catch(() => null),
+    apiAiAppId ? getFailedDependencies(apiAiAppId, credential, range, customStart, customEnd, internalCondition).catch(() => null) : Promise.resolve(null),
   ]);
 
   return { requestInsights, apiRequestInsights, failedDependencies: failedDependencies ?? null, apiFailedDependencies: apiFailedDependencies ?? null };

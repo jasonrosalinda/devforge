@@ -13,6 +13,69 @@ import { AppRemarks, buildRemarks } from './azureAppRemarks';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { useIpReputation } from '@/hooks/useIpReputation';
+import type { IpReputation } from '@/lib/ipapiIs';
+
+const IP_REP_FLAGS: Array<{ key: keyof IpReputation; label: string; color: string }> = [
+  { key: 'isCrawler',    label: 'crawler',    color: '#f85149' },
+  { key: 'isAbuser',     label: 'abuser',     color: '#f85149' },
+  { key: 'isTor',        label: 'tor',        color: '#f85149' },
+  { key: 'isProxy',      label: 'proxy',      color: '#f97316' },
+  { key: 'isVpn',        label: 'vpn',        color: '#f97316' },
+  { key: 'isDatacenter', label: 'datacenter', color: '#f97316' },
+  { key: 'isBogon',      label: 'bogon',      color: '#8b949e' },
+  { key: 'isMobile',     label: 'mobile',     color: '#58a6ff' },
+  { key: 'isSatellite',  label: 'satellite',  color: '#58a6ff' },
+];
+
+function IpRepBadges({ rep }: { rep: IpReputation | undefined }) {
+  if (!rep) return null;
+  if (rep.error) return <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>;
+  const active = IP_REP_FLAGS.filter(f => rep[f.key]);
+  if (!active.length) return <span style={{ marginLeft: 5, color: '#3fb950', fontWeight: 600 }}>● clean</span>;
+  return (
+    <>
+      {active.map(f => (
+        <span
+          key={f.label}
+          title={f.key === 'isCrawler' && rep.crawlerName ? `crawler: ${rep.crawlerName}` : rep.companyName ?? undefined}
+          style={{
+            marginLeft: 4, fontSize: 9, fontWeight: 600, color: f.color,
+            border: `1px solid ${f.color}66`, background: `${f.color}22`,
+            borderRadius: 3, padding: '0 4px',
+          }}
+        >
+          {f.label}
+        </span>
+      ))}
+    </>
+  );
+}
+
+const DEPS_FILTERS = [
+  { key: 'all',        label: 'All',         color: '#8b9ab3' },
+  { key: 'internal',   label: 'Internal',    color: '#3fb950' },
+  { key: 'thirdParty', label: 'Third-Party', color: '#d29922' },
+] as const;
+
+function DepsFilterPills({ value, onChange }: { value: 'all' | 'internal' | 'thirdParty'; onChange: (v: 'all' | 'internal' | 'thirdParty') => void }) {
+  return (
+    <div className="flex gap-0.5" style={{ marginTop: 3 }}>
+      {DEPS_FILTERS.map(f => (
+        <button
+          key={f.key}
+          onClick={e => { e.stopPropagation(); onChange(f.key); }}
+          style={{
+            background: value === f.key ? `${f.color}22` : 'none',
+            border: `1px solid ${value === f.key ? `${f.color}66` : 'transparent'}`,
+            color: value === f.key ? f.color : 'var(--muted-foreground)',
+            borderRadius: 4, padding: '1px 6px', fontSize: 9,
+            cursor: 'pointer', fontWeight: value === f.key ? 600 : 400,
+          }}
+        >{f.label}</button>
+      ))}
+    </div>
+  );
+}
 
 type Status = 'healthy' | 'warning' | 'critical';
 export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP99?: number): Status {
@@ -45,7 +108,6 @@ interface AzureAppCardProps {
   uptimeRobotMonitorIds?: string[] | undefined;
   rangeStart?: string | undefined;
   rangeEnd?: string | undefined;
-  ipapiIsApiKey?: string | undefined;
 }
 
 
@@ -141,7 +203,7 @@ function SkeletonBlock({ className }: { className?: string }) {
   return <div className={`animate-pulse rounded bg-muted ${className ?? ''}`} />;
 }
 
-export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd, ipapiIsApiKey }: AzureAppCardProps) {
+export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
   const { elementRef: cardRef, copyAsImage, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     fileNamePrefix: `azure-${appKey}-${Date.now()}`,
     backgroundColor: '#09090b',
@@ -152,7 +214,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     ...(metrics.requestInsights?.highFreq ?? []),
     ...(metrics.apiRequestInsights?.highFreq ?? []),
   ].map(u => u.ip);
-  const ipReputations = useIpReputation(highFreqIps, ipapiIsApiKey);
+  const ipReputations = useIpReputation(highFreqIps);
   const [urExpanded, setUrExpanded] = useState(false);
   const [requestsExpanded, setRequestsExpanded] = useState(false);
   const [depsExpanded, setDepsExpanded] = useState(false);
@@ -175,7 +237,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [snatExpanded, setSnatExpanded] = useState(false);
   const [snatAPIExpanded, setSnatAPIExpanded] = useState(false);
   const [depsTab, setDepsTab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
+  const [depsFilter, setDepsFilter] = useState<'all' | 'internal' | 'thirdParty'>('all');
   const [depsAPITab, setDepsAPITab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
+  const [depsAPIFilter, setDepsAPIFilter] = useState<'all' | 'internal' | 'thirdParty'>('all');
   const [depsAPIExpanded, setDepsAPIExpanded] = useState(false);
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
@@ -1201,15 +1265,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                               <div className="flex flex-col min-w-0 flex-1">
                                                 <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
                                                   {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
-                                                  {rep && (rep.error
-                                                    ? <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>
-                                                    : <span
-                                                        title={`${rep.crawlerName ? `crawler: ${rep.crawlerName}` : ''}${rep.isDatacenter ? ' · datacenter' : ''}${rep.isVpn ? ' · vpn' : ''}${rep.isProxy ? ' · proxy' : ''}${rep.isTor ? ' · tor' : ''}${rep.isAbuser ? ' · abuser' : ''}${rep.companyName ? ` · ${rep.companyName}` : ''}`}
-                                                        style={{ marginLeft: 5, color: rep.isBot ? '#f85149' : '#3fb950', fontWeight: 600 }}
-                                                      >
-                                                        {rep.isBot ? '● bot' : '● human'}
-                                                      </span>
-                                                  )}
+                                                  <IpRepBadges rep={rep} />
                                                 </span>
                                                 <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
                                               </div>
@@ -1316,6 +1372,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const topDeps     = metrics.requestInsights.topDependencies ?? [];
               const failedDeps  = metrics.failedDependencies ?? [];
               const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || insight.totalDependencies > 0 || insight.failedDependencies > 0;
+              const filteredTopDeps    = depsFilter === 'all' ? topDeps    : topDeps.filter(d => d.classification === depsFilter);
+              const filteredFailedDeps = depsFilter === 'all' ? failedDeps : failedDeps.filter(d => d.classification === depsFilter);
               return (
                 <>
                   <tr
@@ -1369,14 +1427,17 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                               >{t.label}</button>
                             ))}
                           </div>
+                          {depsTab !== 'timeoutDeps' && <DepsFilterPills value={depsFilter} onChange={setDepsFilter} />}
                         </td>
                       </tr>}
                       {detailsLoaded && depsTab === 'topDeps' && (
-                        topDeps.length === 0
+                        filteredTopDeps.length === 0
                           ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No dependency data</td></tr>
-                          : topDeps.map((d, i) => (
+                          : filteredTopDeps.map((d, i) => (
                             <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
+                                {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
+                              </td>
                               <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
                               <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
                               <td className="text-right tabular-nums">
@@ -1401,11 +1462,13 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                           ))}</>;
                       })()}
                       {detailsLoaded && depsTab === 'failedDeps' && (
-                        failedDeps.length === 0
+                        filteredFailedDeps.length === 0
                           ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed dependencies</td></tr>
-                          : failedDeps.slice(0, 10).map((d, i) => (
+                          : filteredFailedDeps.slice(0, 10).map((d, i) => (
                             <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
+                                {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
+                              </td>
                               <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
                               <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
                               <td className="text-right tabular-nums">
@@ -1871,15 +1934,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                                 <div className="flex flex-col min-w-0 flex-1">
                                                   <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
                                                     {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
-                                                    {rep && (rep.error
-                                                      ? <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>
-                                                      : <span
-                                                          title={`${rep.crawlerName ? `crawler: ${rep.crawlerName}` : ''}${rep.isDatacenter ? ' · datacenter' : ''}${rep.isVpn ? ' · vpn' : ''}${rep.isProxy ? ' · proxy' : ''}${rep.isTor ? ' · tor' : ''}${rep.isAbuser ? ' · abuser' : ''}${rep.companyName ? ` · ${rep.companyName}` : ''}`}
-                                                          style={{ marginLeft: 5, color: rep.isBot ? '#f85149' : '#3fb950', fontWeight: 600 }}
-                                                        >
-                                                          {rep.isBot ? '● bot' : '● human'}
-                                                        </span>
-                                                    )}
+                                                    <IpRepBadges rep={rep} />
                                                   </span>
                                                   <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
                                                 </div>
@@ -1966,6 +2021,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 const topDeps     = metrics.apiRequestInsights.topDependencies ?? [];
                 const failedDeps  = metrics.apiFailedDependencies ?? [];
                 const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || apiInsight.totalDependencies > 0 || apiInsight.failedDependencies > 0;
+                const filteredTopDeps    = depsAPIFilter === 'all' ? topDeps    : topDeps.filter(d => d.classification === depsAPIFilter);
+                const filteredFailedDeps = depsAPIFilter === 'all' ? failedDeps : failedDeps.filter(d => d.classification === depsAPIFilter);
                 return (
                   <>
                     <tr
@@ -2019,14 +2076,17 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                 >{t.label}</button>
                               ))}
                             </div>
+                            {depsAPITab !== 'timeoutDeps' && <DepsFilterPills value={depsAPIFilter} onChange={setDepsAPIFilter} />}
                           </td>
                         </tr>}
                         {detailsLoaded && depsAPITab === 'topDeps' && (
-                          topDeps.length === 0
+                          filteredTopDeps.length === 0
                             ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No dependency data</td></tr>
-                            : topDeps.map((d, i) => (
+                            : filteredTopDeps.map((d, i) => (
                               <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
+                                  {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
+                                </td>
                                 <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
                                 <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
                                 <td className="text-right tabular-nums">
@@ -2051,11 +2111,13 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                             ))}</>;
                         })()}
                         {detailsLoaded && depsAPITab === 'failedDeps' && (
-                          failedDeps.length === 0
+                          filteredFailedDeps.length === 0
                             ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed dependencies</td></tr>
-                            : failedDeps.slice(0, 10).map((d, i) => (
+                            : filteredFailedDeps.slice(0, 10).map((d, i) => (
                               <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.name} → ${d.target}`}>{d.name || d.target}</td>
+                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
+                                  {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
+                                </td>
                                 <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
                                 <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
                                 <td className="text-right tabular-nums">

@@ -4,6 +4,9 @@ const ERROR_TTL_MS = 60 * 60 * 1000; // 1 hour — allow retry after transient/A
 
 export interface IpReputation {
   ip: string;
+  isBogon: boolean;
+  isMobile: boolean;
+  isSatellite: boolean;
   isCrawler: boolean;
   isDatacenter: boolean;
   isProxy: boolean;
@@ -56,29 +59,31 @@ function isPrivateIp(ip: string): boolean {
 
 const inFlight = new Map<string, Promise<IpReputation>>();
 
-async function fetchReputation(ip: string, apiKey: string | undefined): Promise<IpReputation> {
-  // Routed through the main process to keep the API key off the renderer's network tab.
+async function fetchReputation(ip: string): Promise<IpReputation> {
+  // Routed through the main process — ipapi.is free tier, no API key required.
   try {
-    const data = await window.electronAPI.ipapi.lookup({ ip, apiKey: apiKey ?? '' });
+    const data = await window.electronAPI.ipapi.lookup({ ip });
     if (!data.success) {
-      return { ip, isCrawler: false, isDatacenter: false, isProxy: false, isVpn: false, isTor: false, isAbuser: false, isBot: false, crawlerName: null, companyName: null, checkedAt: Date.now(), error: data.error || 'Lookup failed' };
+      return { ip, isBogon: false, isMobile: false, isSatellite: false, isCrawler: false, isDatacenter: false, isProxy: false, isVpn: false, isTor: false, isAbuser: false, isBot: false, crawlerName: null, companyName: null, checkedAt: Date.now(), error: data.error || 'Lookup failed' };
     }
+    const isBogon = Boolean(data.isBogon);
+    const isMobile = Boolean(data.isMobile);
+    const isSatellite = Boolean(data.isSatellite);
     const isCrawler = Boolean(data.isCrawler);
     const isDatacenter = Boolean(data.isDatacenter);
     const isProxy = Boolean(data.isProxy);
     const isVpn = Boolean(data.isVpn);
     const isTor = Boolean(data.isTor);
     const isAbuser = Boolean(data.isAbuser);
-    const isBot = isCrawler || isDatacenter || isProxy || isVpn || isTor || isAbuser;
-    return { ip, isCrawler, isDatacenter, isProxy, isVpn, isTor, isAbuser, isBot, crawlerName: data.crawlerName ?? null, companyName: data.companyName ?? null, checkedAt: Date.now() };
+    const isBot = isBogon || isMobile || isSatellite || isCrawler || isDatacenter || isProxy || isVpn || isTor || isAbuser;
+    return { ip, isBogon, isMobile, isSatellite, isCrawler, isDatacenter, isProxy, isVpn, isTor, isAbuser, isBot, crawlerName: data.crawlerName ?? null, companyName: data.companyName ?? null, checkedAt: Date.now() };
   } catch (err) {
-    return { ip, isCrawler: false, isDatacenter: false, isProxy: false, isVpn: false, isTor: false, isAbuser: false, isBot: false, crawlerName: null, companyName: null, checkedAt: Date.now(), error: err instanceof Error ? err.message : 'IPC error' };
+    return { ip, isBogon: false, isMobile: false, isSatellite: false, isCrawler: false, isDatacenter: false, isProxy: false, isVpn: false, isTor: false, isAbuser: false, isBot: false, crawlerName: null, companyName: null, checkedAt: Date.now(), error: err instanceof Error ? err.message : 'IPC error' };
   }
 }
 
 // Cache-first IP reputation lookup — only calls ipapi.is for IPs not already cached (fresh) in localStorage.
-// apiKey is optional: ipapi.is serves a free tier (rate-limited by caller IP) without one.
-export async function getIpReputation(ip: string, apiKey: string | undefined): Promise<IpReputation | null> {
+export async function getIpReputation(ip: string): Promise<IpReputation | null> {
   if (!ip || isPrivateIp(ip)) return null;
 
   const cache = readCache();
@@ -88,7 +93,7 @@ export async function getIpReputation(ip: string, apiKey: string | undefined): P
   const pending = inFlight.get(ip);
   if (pending) return pending;
 
-  const promise = fetchReputation(ip, apiKey).then(result => {
+  const promise = fetchReputation(ip).then(result => {
     const latest = readCache();
     latest[ip] = result;
     writeCache(latest);

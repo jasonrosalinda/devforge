@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { getCachedIpReputation, getIpReputation, type IpReputation } from '@/lib/ipapiIs';
 
-// Resolves bot/crawler reputation for a list of IPs via ipapi.is, cache-first (localStorage) to minimize API calls
-export function useIpReputation(ips: string[], apiKey: string | undefined): Record<string, IpReputation> {
+// Resolves bot/crawler reputation for a list of IPs via ipapi.is (free tier), cache-first (localStorage) to minimize API calls
+export function useIpReputation(ips: string[]): Record<string, IpReputation> {
   const [result, setResult] = useState<Record<string, IpReputation>>({});
   const uniqueKey = Array.from(new Set(ips.filter(Boolean))).sort().join(',');
 
@@ -26,14 +26,14 @@ export function useIpReputation(ips: string[], apiKey: string | undefined): Reco
 
     (async () => {
       for (const ip of toFetch) {
-        const rep = await getIpReputation(ip, apiKey);
+        const rep = await getIpReputation(ip);
         if (cancelled || !rep) continue;
         setResult(prev => ({ ...prev, [ip]: rep }));
       }
     })();
 
     return () => { cancelled = true; };
-  }, [uniqueKey, apiKey]);
+  }, [uniqueKey]);
 
   return result;
 }

@@ -2,11 +2,12 @@
 
 const { ipcMain } = require('electron');
 
-// Proxied through main process to keep the API key out of renderer devtools network
-// tab and stay consistent with the rest of the app's external-API handling.
+// Proxied through main process — renderer fetch would work too (ipapi.is sends CORS
+// headers) but keeping this consistent with the rest of the app's external-API handling.
+// Free tier only, no API key.
 module.exports = function registerIpapiHandlers() {
-  ipcMain.handle('ipapi:lookup', async (_event, { ip, apiKey }) => {
-    const url = `https://api.ipapi.is/?q=${encodeURIComponent(ip)}${apiKey ? `&key=${encodeURIComponent(apiKey)}` : ''}`;
+  ipcMain.handle('ipapi:lookup', async (_event, { ip }) => {
+    const url = `https://api.ipapi.is/?q=${encodeURIComponent(ip)}`;
     try {
       const res = await fetch(url);
       const data = await res.json();
@@ -15,6 +16,9 @@ module.exports = function registerIpapiHandlers() {
       }
       return {
         success: true,
+        isBogon: Boolean(data.is_bogon),
+        isMobile: Boolean(data.is_mobile),
+        isSatellite: Boolean(data.is_satellite),
         isCrawler: Boolean(data.is_crawler),
         isDatacenter: Boolean(data.is_datacenter),
         isProxy: Boolean(data.is_proxy),

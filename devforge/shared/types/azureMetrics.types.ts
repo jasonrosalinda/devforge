@@ -45,7 +45,7 @@ export interface AppMetrics {
     total5xx?: number | null
     snatDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
     sqlHttpDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
-    topDependencies?: Array<{ name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
+    topDependencies?: Array<{ classification: 'internal' | 'thirdParty'; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
     errorTypes?: Array<{ type: string; count: number }> | null
     errorCount?: number | null
     errorDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
@@ -75,7 +75,7 @@ export interface AppMetrics {
     downtimeIntervals: Array<{ start: number; end: number; cause?: string }>
     series: Array<{ t: string; v: number }>
   } | null
-  failedDependencies?: Array<{ t: string; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
+  failedDependencies?: Array<{ t: string; classification: 'internal' | 'thirdParty'; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
   appInsightsConfigured?: boolean
   apiRequestInsights?: {
     urls?: Array<{ url: string; rpm: number; count: number }>
@@ -91,7 +91,7 @@ export interface AppMetrics {
     total5xx?: number | null
     snatDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
     sqlHttpDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
-    topDependencies?: Array<{ name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
+    topDependencies?: Array<{ classification: 'internal' | 'thirdParty'; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
     errorTypes?: Array<{ type: string; count: number }> | null
     errorCount?: number | null
     errorDetails?: Array<{ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string }> | null
@@ -112,7 +112,7 @@ export interface AppMetrics {
     } | null
     error?: string
   } | null
-  apiFailedDependencies?: Array<{ t: string; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
+  apiFailedDependencies?: Array<{ t: string; classification: 'internal' | 'thirdParty'; name: string; type: string; target: string; totalCount: number; failCount: number; avgDuration: number; p95: number; p99: number }> | null
   apiAppInsightsConfigured?: boolean
   error?: string
 }
