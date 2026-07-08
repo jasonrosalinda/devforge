@@ -37,6 +37,22 @@ export interface IElectronAPI {
         sync(opts: { subscriptionId: string; apps: { name: string; resourceGroup: string; type: string; appInsightsAppId?: string; apiName?: string; apiType?: string; apiInsightsAppId?: string }[] }): Promise<{ success: boolean; error?: string }>;
     };
 
+    // ipapi.is — bot/crawler/datacenter reputation lookup (proxied through main)
+    ipapi: {
+        lookup(opts: { ip: string; apiKey: string }): Promise<{
+            success: boolean;
+            error?: string;
+            isCrawler?: boolean;
+            isDatacenter?: boolean;
+            isProxy?: boolean;
+            isVpn?: boolean;
+            isTor?: boolean;
+            isAbuser?: boolean;
+            crawlerName?: string | null;
+            companyName?: string | null;
+        }>;
+    };
+
     // Confluence runbook fetch (Release Pilot)
     confluence: {
         fetchRunbook(opts: { baseUrl: string; email: string; apiToken: string; pageUrl: string }): Promise<{

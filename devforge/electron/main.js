@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, Menu } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -11,6 +11,8 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const isDev = !app.isPackaged;
+
+Menu.setApplicationMenu(null);
 
 function createWindow() {
     const mainWindow = new BrowserWindow({
@@ -27,6 +29,7 @@ function createWindow() {
         },
         titleBarStyle: 'default',
         backgroundColor: '#09090b',
+        autoHideMenuBar: true,
         show: false,
     });
 
@@ -101,6 +104,13 @@ app.whenReady().then(() => {
         console.log('✅ unused-assets handlers registered');
     } catch (err) {
         console.error('❌ Failed to load unused-assets.cjs:', err);
+    }
+
+    try {
+        require('./ipc/ipapi.cjs')();
+        console.log('✅ ipapi handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load ipapi.cjs:', err);
     }
 
     // ── Auto-updater ──────────────────────────────────────────────────────────

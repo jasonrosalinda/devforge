@@ -176,6 +176,7 @@ export default function AppHealthCheckPage() {
                 onRequestDetails={() => fetchAppDetails(key, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined, granularity)}
                 uptimeRobotApiKey={settings.apiKeys.uptimeRobotApiKey}
                 uptimeRobotMonitorIds={appDef?.uptimeRobotMonitorIds}
+                ipapiIsApiKey={settings.apiKeys.ipapiIsApiKey}
                 rangeStart={committedStart ?? undefined}
                 rangeEnd={committedEnd ?? undefined}
               />

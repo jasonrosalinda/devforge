@@ -12,6 +12,7 @@ import { CombinedChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChar
 import { AppRemarks, buildRemarks } from './azureAppRemarks';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
+import { useIpReputation } from '@/hooks/useIpReputation';
 
 type Status = 'healthy' | 'warning' | 'critical';
 export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP99?: number): Status {
@@ -44,6 +45,7 @@ interface AzureAppCardProps {
   uptimeRobotMonitorIds?: string[] | undefined;
   rangeStart?: string | undefined;
   rangeEnd?: string | undefined;
+  ipapiIsApiKey?: string | undefined;
 }
 
 
@@ -139,13 +141,18 @@ function SkeletonBlock({ className }: { className?: string }) {
   return <div className={`animate-pulse rounded bg-muted ${className ?? ''}`} />;
 }
 
-export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
+export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd, ipapiIsApiKey }: AzureAppCardProps) {
   const { elementRef: cardRef, copyAsImage, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     fileNamePrefix: `azure-${appKey}-${Date.now()}`,
     backgroundColor: '#09090b',
   });
 
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
+  const highFreqIps = [
+    ...(metrics.requestInsights?.highFreq ?? []),
+    ...(metrics.apiRequestInsights?.highFreq ?? []),
+  ].map(u => u.ip);
+  const ipReputations = useIpReputation(highFreqIps, ipapiIsApiKey);
   const [urExpanded, setUrExpanded] = useState(false);
   const [requestsExpanded, setRequestsExpanded] = useState(false);
   const [depsExpanded, setDepsExpanded] = useState(false);
@@ -1143,7 +1150,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                   {/* Tab buttons */}
                                   <div className="flex gap-0.5 flex-wrap">
                                     {(['highfreq', 'http4xx', 'http5xx', 'requests', 'bots'] as const).map(t => {
-                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'Bots' };
+                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'User Agents' };
                                       const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
                                       const c = colors[t];
                                       return (
@@ -1188,10 +1195,22 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                           const end = new Date(start.getTime() + 10 * 60 * 1000);
                                           const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
                                           const textColor = isDowntime ? '#c0392b' : undefined;
+                                          const rep = ipReputations[u.ip];
                                           return (
                                             <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
                                               <div className="flex flex-col min-w-0 flex-1">
-                                                <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
+                                                <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
+                                                  {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
+                                                  {rep && (rep.error
+                                                    ? <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>
+                                                    : <span
+                                                        title={`${rep.crawlerName ? `crawler: ${rep.crawlerName}` : ''}${rep.isDatacenter ? ' · datacenter' : ''}${rep.isVpn ? ' · vpn' : ''}${rep.isProxy ? ' · proxy' : ''}${rep.isTor ? ' · tor' : ''}${rep.isAbuser ? ' · abuser' : ''}${rep.companyName ? ` · ${rep.companyName}` : ''}`}
+                                                        style={{ marginLeft: 5, color: rep.isBot ? '#f85149' : '#3fb950', fontWeight: 600 }}
+                                                      >
+                                                        {rep.isBot ? '● bot' : '● human'}
+                                                      </span>
+                                                  )}
+                                                </span>
                                                 <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
                                               </div>
                                               <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
@@ -1805,7 +1824,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                   <div className="flex flex-col gap-1 pt-1">
                                     <div className="flex gap-0.5 flex-wrap">
                                       {(['highfreq', 'http4xx', 'http5xx', 'requests', 'bots'] as const).map(t => {
-                                        const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'Bots' };
+                                        const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'User Agents' };
                                         const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
                                         const c = colors[t];
                                         return (
@@ -1846,10 +1865,22 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                             const end = new Date(start.getTime() + 10 * 60 * 1000);
                                             const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
                                             const textColor = isDowntime ? '#c0392b' : undefined;
+                                            const rep = ipReputations[u.ip];
                                             return (
                                               <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
                                                 <div className="flex flex-col min-w-0 flex-1">
-                                                  <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT</span>
+                                                  <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
+                                                    {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
+                                                    {rep && (rep.error
+                                                      ? <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>
+                                                      : <span
+                                                          title={`${rep.crawlerName ? `crawler: ${rep.crawlerName}` : ''}${rep.isDatacenter ? ' · datacenter' : ''}${rep.isVpn ? ' · vpn' : ''}${rep.isProxy ? ' · proxy' : ''}${rep.isTor ? ' · tor' : ''}${rep.isAbuser ? ' · abuser' : ''}${rep.companyName ? ` · ${rep.companyName}` : ''}`}
+                                                          style={{ marginLeft: 5, color: rep.isBot ? '#f85149' : '#3fb950', fontWeight: 600 }}
+                                                        >
+                                                          {rep.isBot ? '● bot' : '● human'}
+                                                        </span>
+                                                    )}
+                                                  </span>
                                                   <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
                                                 </div>
                                                 <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>

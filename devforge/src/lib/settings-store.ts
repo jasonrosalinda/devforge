@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiKeys: {
     pagespeedApiKey: '',
     uptimeRobotApiKey: '',
+    ipapiIsApiKey: '',
   },
   atlassian: {
     confluenceBaseUrl: '',

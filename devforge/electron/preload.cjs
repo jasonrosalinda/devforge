@@ -63,6 +63,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    ipapi: {
+        lookup: (opts) => ipcRenderer.invoke('ipapi:lookup', opts),
+    },
+
     confluence: {
         fetchRunbook: (opts) => ipcRenderer.invoke('confluence:fetchRunbook', opts),
         fetchImages: (opts) => ipcRenderer.invoke('confluence:fetchImages', opts),

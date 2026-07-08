@@ -25,6 +25,7 @@ export interface AzureSettings {
 export interface ApiKeysSettings {
   pagespeedApiKey: string;
   uptimeRobotApiKey: string;
+  ipapiIsApiKey: string;
 }
 
 export interface AtlassianSettings {
