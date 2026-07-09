@@ -21,6 +21,7 @@ export interface AppMetrics {
   memUnit: string
   connections?: MetricSeries | null
   apiConnections?: MetricSeries | null
+  users?: MetricSeries | null
   plan?: { sku: string; cores: number; memoryMB: number } | null
   instances?: InstanceInfo[]
   apiInstances?: InstanceInfo[]
@@ -63,6 +64,7 @@ export interface AppMetrics {
       requestP95: number
       requestP99: number
       socketExceptions: number
+      uniqueUsers: number
     } | null
     error?: string
   } | null
@@ -109,6 +111,7 @@ export interface AppMetrics {
       requestP95: number
       requestP99: number
       socketExceptions: number
+      uniqueUsers: number
     } | null
     error?: string
   } | null

@@ -581,6 +581,34 @@ async function getContainerAppTimeSeries(appId, credential, range, customStart, 
   } catch { return null; }
 }
 
+// Distinct users (by IP) per time bucket, summarized into the same {avg, max, p99, series} shape as ARM MetricSeries.
+// FE only — never called for the API app's aiAppId.
+async function getUserStats(appId, credential, range, customStart, customEnd, gran) {
+  try {
+    const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+    const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+    const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
+    const bin = isoGranToKql(gran);
+    const query = `requests
+| extend dimIp = tostring(customDimensions["Client IP Address"])
+| extend ip = iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))
+| where isnotempty(ip)
+| summarize count = dcount(ip) by bin(timestamp, ${bin})
+| order by timestamp asc`;
+    const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, timespan }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.error) return null;
+    const rows = data.tables?.[0]?.rows || [];
+    const points = rows.map(([t, count]) => ({ timeStamp: t, average: Number(count) || 0, maximum: Number(count) || 0 }));
+    return summarize(points);
+  } catch { return null; }
+}
+
 function kqlLit(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -809,7 +837,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     }
   }
 
-  const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
+  const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));let users=requests|extend dimIp=tostring(customDimensions["Client IP Address"])|extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))|where isnotempty(ip)|summarize UniqueUsers=dcount(ip);deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|join kind=inner(users|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1,JoinKey2|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
 
   // Group A: request/dependency-based (8 queries → 1 HTTP call)
   const depsClassifyExpr = internalCondition
@@ -834,7 +862,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   // Group B: client-based + SNAT + SQL/HTTP timeouts (6 queries → 1 HTTP call)
   const groupBKqls = [
-    `requests | extend ip=iff(isnotempty(client_IP) and client_IP != "::1", client_IP, tostring(customDimensions["Client IP Address"])) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | extend dimIp=tostring(customDimensions["Client IP Address"]) | extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS") | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     `requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`,
@@ -886,6 +914,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
       requestP95:            Number(get('RequestP95')            ?? 0),
       requestP99:            Number(get('RequestP99')            ?? 0),
       socketExceptions:      Number(get('SocketExceptions')      ?? 0),
+      uniqueUsers:           Number(get('UniqueUsers')           ?? 0),
     };
   }
 
@@ -948,7 +977,7 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     cpu, { metric: memory, unit: memUnit },
     instances, availability, responseTime, requests, failedRequests, failedRequestsSeries,
     instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries,
-    aiFailedByInstance, caTimeSeries, connections,
+    aiFailedByInstance, caTimeSeries, connections, userStats,
   ] = await Promise.all([
     queryMetric(client, metricsResId, 'CpuPercentage', range, gran, customStart, customEnd),
     fetchMemory(),
@@ -966,6 +995,7 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     aiAppId ? getFailedRequestsByInstance(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     (!isAppService && aiAppId) ? getContainerAppTimeSeries(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
     isAppService ? queryMetric(client, resId, 'AppConnections', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    aiAppId ? getUserStats(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
   ]);
 
   // Collapse aiFailedByInstance into {t, count}[] — sum across instances per minute bucket
@@ -1157,6 +1187,7 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     apiRequestInsights: apiRequestInsights ?? null,
     apiFailedDependencies: apiFailedDependencies ?? null,
     apiAppInsightsConfigured,
+    users: userStats ?? null,
   };
 }
 

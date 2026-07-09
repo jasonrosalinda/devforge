@@ -222,7 +222,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [availExpanded, setAvailExpanded] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [visibleBlocks, setVisibleBlocks] = useState({
-    remarks: true, cpu: true, memory: true, response: true, requests: true,
+    remarks: true, cpu: true, memory: true, response: true, users: true, requests: true,
     dependencies: true, exceptions: true, instances: true, uptimerobot: true,
     frontend: true, api: true, snatRisk: true,
   });
@@ -663,6 +663,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 { key: 'cpu',          label: 'CPU' },
                 { key: 'memory',       label: 'Memory' },
                 { key: 'response',     label: 'Response' },
+                { key: 'users',        label: 'Users' },
                 { key: 'requests',     label: 'Requests' },
                 { key: 'dependencies', label: 'Dependencies' },
                 { key: 'exceptions',   label: 'Exceptions' },
@@ -806,6 +807,23 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
               </tr>
             )}
+            {visibleBlocks.users && metrics.users != null && (() => {
+              const fmtSgt = (t: string) => new Date(t).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+              const series = metrics.users.series ?? [];
+              const firstPoint = series[0];
+              const lastPoint = series[series.length - 1];
+              const maxPoint = series.reduce<typeof series[number] | null>((best, p) => (best == null || p.m > best.m ? p : best), null);
+              const p99Val = metrics.users.p99;
+              const p99Point = series.reduce<typeof series[number] | null>((best, p) => (best == null || Math.abs(p.v - p99Val) < Math.abs(best.v - p99Val) ? p : best), null);
+              return (
+                <tr>
+                  <td className="text-muted-foreground font-bold" title="Users: distinct client IPs seen in requests per time bucket, sourced from App Insights (Frontend only). Average/P99/Max are computed across buckets, not across individual requests.">Users</td>
+                  <td className="text-right" style={{ color: '#a371f7' }} title={firstPoint && lastPoint ? `Across ${series.length} time buckets from ${fmtSgt(firstPoint.t)} to ${fmtSgt(lastPoint.t)} SGT` : undefined}>{metrics.users.avg}</td>
+                  <td className="text-right" style={{ color: '#a371f7' }} title={p99Point ? `Closest bucket at ${fmtSgt(p99Point.t)} SGT (${p99Point.v} users)` : undefined}>{metrics.users.p99}</td>
+                  <td className="text-right" style={{ color: '#a371f7' }} title={maxPoint ? `Peak at ${fmtSgt(maxPoint.t)} SGT` : undefined}>{metrics.users.max}</td>
+                </tr>
+              );
+            })()}
             {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
               const availPct = metrics.availability?.pct ?? null;
               const availColor = availPct == null ? 'var(--muted-foreground)' : availPct >= 99 ? '#3fb950' : availPct >= 95 ? '#d29922' : 'hsl(var(--destructive))';

@@ -478,10 +478,31 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         }).join('');
 
         const tableHtml = `<table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:13px"><thead>${thead}</thead><tbody>${rows}</tbody></table>`;
+
+        // Individual-run breakdown per URL (only present in Average run mode) — mirrors the on-screen "Individual Runs" tables.
+        const runsTableHtml = (history: PageSpeedInsightResult[] | undefined, label: string): string => {
+            if (!history?.length) return '';
+            const runHead = `<tr>${['Run', ...metricDefs.map(m => m.label)].map(h => `<th style="background:#f6f6f6;text-align:left;padding:4px 6px;border:1px solid #ddd;font-size:12px">${h}</th>`).join('')}</tr>`;
+            const runRows = history.map((run, idx) => {
+                let tds = td(`#${idx + 1} ${formatRunTime(run.fetchTime)}`);
+                for (const m of metricDefs) tds += td(run[m.key]?.displayValue ?? '-');
+                return `<tr>${tds}</tr>`;
+            }).join('');
+            return `<p style="font-size:12px;color:#666;margin:6px 0 2px">${label} — Individual Runs</p><table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:12px;margin-bottom:6px"><thead>${runHead}</thead><tbody>${runRows}</tbody></table>`;
+        };
+        const runsHtmlByUrl = config.urls.map((url, i) => {
+            const r1 = getSlot1(i) || undefined;
+            const r2 = getSlot2(i) || undefined;
+            const h1 = runsTableHtml(r1?.runHistory, config.beforeLabel);
+            const h2 = single ? '' : runsTableHtml(r2?.runHistory, config.afterLabel);
+            if (!h1 && !h2) return '';
+            return `<p style="font-weight:600;font-size:13px;margin:10px 0 2px">${url}</p>${h1}${h2}`;
+        }).join('');
+
         const analysisMd = analyses[-1]?.status === 'done' ? analyses[-1]!.markdown : '';
         const analysisHtml = analysisMd ? `<br/>${marked.parse(analysisMd, { async: false }) as string}` : '';
         const title = `${config.strategy.toUpperCase()} — PageSpeed${config.comparisonMode ? ` (${config.beforeLabel} vs ${config.afterLabel})` : ''}`;
-        const html = `<h3>${title}</h3>${tableHtml}${analysisHtml}`;
+        const html = `<h3>${title}</h3>${tableHtml}${runsHtmlByUrl}${analysisHtml}`;
 
         const plain = `${title}\n` + config.urls.map((url, i) => {
             const r1 = getSlot1(i) || undefined;
@@ -489,7 +510,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             const parts = metricDefs.map(m => single
                 ? `${m.label} ${r1?.[m.key]?.displayValue ?? '-'}`
                 : `${m.label} ${r1?.[m.key]?.displayValue ?? '-'} → ${r2?.[m.key]?.displayValue ?? '-'}`);
-            return `${url}: ${parts.join(', ')}`;
+            const runsLine = (history: PageSpeedInsightResult[] | undefined, label: string): string => {
+                if (!history?.length) return '';
+                return '\n  ' + label + ' runs: ' + history.map((run, idx) =>
+                    `#${idx + 1} [${metricDefs.map(m => `${m.label} ${run[m.key]?.displayValue ?? '-'}`).join(', ')}]`
+                ).join('; ');
+            };
+            return `${url}: ${parts.join(', ')}` + runsLine(r1?.runHistory, config.beforeLabel) + (single ? '' : runsLine(r2?.runHistory, config.afterLabel));
         }).join('\n') + (analysisMd ? `\n\n${analysisMd}` : '');
 
         const copy = navigator.clipboard.write([
