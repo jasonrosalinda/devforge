@@ -287,6 +287,16 @@ const [newMonitorId, setNewMonitorId] = useState('');
                       className="text-xs"
                     />
                   </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Server name</Label>
+                    <Input
+                      value={editingApp.dbServerName ?? ''}
+                      onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.dbServerName = v; else delete n.dbServerName; return n; }); }}
+                      placeholder="myapp-sqlserver"
+                      className="text-xs"
+                    />
+                    <span className="text-[10px] text-muted-foreground">Azure SQL logical server (without .database.windows.net). Both fields required for DB CPU/memory metrics.</span>
+                  </div>
                 </div>
 
                 <Separator />
@@ -346,7 +356,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   <span className="font-medium">{app.resourceGroup || app.name}</span>
                   <span className="text-muted-foreground">{app.type === 'appservice' ? 'App Service' : 'Container App'} · {app.name}{app.apiName && ` · ${app.apiName}`}</span>
                   {app.dbName && (
-                    <span className="text-muted-foreground">DB: {app.dbName}</span>
+                    <span className="text-muted-foreground">DB: {app.dbName}{app.dbServerName ? ` @ ${app.dbServerName}` : ''}</span>
                   )}
                 </div>
                 <div className="flex gap-1">

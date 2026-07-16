@@ -19,6 +19,8 @@ export interface AppMetrics {
   memory: MetricSeries
   cpuUnit: string
   memUnit: string
+  dbCpu?: MetricSeries | null
+  dbMemory?: MetricSeries | null
   connections?: MetricSeries | null
   apiConnections?: MetricSeries | null
   users?: MetricSeries | null

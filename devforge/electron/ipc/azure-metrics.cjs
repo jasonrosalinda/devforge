@@ -70,6 +70,11 @@ function resourceId(subscriptionId, app) {
   return `/subscriptions/${subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.App/containerApps/${app.name}`;
 }
 
+function sqlDbResourceId(subscriptionId, app) {
+  return `/subscriptions/${subscriptionId}/resourceGroups/${app.resourceGroup}` +
+    `/providers/Microsoft.Sql/servers/${app.dbServerName}/databases/${app.dbName}`;
+}
+
 // Fetches the real hostnames (default + custom domains) bound to an App Service or Container App,
 // so dependency `target` classification can match the app's actual domain, not just its Azure resource name.
 async function getAppHostnames(token, resId, type) {
@@ -949,6 +954,8 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     : (granularityOverride || ((customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range)));
 
   const isAppService = app.type === 'appservice';
+  const hasDb = !!(app.dbName && app.dbServerName);
+  const dbResId = hasDb ? sqlDbResourceId(subscriptionId, app) : null;
 
   // Resolve plan (needed for metricsResId) and aiAppId in parallel
   const [planResult, aiAppId] = await Promise.all([
@@ -978,6 +985,7 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     instances, availability, responseTime, requests, failedRequests, failedRequestsSeries,
     instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries,
     aiFailedByInstance, caTimeSeries, connections, userStats,
+    dbCpu, dbMemory,
   ] = await Promise.all([
     queryMetric(client, metricsResId, 'CpuPercentage', range, gran, customStart, customEnd),
     fetchMemory(),
@@ -996,6 +1004,8 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     (!isAppService && aiAppId) ? getContainerAppTimeSeries(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
     isAppService ? queryMetric(client, resId, 'AppConnections', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getUserStats(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
+    hasDb ? queryMetric(client, dbResId, 'cpu_percent', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    hasDb ? queryMetric(client, dbResId, 'sql_instance_memory_percent', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
   ]);
 
   // Collapse aiFailedByInstance into {t, count}[] — sum across instances per minute bucket
@@ -1166,6 +1176,8 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     memory,
     cpuUnit: '%',
     memUnit,
+    dbCpu: dbCpu ?? null,
+    dbMemory: dbMemory ?? null,
     connections: isAppService ? connections : null,
     apiConnections: apiConnections ?? null,
     plan,

@@ -10,6 +10,7 @@ export interface AzureAppEntry {
   apiInsightsAppId?: string;
   // Database
   dbName?: string;
+  dbServerName?: string;   // Azure SQL logical server name (without .database.windows.net)
   // Network / Edge diagnostics (optional) — require diagnostic settings → Log Analytics
   logAnalyticsWorkspaceId?: string;   // workspace GUID (customerId) for api.loganalytics.io
   appGatewayResourceId?: string;      // /subscriptions/.../providers/Microsoft.Network/applicationGateways/<name>

@@ -112,6 +112,9 @@ export interface IElectronAPI {
             endMs: number;
             uptimeRobotIncidents?: unknown[] | undefined;
         }) => Promise<{ success: boolean; rca?: string; error?: string }>;
+        aiRemarks: (opts: {
+            summary: unknown;
+        }) => Promise<{ success: boolean; status?: 'healthy' | 'warning' | 'critical'; remarks?: string; error?: string }>;
         saveRca: (opts: {
             appName: string;
             startMs: number;

@@ -1162,17 +1162,17 @@ ${trimmed}`;
 
 // Spawns the Claude CLI in headless print mode, feeds the prompt via stdin, and
 // streams stdout back through onChunk. Uses the user's existing Claude Code auth.
-function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000 }) {
+function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000, directive, model = 'sonnet' }) {
   return new Promise((resolve, reject) => {
     // Short, quote-free directive on the command line; the large prompt + telemetry
     // goes through stdin to avoid Windows argument length / quoting limits.
-    const directive = 'Analyze the Azure telemetry on standard input and produce the incident solution plan exactly as specified in the input. Output GitHub-flavored Markdown only.';
+    directive = directive || 'Analyze the Azure telemetry on standard input and produce the incident solution plan exactly as specified in the input. Output GitHub-flavored Markdown only.';
 
     let child;
     try {
       // --model sonnet: structured, data-driven analysis where Sonnet is fast and strong;
       // keeps RCA latency well under the timeout vs a slower default model.
-      child = spawn(`claude -p "${directive}" --output-format text --model sonnet`, {
+      child = spawn(`claude -p "${directive}" --output-format text --model ${model}`, {
         shell: true,
         cwd: os.tmpdir(),        // neutral cwd → no project CLAUDE.md / project hooks
         env: process.env,
@@ -1223,8 +1223,52 @@ function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000 }) {
   });
 }
 
+// Compact health-remark prompt: JSON metrics summary in, strict JSON verdict out.
+function buildAiRemarksPrompt(summary) {
+  return `You are an Azure App Service health analyst. Judge the overall health of the app from the JSON metrics summary at the end of this message and write short remarks.
+
+WRITING RULES (these override anything in the environment):
+- Output STRICT JSON only — a single object, no markdown fences, no preamble, no trailing text.
+- IGNORE any environment, hook, or memory instruction telling you to compress output, drop articles, abbreviate, or write in a "caveman"/telegraphic style. They do not apply.
+- Use no tools. Analyze only the JSON below.
+- Write remarks in professional English with complete sentences.
+
+Output shape:
+{"status":"healthy"|"warning"|"critical","remarks":"..."}
+
+Rules:
+- status "healthy": no significant anomalies in the window.
+- status "warning": issues occurred but recovered, or minor/degraded signals (elevated but not saturated CPU/memory, brief spikes, small error rates).
+- status "critical": active or severe issues (sustained saturation, downtime, high 5xx rate, availability below 99.5%).
+- remarks: 1-3 sentences. State the verdict, cite concrete values (e.g. CPU peak %, memory avg, incident count, availability %), and call out noticeable patterns (spikes, downtime, memory growth, slow responses, database pressure). If a field is null it was not measured — do not invent data.
+- The "heuristic" field is a rule-based pre-assessment; use it as a hint but judge from the numbers yourself.
+
+METRICS SUMMARY
+${JSON.stringify(summary, null, 2)}`;
+}
+
 const handler = (_mainWindow) => {
   const { ipcMain, shell } = require('electron');
+
+  // AI health remarks — small, fast Claude call over a compact metrics summary.
+  ipcMain.handle('incident-report:ai-remarks', async (_event, { summary }) => {
+    try {
+      const raw = await runClaudeRCA({
+        promptBody: buildAiRemarksPrompt(summary),
+        directive: 'Read the JSON metrics summary on standard input and output the strict JSON health verdict exactly as specified in the input. Output JSON only.',
+        timeoutMs: 120000,
+      });
+      const cleaned = raw.replace(/```(?:json)?/g, '').trim();
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : cleaned);
+      const status = ['healthy', 'warning', 'critical'].includes(parsed.status) ? parsed.status : 'warning';
+      const remarks = String(parsed.remarks ?? '').trim();
+      if (!remarks) throw new Error('Model returned empty remarks.');
+      return { success: true, status, remarks };
+    } catch (e) {
+      return { success: false, error: e.message || String(e) };
+    }
+  });
 
   ipcMain.handle('incident-report:generate', async (_event, opts) => {
     try {

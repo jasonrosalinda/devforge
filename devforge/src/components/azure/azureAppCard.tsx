@@ -181,6 +181,10 @@ function snatScore(opts: {
   };
 }
 
+const DB_COLORS = { avg: '#5eead4', max: '#2dd4bf' } as const; // teal — distinct from CPU purple / Memory orange
+
+const AI_STATUS_COLORS = { healthy: '#3fb950', warning: '#d29922', critical: '#f85149' } as const;
+
 const SNAT_FACTOR_COLORS = {
   socket:  '#06b6d4',
   depFail: '#ec4899',
@@ -222,7 +226,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [availExpanded, setAvailExpanded] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [visibleBlocks, setVisibleBlocks] = useState({
-    remarks: true, cpu: true, memory: true, response: true, users: true, requests: true,
+    remarks: true, cpu: true, memory: true, database: true, response: true, users: true, requests: true,
     dependencies: true, exceptions: true, instances: true, uptimerobot: true,
     frontend: true, api: true, snatRisk: true,
   });
@@ -262,6 +266,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     setDepsAPIExpanded(false);
     setSelectedErrType(null);
     setSelectedErrAPIType(null);
+    setAiRemark(null);
   }, [metrics.cpu.avg]);
 
 
@@ -389,6 +394,46 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
 
   const [isTeamsCopying, setIsTeamsCopying] = useState(false);
 
+  // AI health remarks — Claude verdict over a compact metrics summary
+  const [aiRemark, setAiRemark] = useState<{ status: 'healthy' | 'warning' | 'critical'; remarks: string } | null>(null);
+  const [aiRemarkLoading, setAiRemarkLoading] = useState(false);
+
+  const generateAiRemarks = async () => {
+    if (aiRemarkLoading) return;
+    setAiRemarkLoading(true);
+    try {
+      const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
+      const heuristic = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
+      const summary = {
+        app: metrics.label || appKey,
+        rangeStart: rangeStart ?? metrics.cpu.series[0]?.t ?? null,
+        rangeEnd: rangeEnd ?? metrics.cpu.series.at(-1)?.t ?? null,
+        cpu: { avg: metrics.cpu.avg, p99: metrics.cpu.p99, max: metrics.cpu.max, unit: '%' },
+        memory: { avg: metrics.memory.avg, p99: metrics.memory.p99, max: metrics.memory.max, unit: metrics.memUnit },
+        dbCpu: (metrics.dbCpu?.series?.length ?? 0) > 0 ? { avg: metrics.dbCpu!.avg, p99: metrics.dbCpu!.p99, max: metrics.dbCpu!.max, unit: '%' } : null,
+        dbMemory: (metrics.dbMemory?.series?.length ?? 0) > 0 ? { avg: metrics.dbMemory!.avg, p99: metrics.dbMemory!.p99, max: metrics.dbMemory!.max, unit: '%' } : null,
+        responseTimeSec: metrics.responseTime ? { avg: metrics.responseTime.avg, p99: metrics.responseTime.p99 ?? null, max: metrics.responseTime.max } : null,
+        availabilityPct: metrics.availability?.pct ?? null,
+        requestsTotal: metrics.requests?.total ?? null,
+        failedRequestsTotal: metrics.failedRequests?.total ?? null,
+        uptimeRobot: urMonitors.length > 0 ? {
+          incidents: downLogs.length,
+          downtimeMins: Math.round(downLogs.reduce((s, l) => s + l.duration, 0) / 60),
+        } : null,
+        planSku: metrics.plan?.sku ?? null,
+        heuristic: heuristic.text || null,
+      };
+      const result = await window.electronAPI.incidentReport.aiRemarks({ summary });
+      if (!result.success || !result.remarks) throw new Error(result.error ?? 'AI remarks failed');
+      setAiRemark({ status: result.status ?? 'warning', remarks: result.remarks });
+      toast.success('AI remarks generated');
+    } catch (e: any) {
+      toast.error('AI remarks failed', { description: e?.message });
+    } finally {
+      setAiRemarkLoading(false);
+    }
+  };
+
   const copyForTeams = async () => {
     const card = cardRef.current;
     if (!card || isCopying || isTeamsCopying) return;
@@ -403,9 +448,12 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     const endLabel = endRaw ? fmtFullSgt(new Date(endRaw)) : '—';
     const appName = metrics.label || appKey;
 
-    const { text: remarksText, severity } = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
+    const heuristicRemarks = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
     const severityColor: Record<string, string> = { ok: '#3fb950', warning: '#d29922', critical: '#f85149' };
-    const remarksColor = severityColor[severity] ?? '#333';
+    const remarksText = aiRemark ? aiRemark.remarks : heuristicRemarks.text;
+    const remarksColor = aiRemark
+      ? AI_STATUS_COLORS[aiRemark.status]
+      : (severityColor[heuristicRemarks.severity] ?? '#333');
 
     const rows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
     if (visibleBlocks.cpu) rows.push({
@@ -415,6 +463,14 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     if (visibleBlocks.memory) rows.push({
       name: 'Memory',
       avg: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, p99: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, max: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`,
+    });
+    if (visibleBlocks.database && (metrics.dbCpu?.series?.length ?? 0) > 0) rows.push({
+      name: 'DB CPU',
+      avg: `${(+metrics.dbCpu!.avg).toFixed(2)}%`, p99: `${(+metrics.dbCpu!.p99).toFixed(2)}%`, max: `${(+metrics.dbCpu!.max).toFixed(2)}%`,
+    });
+    if (visibleBlocks.database && (metrics.dbMemory?.series?.length ?? 0) > 0) rows.push({
+      name: 'DB Memory',
+      avg: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, p99: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, max: `${(+metrics.dbMemory!.max).toFixed(2)}%`,
     });
     if (visibleBlocks.uptimerobot && urMonitors.length > 0) {
       const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
@@ -691,7 +747,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
           {([
             { tag: 'Frontend',  show: true,   ai: feHasInsights },
             { tag: 'API', show: hasApi,  ai: apiHasInsights },
-            { tag: 'DB',  show: hasDb,   ai: false },
+            { tag: 'DB',  show: hasDb,   ai: (metrics.dbCpu?.series?.length ?? 0) > 0 || (metrics.dbMemory?.series?.length ?? 0) > 0 },
           ] as const).filter(t => t.show).map(({ tag, ai }) => (
             <span key={tag} className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{
               background: ai ? 'rgba(88,166,255,0.12)' : 'rgba(255,255,255,0.06)',
@@ -719,6 +775,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 { key: 'remarks',      label: 'Remarks' },
                 { key: 'cpu',          label: 'CPU' },
                 { key: 'memory',       label: 'Memory' },
+                { key: 'database',     label: 'Database' },
                 { key: 'response',     label: 'Response' },
                 { key: 'users',        label: 'Users' },
                 { key: 'requests',     label: 'Requests' },
@@ -1219,6 +1276,39 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             </tbody>
           </table>
           </div>
+
+          {visibleBlocks.database && ((metrics.dbCpu?.series?.length ?? 0) > 0 || (metrics.dbMemory?.series?.length ?? 0) > 0) && (
+          <div className="rounded-md border border-border overflow-hidden">
+          <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1" style={{ tableLayout: 'fixed' }}><colgroup><col style={{ width: '40%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /></colgroup>
+            <thead>
+              <tr className="text-muted-foreground font-bold">
+                <td>Database</td>
+                <td className="text-right">Average</td>
+                <td className="text-right">P99</td>
+                <td className="text-right">Max</td>
+              </tr>
+            </thead>
+            <tbody>
+            {(metrics.dbCpu?.series?.length ?? 0) > 0 && (
+              <tr>
+                <td className="text-muted-foreground font-bold" title="DB CPU: average and max CPU utilization of the Azure SQL database (vCore/serverless), sourced from Azure Monitor cpu_percent metric.">CPU</td>
+                <td className="text-right" style={{ color: DB_COLORS.avg }}>{(+metrics.dbCpu!.avg).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbCpu!.p99).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbCpu!.max).toFixed(2)}%</td>
+              </tr>
+            )}
+            {(metrics.dbMemory?.series?.length ?? 0) > 0 && (
+              <tr>
+                <td className="text-muted-foreground font-bold" title="DB Memory: average and max memory utilization of the Azure SQL instance, sourced from Azure Monitor sql_instance_memory_percent metric.">Memory</td>
+                <td className="text-right" style={{ color: DB_COLORS.avg }}>{(+metrics.dbMemory!.avg).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbMemory!.p99).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbMemory!.max).toFixed(2)}%</td>
+              </tr>
+            )}
+            </tbody>
+          </table>
+          </div>
+          )}
 
           {(feHasInsights || metrics.connections != null) && visibleBlocks.frontend && (
           <div className="rounded-md border border-border overflow-hidden">
@@ -2550,7 +2640,27 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
 
       {visibleBlocks.remarks && (
         <div className="px-4 pt-3 pb-3" data-remarks>
-          <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} />
+          <div className="flex items-start gap-2">
+            <div className="flex-1 min-w-0">
+              {aiRemark ? (
+                <div className="text-xs">
+                  <span className="text-muted-foreground font-bold">Remarks (AI): </span>
+                  <span style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>{aiRemark.remarks}</span>
+                </div>
+              ) : (
+                <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} />
+              )}
+            </div>
+            <button
+              onClick={generateAiRemarks}
+              disabled={aiRemarkLoading}
+              className="p-1 rounded hover:bg-muted flex-shrink-0 disabled:opacity-50"
+              title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
+              data-html2canvas-ignore="true"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-blue-400' : 'text-muted-foreground'}`} />
+            </button>
+          </div>
         </div>
       )}
 
