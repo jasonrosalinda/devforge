@@ -394,24 +394,80 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     if (!card || isCopying || isTeamsCopying) return;
     setIsTeamsCopying(true);
 
+    const chartEl = (card.querySelector('[data-teams-chart]') as HTMLElement | null) ?? card;
+
+    const fmtFullSgt = (d: Date) => d.toLocaleString('en-GB', {
+      timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    }) + ' SGT';
+    const endRaw = rangeEnd ?? metrics.cpu.series.at(-1)?.t;
+    const endLabel = endRaw ? fmtFullSgt(new Date(endRaw)) : '—';
+    const appName = metrics.label || appKey;
+
     const { text: remarksText, severity } = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
     const severityColor: Record<string, string> = { ok: '#3fb950', warning: '#d29922', critical: '#f85149' };
-    const color = severityColor[severity] ?? '#333';
+    const remarksColor = severityColor[severity] ?? '#333';
 
-    const originalRemarks = card.querySelector('[data-remarks]') as HTMLElement | null;
-    if (originalRemarks) originalRemarks.setAttribute('data-html2canvas-ignore', 'true');
+    const rows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
+    if (visibleBlocks.cpu) rows.push({
+      name: 'CPU',
+      avg: `${(+metrics.cpu.avg).toFixed(2)}%`, p99: `${(+metrics.cpu.p99).toFixed(2)}%`, max: `${(+metrics.cpu.max).toFixed(2)}%`,
+    });
+    if (visibleBlocks.memory) rows.push({
+      name: 'Memory',
+      avg: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, p99: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, max: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`,
+    });
+    if (visibleBlocks.uptimerobot && urMonitors.length > 0) {
+      const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
+      const totalIncidents = downLogs.length;
+      const totalDownSec = downLogs.reduce((s, l) => s + l.duration, 0);
+      const firstT = metrics.cpu.series[0]?.t;
+      const lastT = metrics.cpu.series.at(-1)?.t;
+      const spanSec = firstT && lastT ? (new Date(lastT).getTime() - new Date(firstT).getTime()) / 1000 : 0;
+      const uptimePct = spanSec > 0 ? Math.round((1 - totalDownSec / spanSec) * 10000) / 100 : null;
+      rows.push({
+        name: 'UptimeRobot',
+        avg: '—',
+        p99: `${totalIncidents} incident${totalIncidents !== 1 ? 's' : ''}`,
+        max: uptimePct != null ? `${uptimePct.toFixed(2)}% uptime` : '—',
+      });
+    }
 
     try {
       const html2canvas = await loadHtml2Canvas();
-      const canvas: HTMLCanvasElement = await html2canvas(card, {
+      const canvas: HTMLCanvasElement = await html2canvas(chartEl, {
         backgroundColor: '#09090b', scale: 2, logging: false, useForeignObject: false,
       });
       const imageBlob = await new Promise<Blob>((resolve, reject) =>
         canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png'),
       );
       const dataUrl = canvas.toDataURL('image/png');
-      const htmlBody = `<div style="display:block;"><div style="display:block;"><img src="${dataUrl}" style="width:100%;display:block;"/></div><div style="display:block;margin-top:8px;font-family:sans-serif;font-size:13px;"><b style="color:#555;">Remarks: </b><b style="color:${color};">${remarksText || '—'}</b></div></div>`;
-      const plainText = `Remarks: ${remarksText || '—'}`;
+
+      const tableRows = rows.map(r =>
+        `<tr><td style="padding:4px 10px;"><b>${r.name}</b></td><td align="right" style="padding:4px 10px;">${r.avg}</td><td align="right" style="padding:4px 10px;">${r.p99}</td><td align="right" style="padding:4px 10px;">${r.max}</td></tr>`,
+      ).join('');
+      const htmlBody =
+        `<div style="display:block;font-family:sans-serif;font-size:13px;">` +
+        `<p style="font-weight:700;font-size:14px;margin:0;">Health Check Status - ${endLabel}</p>` +
+        `<p style="margin:0;">App Service Plan: <b>${appName}</b></p>` +
+        `<p style="margin:0;">&nbsp;</p>` +
+        `<p style="margin:0;"><img src="${dataUrl}" style="width:100%;display:block;"/></p>` +
+        `<p style="margin:0;">&nbsp;</p>` +
+        `<table border="1" cellspacing="0" style="border-collapse:collapse;font-family:sans-serif;font-size:13px;">` +
+        `<tr><td style="padding:4px 10px;"><b>Metrics</b></td><td align="right" style="padding:4px 10px;"><b>Average</b></td><td align="right" style="padding:4px 10px;"><b>P99</b></td><td align="right" style="padding:4px 10px;"><b>Max</b></td></tr>` +
+        tableRows +
+        `</table>` +
+        `<p style="margin:0;">&nbsp;</p>` +
+        `<p style="margin:0;"><b style="color:#555;">Remarks: </b><b style="color:${remarksColor};">${remarksText || '—'}</b></p>` +
+        `</div>`;
+      const plainText = [
+        `Health Check Status - ${endLabel}`,
+        `App Service Plan: ${appName}`,
+        '',
+        'Metrics | Average | P99 | Max',
+        ...rows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`),
+        '',
+        `Remarks: ${remarksText || '—'}`,
+      ].join('\n');
 
       await navigator.clipboard.write([
         new ClipboardItem({
@@ -420,10 +476,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
           'text/plain': new Blob([plainText], { type: 'text/plain' }),
         }),
       ]);
-    } catch (err) {
+      toast.success('Copied for Teams');
+    } catch (err: any) {
       console.error('Copy for Teams failed:', err);
+      toast.error('Copy for Teams failed', { description: err?.message });
     } finally {
-      if (originalRemarks) originalRemarks.removeAttribute('data-html2canvas-ignore');
       setIsTeamsCopying(false);
     }
   };
@@ -736,7 +793,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
             onClick={copyForTeams}
             style={{ visibility: (isCopying || isTeamsCopying) ? 'hidden' : 'visible' }}
-            title="Copy for Teams (image + remarks text)"
+            title="Copy for Teams (status header + chart image + metrics table)"
             data-html2canvas-ignore="true"
           >
             <Share2 className="w-3.5 h-3.5" />
@@ -757,16 +814,18 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
         </div>
       )}
       {/* Chart — edge to edge */}
-      <CombinedChart
-        cpu={metrics.cpu}
-        memory={metrics.memory}
-        downtimeIntervals={downtimeIntervals}
-        urDowntimeIntervals={urDowntimeIntervals}
-        availabilitySeries={undefined}
-        instanceHealthSeries={null}
-        apiInstanceHealthSeries={null}
-        loading={false}
-      />
+      <div data-teams-chart>
+        <CombinedChart
+          cpu={metrics.cpu}
+          memory={metrics.memory}
+          downtimeIntervals={downtimeIntervals}
+          urDowntimeIntervals={urDowntimeIntervals}
+          availabilitySeries={undefined}
+          instanceHealthSeries={null}
+          apiInstanceHealthSeries={null}
+          loading={false}
+        />
+      </div>
 
       {/* Metrics + Downtime incidents */}
       <div className="px-4 pt-3 pb-3 text-xs font-medium flex flex-col gap-3">
