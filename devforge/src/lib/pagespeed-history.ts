@@ -28,6 +28,8 @@ export interface PageSpeedHistorySnapshot {
     config: PageSpeedConfiguration; // stored without apiKey
     desktop: StrategySnapshot;
     mobile: StrategySnapshot;
+    // Page-level Claude analysis (Desktop + Mobile combined); absent on older entries.
+    pageAnalysis?: { markdown: string } | null;
 }
 
 export function loadHistory(): PageSpeedHistorySnapshot[] {

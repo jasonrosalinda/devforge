@@ -1,5 +1,5 @@
 import { PageSpeedResults, type PageSpeedResultsHandle } from "@/components/pagespeed/pagespeed-result";
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import PageSpeedConfig from "@/components/pagespeed/pagespeed-config";
 import PageSpeedHistoryDropdown from "@/components/pagespeed/pagespeed-history-dropdown";
 import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
@@ -17,9 +17,11 @@ import {
 import { useSettings } from "@/context/settings-context";
 import { Button, Toast } from "@/components/ui";
 import { isNullOrEmpty } from "@shared/utils/stringHelper";
-import { Loader2, Save, Sparkles, Table as TableIcon } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2, RotateCw, Save, Sparkles, Table as TableIcon } from "lucide-react";
 import { SiPagespeedinsights } from "react-icons/si";
 import { PageHeader } from "@/components/layout/page-header";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { marked } from "marked";
 
 type ResultsBundle = ReturnType<PageSpeedResultsHandle["getResults"]>;
 type AuditSlot = ResultsBundle["results1"][number];
@@ -78,9 +80,51 @@ export default function PageSpeedResultPage() {
     const canAnalyze = desktopConfig.urls.length > 0 &&
         (!desktopConfig.browserMode ? !isNullOrEmpty(desktopConfig.apiKey) : true);
 
-    const hasResults =
-        (desktopRef.current?.getResults().results1.some(r => r && r !== null) ?? false) ||
-        (mobileRef.current?.getResults().results1.some(r => r && r !== null) ?? false);
+    // Bumped by children whenever their results change, so hasResults (read from refs)
+    // is re-evaluated — refs alone don't trigger a parent re-render.
+    const [, setResultsTick] = useState(0);
+    const onResultsChange = useCallback(() => setResultsTick(t => t + 1), []);
+
+    // Page-level Claude analysis covering Desktop + Mobile together.
+    const [pageAnalysis, setPageAnalysis] = useState<{ status: 'running' | 'done' | 'error'; markdown: string; error: string | null } | null>(null);
+    const [pageAnalysisOpen, setPageAnalysisOpen] = useState(true);
+
+    const runPageAnalysis = async () => {
+        const d = desktopRef.current?.getAnalysisSummary() ?? '';
+        const m = mobileRef.current?.getAnalysisSummary() ?? '';
+        if (!d && !m) {
+            toast.warning('Run Desktop and/or Mobile audits first');
+            return;
+        }
+        const summary = [
+            'Combined Desktop + Mobile PageSpeed results. Cover BOTH strategies and call out where they diverge (e.g. mobile regresses while desktop improves).',
+            d ? `# DESKTOP\n\n${d}` : '',
+            m ? `# MOBILE\n\n${m}` : '',
+        ].filter(Boolean).join('\n\n====\n\n');
+
+        setPageAnalysis({ status: 'running', markdown: '', error: null });
+        setPageAnalysisOpen(true);
+        const unsubscribe = window.electronAPI.pagespeedInsight.onAnalyzeChunk(({ chunk }) => {
+            setPageAnalysis(prev => (prev && prev.status === 'running') ? { ...prev, markdown: prev.markdown + chunk } : prev);
+        });
+        try {
+            const res = await window.electronAPI.pagespeedInsight.analyze({ url: 'Desktop + Mobile', summary });
+            setPageAnalysis(res.success
+                ? { status: 'done', markdown: res.analysis ?? '', error: null }
+                : { status: 'error', markdown: '', error: res.error ?? 'Analysis failed.' });
+        } catch (err) {
+            setPageAnalysis({ status: 'error', markdown: '', error: err instanceof Error ? err.message : String(err) });
+        } finally {
+            unsubscribe();
+        }
+    };
+
+    const slotHasAny = (ref: React.RefObject<PageSpeedResultsHandle | null>): boolean => {
+        const r = ref.current?.getResults();
+        if (!r) return false;
+        return r.results1.some(Boolean) || r.results2.some(Boolean);
+    };
+    const hasResults = slotHasAny(desktopRef) || slotHasAny(mobileRef);
 
     const saveToHistory = () => {
         const desktop = desktopRef.current?.getResults();
@@ -94,6 +138,9 @@ export default function PageSpeedResultPage() {
             config: { ...desktopConfig, apiKey: '' },
             desktop: toStrategySnapshot(desktop),
             mobile: toStrategySnapshot(mobile),
+            pageAnalysis: pageAnalysis?.status === 'done' && pageAnalysis.markdown
+                ? { markdown: pageAnalysis.markdown }
+                : null,
         };
         setHistory(saveSnapshot(snapshot));
         toast.success('Analysis saved to history');
@@ -106,6 +153,9 @@ export default function PageSpeedResultPage() {
         setRestoreToken(t => t + 1);
         desktopRef.current?.restoreSnapshot(snapshot.desktop);
         mobileRef.current?.restoreSnapshot(snapshot.mobile);
+        setPageAnalysis(snapshot.pageAnalysis?.markdown
+            ? { status: 'done', markdown: snapshot.pageAnalysis.markdown, error: null }
+            : null);
         toast.info('Restored analysis from ' + new Date(snapshot.savedAt).toLocaleString());
     };
 
@@ -174,12 +224,32 @@ export default function PageSpeedResultPage() {
                 return `<td rowspan="${rowCount}" style="padding:4px 6px;border:1px solid #999;font-size:12px;vertical-align:top">${url}</td>`;
             };
 
+            // Values appearing in BOTH before and after run sets for a metric (any run index)
+            // get highlighted — same jitter-spotting rule as the per-strategy Copy for Teams.
+            const matchedByStrategy = slots.map(s => {
+                const map = new Map<MetricKey, Set<string>>();
+                if (!comparisonMode) return map;
+                const h1 = (s.before ? s.before.runHistory : undefined) ?? [];
+                const h2 = (s.after ? s.after.runHistory : undefined) ?? [];
+                if (!h1.length || !h2.length) return map;
+                for (const m of metricDefs) {
+                    const set1 = new Set(h1.map(run => run[m.key]?.displayValue).filter(Boolean) as string[]);
+                    const matches = new Set((h2.map(run => run[m.key]?.displayValue).filter(Boolean) as string[]).filter(v => set1.has(v)));
+                    if (matches.size) map.set(m.key, matches);
+                }
+                return map;
+            });
+            const HL = ';background:#fff3cd;color:#92400e;font-weight:600;font-style:italic';
+
             for (let r = 0; r < numRuns; r++) {
-                const rowHtml = slots.map(s => metricDefs.map(m => {
+                const rowHtml = slots.map((s, si) => metricDefs.map(m => {
                     const beforeRun = s.before ? s.before.runHistory?.[r] : undefined;
                     const afterRun = s.after ? s.after.runHistory?.[r] : undefined;
                     if (!comparisonMode) return td(cellText(beforeRun, m.key));
-                    return td(cellText(beforeRun, m.key)) + td(cellText(afterRun, m.key));
+                    const hl = (v: string) => (v !== '-' && matchedByStrategy[si]?.get(m.key)?.has(v)) ? HL : '';
+                    const bv = cellText(beforeRun, m.key);
+                    const av = cellText(afterRun, m.key);
+                    return td(bv, hl(bv)) + td(av, hl(av));
                 }).join('')).join('');
                 bodyRows.push(`<tr>${urlCell()}${rowHtml}</tr>`);
             }
@@ -204,7 +274,9 @@ export default function PageSpeedResultPage() {
             }
         });
 
-        const html = `<table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif">${headerRows}${bodyRows.join('')}</table>`;
+        const analysisMd = pageAnalysis?.status === 'done' ? pageAnalysis.markdown : '';
+        const analysisHtml = analysisMd ? `<br/>${marked.parse(analysisMd, { async: false }) as string}` : '';
+        const html = `<table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif">${headerRows}${bodyRows.join('')}</table>${analysisHtml}`;
 
         const plain = desktopConfig.urls.map((url, i) => {
             const parts = strategies.map(s => {
@@ -216,7 +288,7 @@ export default function PageSpeedResultPage() {
                 return `${s.label}: ${metrics}`;
             }).join(' | ');
             return `${url}: ${parts}`;
-        }).join('\n');
+        }).join('\n') + (analysisMd ? `\n\n${analysisMd}` : '');
 
         const copy = navigator.clipboard.write([
             new ClipboardItem({
@@ -256,16 +328,73 @@ export default function PageSpeedResultPage() {
                     onClear={onClearHistory}
                     disabled={isAuditing}
                 />
-                <Button variant="outline" onClick={saveToHistory} disabled={isAuditing || !hasResults}>
-                    <Save className="mr-1 h-4 w-4" />Save to history
-                </Button>
-                <Button variant="outline" onClick={copyAsExcelTable} disabled={isAuditing || !hasResults} title="Copy Desktop + Mobile comparison as an Excel-style table">
-                    <TableIcon className="mr-1 h-4 w-4" />Copy as Table
-                </Button>
                 <PageSpeedConfig configHasChanged={onConfigChanged} isAuditing={isAuditing} value={restoredConfig} restoreToken={restoreToken} />
             </div>
-            <PageSpeedResults ref={desktopRef} config={desktopConfig} onAuditingChange={setDesktopAuditing} />
-            <PageSpeedResults ref={mobileRef} config={mobileConfig} onAuditingChange={setMobileAuditing} />
+            <Card className="my-4">
+                <div className="flex items-center justify-between gap-2 px-6 pt-6">
+                    <Button variant="outline" onClick={saveToHistory} disabled={isAuditing || !hasResults}>
+                        <Save className="mr-1 h-4 w-4" />Save to history
+                    </Button>
+                    <div className="flex items-center gap-2">
+                        <Button variant="outline" onClick={copyAsExcelTable} disabled={isAuditing || !hasResults} title="Copy Desktop + Mobile comparison as an Excel-style table">
+                            <TableIcon className="mr-1 h-4 w-4" />Copy for Teams
+                        </Button>
+                        <Button variant="outline" onClick={runPageAnalysis} disabled={!hasResults || pageAnalysis?.status === 'running'} title="Claude analysis across Desktop + Mobile results">
+                            {pageAnalysis?.status === 'running'
+                                ? <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                : <Sparkles className="mr-1 h-4 w-4 text-primary" />}
+                            Claude Analysis
+                        </Button>
+                    </div>
+                </div>
+                {pageAnalysis && (
+                    <Card className="my-4 mx-6 shadow-none">
+                        <CardHeader>
+                            <CardTitle>
+                                <button
+                                    onClick={() => setPageAnalysisOpen(v => !v)}
+                                    className="flex w-full items-center gap-2 text-sm text-left hover:opacity-80 transition-opacity"
+                                >
+                                    <Sparkles className="h-4 w-4 text-primary" />
+                                    CLAUDE ANALYSIS — DESKTOP + MOBILE
+                                    <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${pageAnalysisOpen ? 'rotate-180' : ''}`} />
+                                </button>
+                            </CardTitle>
+                        </CardHeader>
+                        {pageAnalysisOpen && (
+                        <CardContent className="text-xs">
+                            {pageAnalysis.status === 'running' && (
+                                <div className="flex flex-col gap-2">
+                                    <div className="flex items-center gap-2 text-muted-foreground">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                                        {pageAnalysis.markdown ? 'Writing the performance analysis…' : 'Reviewing Desktop & Mobile results…'}
+                                    </div>
+                                    {pageAnalysis.markdown && (
+                                        <pre className="whitespace-pre-wrap border-t border-border pt-2 font-mono text-[11px] leading-relaxed text-foreground/80">{pageAnalysis.markdown}</pre>
+                                    )}
+                                </div>
+                            )}
+                            {pageAnalysis.status === 'error' && (
+                                <div className="flex flex-col items-start gap-2">
+                                    <div className="flex items-center gap-2 text-destructive">
+                                        <AlertTriangle className="h-4 w-4" />
+                                        <span>{pageAnalysis.error || 'Something went wrong.'}</span>
+                                    </div>
+                                    <Button variant="outline" size="sm" onClick={runPageAnalysis}>
+                                        <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
+                                    </Button>
+                                </div>
+                            )}
+                            {pageAnalysis.status === 'done' && (
+                                <div className="ps-analysis-content" dangerouslySetInnerHTML={{ __html: marked.parse(pageAnalysis.markdown, { async: false }) as string }} />
+                            )}
+                        </CardContent>
+                        )}
+                    </Card>
+                )}
+                <PageSpeedResults ref={desktopRef} config={desktopConfig} onAuditingChange={setDesktopAuditing} onResultsChange={onResultsChange} grouped />
+                <PageSpeedResults ref={mobileRef} config={mobileConfig} onAuditingChange={setMobileAuditing} onResultsChange={onResultsChange} grouped />
+            </Card>
         </>
     );
 }

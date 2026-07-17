@@ -29,11 +29,17 @@ export interface PageSpeedResultsHandle {
         analyses: Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>;
     };
     restoreSnapshot: (snapshot: StrategySnapshot) => void;
+    // Markdown-ish data summary of every audited URL (before/after, runs, insights,
+    // cross-run identical values) — feeds the page-level Desktop+Mobile AI analysis.
+    getAnalysisSummary: () => string;
 }
 
 interface PageSpeedResultsProps {
     config: PageSpeedConfiguration;
     onAuditingChange?: (isAuditing: boolean) => void;
+    onResultsChange?: () => void;
+    // Render as a chrome-less section so the parent can group strategies inside one Card.
+    grouped?: boolean;
 }
 
 // Inset box-shadow fakes borders on sticky cells — real borders get painted
@@ -71,7 +77,7 @@ const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedI
     return (
         <div className="mt-1">
             <button title="Toggle errors and warnings" onClick={() => setIsExpanded(!isExpanded)} className={`flex items-center text-xs hover:opacity-80 transition-opacity ${summaryColor}`}>
-                {expanded ? <ChevronDown size={14} className="mr-1 inline" /> : <ChevronRight size={14} className="mr-1 inline" />}
+                {expanded ? <ChevronDown size={14} className="mr-1 inline" data-html2canvas-ignore="true" /> : <ChevronRight size={14} className="mr-1 inline" data-html2canvas-ignore="true" />}
                 {warningCount > 0 && `${warningCount} warning(s)`}
                 {warningCount > 0 && errorCount > 0 && ' / '}
                 {errorCount > 0 && `${errorCount} error(s)`}
@@ -97,7 +103,7 @@ const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedI
     );
 };
 
-export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpeedResultsProps>(({ config, onAuditingChange }, ref) => {
+export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpeedResultsProps>(({ config, onAuditingChange, onResultsChange, grouped = false }, ref) => {
     const { audit, clearCache } = usePageSpeedInsight(config);
     const { elementRef, copyAsImage } = useCopyElementAsImage({
         fileNamePrefix: `pagespeed-result-${config.strategy}-${Date.now()}`,
@@ -112,6 +118,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [rerunningRuns, setRerunningRuns] = useState<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
     const [expandedInsights, setExpandedInsights] = useState<Set<string>>(new Set());
+    // Drawer Before/After cards — collapsed keys (default open).
+    const [collapsedRunCards, setCollapsedRunCards] = useState<Set<string>>(new Set());
+    const toggleRunCard = (key: string) => setCollapsedRunCards(prev => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        return next;
+    });
     const [analyses, setAnalyses] = useState<Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>>({});
     const abortControllerRef = useRef<AbortController | null>(null);
     const activeAuditsRef = useRef(0);
@@ -123,6 +136,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const isAuditing = auditing1 || auditing2;
     const isRetryingAny = retryingRows.size > 0;
     const timerActive = isAuditing || isRetryingAny;
+
+    // Let the parent re-evaluate results-dependent UI (e.g. header "Copy as Table" button)
+    // whenever this strategy's results change — refs alone don't trigger parent re-renders.
+    useEffect(() => {
+        onResultsChange?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [results1, results2]);
 
     useEffect(() => {
         if (!timerActive || !auditStart) return;
@@ -281,6 +301,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         cancelAudit: () => abortControllerRef.current?.abort(),
         getResults: () => ({ results1, results2, config, auditStart, auditEnd, times1, times2, analyses }),
         restoreSnapshot,
+        getAnalysisSummary: () => config.urls
+            .map((_, i) => (getSlot1(i) || getSlot2(i) ? buildAnalysisSummary(i) : null))
+            .filter(Boolean)
+            .join('\n\n---\n\n'),
     }));
 
     const retryRow = useCallback(async (
@@ -474,35 +498,53 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     if (showImp) tds += impCell(displayNum(r1?.[m.key]), displayNum(r2?.[m.key]));
                 }
             }
-            return `<tr>${tds}</tr>`;
+            let html = `<tr>${tds}</tr>`;
+
+            // Individual runs (Average run mode) — grouped under the URL as #N sub-rows,
+            // run values aligned to their Before/After columns.
+            const h1 = r1?.runHistory ?? [];
+            const h2 = single ? [] : (r2?.runHistory ?? []);
+            const runCount = Math.max(h1.length, h2.length);
+            if (runCount > 1) {
+                // Values appearing in BOTH before and after run sets for the same metric get highlighted,
+                // regardless of run index — spots identical measurements across the two runs.
+                const matchedByMetric = new Map<string, Set<string>>();
+                if (!single) {
+                    for (const m of metricDefs) {
+                        const set1 = new Set(h1.map(r => r?.[m.key]?.displayValue).filter(Boolean) as string[]);
+                        const vals2 = h2.map(r => r?.[m.key]?.displayValue).filter(Boolean) as string[];
+                        matchedByMetric.set(m.key, new Set(vals2.filter(v => set1.has(v))));
+                    }
+                }
+                const runCell = (v: string, metricKey: string): string => {
+                    const hl = v !== '-' && matchedByMetric.get(metricKey)?.has(v);
+                    return td(v, hl ? ';background:#fff3cd;color:#92400e;font-weight:600;font-style:italic' : ';color:#888');
+                };
+                for (let ri = 0; ri < runCount; ri++) {
+                    const run1 = h1[ri];
+                    const run2 = h2[ri];
+                    let rtds = td(`#${ri + 1}`, ';color:#888');
+                    for (const m of metricDefs) {
+                        const v1 = run1?.[m.key]?.displayValue ?? '-';
+                        if (single) rtds += td(v1, ';color:#888');
+                        else {
+                            const v2 = run2?.[m.key]?.displayValue ?? '-';
+                            rtds += runCell(v1, m.key) + runCell(v2, m.key);
+                            if (showImp) rtds += td('');
+                        }
+                    }
+                    html += `<tr>${rtds}</tr>`;
+                }
+            }
+            return html;
         }).join('');
 
         const tableHtml = `<table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:13px"><thead>${thead}</thead><tbody>${rows}</tbody></table>`;
 
-        // Individual-run breakdown per URL (only present in Average run mode) — mirrors the on-screen "Individual Runs" tables.
-        const runsTableHtml = (history: PageSpeedInsightResult[] | undefined, label: string): string => {
-            if (!history?.length) return '';
-            const runHead = `<tr>${['Run', ...metricDefs.map(m => m.label)].map(h => `<th style="background:#f6f6f6;text-align:left;padding:4px 6px;border:1px solid #ddd;font-size:12px">${h}</th>`).join('')}</tr>`;
-            const runRows = history.map((run, idx) => {
-                let tds = td(`#${idx + 1} ${formatRunTime(run.fetchTime)}`);
-                for (const m of metricDefs) tds += td(run[m.key]?.displayValue ?? '-');
-                return `<tr>${tds}</tr>`;
-            }).join('');
-            return `<p style="font-size:12px;color:#666;margin:6px 0 2px">${label} — Individual Runs</p><table style="border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:12px;margin-bottom:6px"><thead>${runHead}</thead><tbody>${runRows}</tbody></table>`;
-        };
-        const runsHtmlByUrl = config.urls.map((url, i) => {
-            const r1 = getSlot1(i) || undefined;
-            const r2 = getSlot2(i) || undefined;
-            const h1 = runsTableHtml(r1?.runHistory, config.beforeLabel);
-            const h2 = single ? '' : runsTableHtml(r2?.runHistory, config.afterLabel);
-            if (!h1 && !h2) return '';
-            return `<p style="font-weight:600;font-size:13px;margin:10px 0 2px">${url}</p>${h1}${h2}`;
-        }).join('');
-
         const analysisMd = analyses[-1]?.status === 'done' ? analyses[-1]!.markdown : '';
         const analysisHtml = analysisMd ? `<br/>${marked.parse(analysisMd, { async: false }) as string}` : '';
         const title = `${config.strategy.toUpperCase()} — PageSpeed${config.comparisonMode ? ` (${config.beforeLabel} vs ${config.afterLabel})` : ''}`;
-        const html = `<h3>${title}</h3>${tableHtml}${runsHtmlByUrl}${analysisHtml}`;
+        const html = `<h3>${title}</h3>${tableHtml}${analysisHtml}`;
 
         const plain = `${title}\n` + config.urls.map((url, i) => {
             const r1 = getSlot1(i) || undefined;
@@ -510,13 +552,28 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             const parts = metricDefs.map(m => single
                 ? `${m.label} ${r1?.[m.key]?.displayValue ?? '-'}`
                 : `${m.label} ${r1?.[m.key]?.displayValue ?? '-'} → ${r2?.[m.key]?.displayValue ?? '-'}`);
-            const runsLine = (history: PageSpeedInsightResult[] | undefined, label: string): string => {
-                if (!history?.length) return '';
-                return '\n  ' + label + ' runs: ' + history.map((run, idx) =>
-                    `#${idx + 1} [${metricDefs.map(m => `${m.label} ${run[m.key]?.displayValue ?? '-'}`).join(', ')}]`
-                ).join('; ');
-            };
-            return `${url}: ${parts.join(', ')}` + runsLine(r1?.runHistory, config.beforeLabel) + (single ? '' : runsLine(r2?.runHistory, config.afterLabel));
+            const h1 = r1?.runHistory ?? [];
+            const h2 = single ? [] : (r2?.runHistory ?? []);
+            const runCount = Math.max(h1.length, h2.length);
+            let runLines = '';
+            if (runCount > 1) {
+                const matched = new Map<string, Set<string>>();
+                if (!single) {
+                    for (const m of metricDefs) {
+                        const set1 = new Set(h1.map(r => r?.[m.key]?.displayValue).filter(Boolean) as string[]);
+                        const vals2 = h2.map(r => r?.[m.key]?.displayValue).filter(Boolean) as string[];
+                        matched.set(m.key, new Set(vals2.filter(v => set1.has(v))));
+                    }
+                }
+                const mark = (v: string, key: string) => (v !== '-' && matched.get(key)?.has(v)) ? `*${v}*` : v;
+                for (let ri = 0; ri < runCount; ri++) {
+                    const runParts = metricDefs.map(m => single
+                        ? `${m.label} ${h1[ri]?.[m.key]?.displayValue ?? '-'}`
+                        : `${m.label} ${mark(h1[ri]?.[m.key]?.displayValue ?? '-', m.key)} → ${mark(h2[ri]?.[m.key]?.displayValue ?? '-', m.key)}`);
+                    runLines += `\n  #${ri + 1}: ${runParts.join(', ')}`;
+                }
+            }
+            return `${url}: ${parts.join(', ')}` + runLines;
         }).join('\n') + (analysisMd ? `\n\n${analysisMd}` : '');
 
         const copy = navigator.clipboard.write([
@@ -609,6 +666,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 className="h-2.5 w-2.5 p-0"
                 disabled={isRetrying || isAuditing}
                 onClick={() => retryRow(index, setResults, slotKey)}
+                data-html2canvas-ignore="true"
             >
                 <RotateCcw className={`h-2 w-2 ${isRetrying ? 'animate-spin' : ''}`} />
             </Button>
@@ -945,7 +1003,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     ))}
                     {showRuns && <span className="text-[10px] text-muted-foreground">({formatRunsSeen(occurrence!.runs, occurrence!.total)})</span>}
                     {hasDetail && (
-                        <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     )}
                 </button>
                 {open && hasDetail && (
@@ -973,7 +1031,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     onClick={() => toggleInsight(groupKey)}
                     className="flex items-center gap-1 mb-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground"
                 >
-                    <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                    <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     {heading} ({items.length})
                 </button>
                 {open && (
@@ -996,15 +1054,17 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             SI: displayAudit.SI, LCP: displayAudit.LCP, CLS: displayAudit.CLS, TBT: displayAudit.TBT, FCP: displayAudit.FCP,
         };
         const visible = opportunities.filter(o =>
+            // Passing (green, score ≥ 0.9) insights are noise here — only surface actionable ones.
+            !(o.score != null && o.score >= 0.9) &&
             // *-insight findings (e.g. forced reflow) aren't tied to a metric column — always show them.
-            (o.auditKey ?? '').endsWith('-insight') ||
-            Object.keys(o.metricSavings ?? {}).some(m => metricShown[m]),
+            ((o.auditKey ?? '').endsWith('-insight') ||
+            Object.keys(o.metricSavings ?? {}).some(m => metricShown[m])),
         );
         if (!visible.length) return null;
         return (
             <div className="mt-3">
                 {label && <p className="text-xs font-semibold text-foreground">{label}</p>}
-                {renderInsightGroup('INSIGHTS', visible, `${idPrefix}-o`, occurrences)}
+                {renderInsightGroup('PAGESPEED INSIGHTS', visible, `${idPrefix}-o`, occurrences)}
             </div>
         );
     };
@@ -1066,6 +1126,27 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         }).join('\n');
     };
 
+    // PageSpeed Insights diagnostics — reference material for the Claude analysis
+    // (deduped across runs, worst score kept).
+    const diagnosticsSummary = (history: PageSpeedInsightResult[] | undefined, result: PageSpeedInsightResult | undefined): string => {
+        const src = history?.length ? history.flatMap(r => r.opportunities ?? []) : (result?.opportunities ?? []);
+        const diags = src.filter(o => o.type === 'diagnostic');
+        if (!diags.length) return '(none)';
+        const byKey = new Map<string, PageSpeedOpportunity>();
+        for (const o of diags) {
+            const key = o.auditKey ?? o.title;
+            const existing = byKey.get(key);
+            if (!existing || (o.score ?? 0) < (existing.score ?? 0)) byKey.set(key, o);
+        }
+        return [...byKey.values()]
+            .sort((a, b) => (a.score ?? 1) - (b.score ?? 1))
+            .map(o => {
+                const metrics = o.metricSavings ? Object.keys(o.metricSavings).join(', ') : '';
+                return `- ${o.title}${o.displayValue ? ` — ${o.displayValue}` : ''}${metrics ? ` [affects: ${metrics}]` : ''}`;
+            })
+            .join('\n');
+    };
+
     const buildAnalysisSummary = (index: number): string => {
         const url = config.urls[index] ?? '';
         const r1 = getSlot1(index) || undefined;
@@ -1078,9 +1159,39 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const slot = (label: string, r: PageSpeedInsightResult | undefined, h?: PageSpeedInsightResult[]) => {
             let s = `### ${label}\nAggregate: ${metricLine(r)}\n`;
             if (h) s += `Individual runs:\n${runs(h)}\n`;
-            s += `Insights:\n${insightsSummary(h, r)}\n`;
+            s += `PageSpeed Insights opportunities:\n${insightsSummary(h, r)}\n`;
+            s += `PageSpeed Insights diagnostics (reference):\n${diagnosticsSummary(h, r)}\n`;
             return s;
         };
+
+        // Exact measurements appearing in BOTH before and after run sets (any run index) —
+        // a strong hint of measurement noise / network jitter rather than a real change.
+        const matchedSection = (() => {
+            if (!h1?.length || !h2?.length) return '';
+            const defs = [
+                ['SI', 'speedIndex', displayAudit.SI],
+                ['LCP', 'largestContentfulPaint', displayAudit.LCP],
+                ['CLS', 'cumulativeLayoutShift', displayAudit.CLS],
+                ['TBT', 'totalBlockingTime', displayAudit.TBT],
+                ['FCP', 'firstContentfulPaint', displayAudit.FCP],
+            ] as const;
+            const lines: string[] = [];
+            for (const [label, key, show] of defs) {
+                if (!show) continue;
+                const set1 = new Set(h1.map(r => r[key]?.displayValue).filter(Boolean) as string[]);
+                const matches = [...new Set(h2.map(r => r[key]?.displayValue).filter(Boolean) as string[])].filter(v => set1.has(v));
+                if (matches.length) lines.push(`- ${label}: ${matches.join(', ')}`);
+            }
+            if (!lines.length) return '';
+            return [
+                '',
+                `### Cross-run identical values (${config.beforeLabel} vs ${config.afterLabel})`,
+                'These exact measurements appear in BOTH the before and after run sets (at any run index):',
+                lines.join('\n'),
+                'Interpretation: identical values across before and after runs indicate measurement variance (network jitter, CDN/cache state, test-environment noise) rather than a real code-level change. Weigh the aggregate improvement or degradation cautiously against this — an apparent regression or gain overlapping these values may not be real.',
+                '',
+            ].join('\n');
+        })();
 
         return [
             `URL: ${url}`,
@@ -1089,6 +1200,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             '',
             slot(config.beforeLabel, r1, h1),
             slot(config.afterLabel, r2, h2),
+            matchedSection,
         ].join('\n');
     };
 
@@ -1182,11 +1294,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 <div className="flex items-center justify-between px-3 py-2">
                     <button
                         onClick={() => toggleInsight(ek)}
-                        className="flex items-center gap-1 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground"
+                        className="flex flex-1 items-center gap-1 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground text-left"
                     >
-                        <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
                         <Sparkles className="h-3.5 w-3.5 text-primary" />
                         {heading}
+                        <ChevronDown className={`ml-auto h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     </button>
                     {a?.status === 'done' && (
                         <div className="flex items-center gap-1" data-html2canvas-ignore="true">
@@ -1267,8 +1379,27 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return renderAnalysisPanel(index, () => runAnalysis(index), `Analyze ${config.beforeLabel} vs ${config.afterLabel}`, 'CLAUDE ANALYSIS');
     };
 
+    // Values appearing in BOTH before and after run sets for a metric (any run index) —
+    // highlighted to flag likely network jitter / measurement noise.
+    const crossRunMatches = (index: number): Map<string, Set<string>> => {
+        const map = new Map<string, Set<string>>();
+        const h1 = (getSlot1(index) || undefined)?.runHistory ?? [];
+        const h2 = (getSlot2(index) || undefined)?.runHistory ?? [];
+        if (!h1.length || !h2.length) return map;
+        const keys = ['speedIndex', 'largestContentfulPaint', 'cumulativeLayoutShift', 'totalBlockingTime', 'firstContentfulPaint'] as const;
+        for (const key of keys) {
+            const set1 = new Set(h1.map(r => r[key]?.displayValue).filter(Boolean) as string[]);
+            const matches = new Set((h2.map(r => r[key]?.displayValue).filter(Boolean) as string[]).filter(v => set1.has(v)));
+            if (matches.size) map.set(key, matches);
+        }
+        return map;
+    };
+
     // Individual-runs metrics table. Insights are consolidated separately, below the table.
     const renderRunHistory = (history: PageSpeedInsightResult[], index: number, slotKey: '1' | '2'): React.ReactNode => {
+        const matches = crossRunMatches(index);
+        const hl = (key: 'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint', run: PageSpeedInsightResult): string =>
+            matches.get(key)?.has(run[key]?.displayValue ?? '') ? ' italic font-semibold text-amber-400' : '';
         return (
             <table className="w-full text-xs">
                 <thead>
@@ -1290,11 +1421,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
                                     #{runIdx + 1}<span className="ml-1 text-[10px] opacity-70">{formatRunTime(run.fetchTime)}</span>
                                 </td>
-                                {displayAudit.SI && <td className="text-center py-1 px-2">{historyMetricValue(run.speedIndex)}</td>}
-                                {displayAudit.LCP && <td className="text-center py-1 px-2">{historyMetricValue(run.largestContentfulPaint)}</td>}
-                                {displayAudit.CLS && <td className="text-center py-1 px-2">{historyMetricValue(run.cumulativeLayoutShift)}</td>}
-                                {displayAudit.TBT && <td className="text-center py-1 px-2">{historyMetricValue(run.totalBlockingTime)}</td>}
-                                {displayAudit.FCP && <td className="text-center py-1 px-2">{historyMetricValue(run.firstContentfulPaint)}</td>}
+                                {displayAudit.SI && <td className={`text-center py-1 px-2${hl('speedIndex', run)}`}>{historyMetricValue(run.speedIndex)}</td>}
+                                {displayAudit.LCP && <td className={`text-center py-1 px-2${hl('largestContentfulPaint', run)}`}>{historyMetricValue(run.largestContentfulPaint)}</td>}
+                                {displayAudit.CLS && <td className={`text-center py-1 px-2${hl('cumulativeLayoutShift', run)}`}>{historyMetricValue(run.cumulativeLayoutShift)}</td>}
+                                {displayAudit.TBT && <td className={`text-center py-1 px-2${hl('totalBlockingTime', run)}`}>{historyMetricValue(run.totalBlockingTime)}</td>}
+                                {displayAudit.FCP && <td className={`text-center py-1 px-2${hl('firstContentfulPaint', run)}`}>{historyMetricValue(run.firstContentfulPaint)}</td>}
                                 {!copying && (
                                     <td className="py-1 px-2 w-px whitespace-nowrap text-right" data-html2canvas-ignore="true">
                                         <button
@@ -1355,7 +1486,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     );
 
     return (
-        <Card className="my-4" ref={elementRef}>
+        <Card className={grouped ? 'my-4 mx-6 first:mt-6 last:mb-6 shadow-none' : 'my-4'} ref={elementRef}>
             <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -1415,7 +1546,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 </Button>
                             )}
                             {config.urls.some((_, i) => getSlot1(i) || getSlot2(i)) && (
-                                <Button variant="outline" onClick={copyForTeams} disabled={copying || isAuditing}>
+                                <Button variant="outline" onClick={copyForTeams} disabled={copying}>
                                     <Copy className="mr-1 h-4 w-4" />
                                     Copy for Teams
                                 </Button>
@@ -1514,45 +1645,79 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                 <TableCell colSpan={totalColCount} className="p-0">
                                                     <div className="px-4 py-3">
                                                         {/* Slot 1: runs table + consolidated insights across those runs */}
-                                                        {history1 && (
-                                                            <div className={history2 ? 'mb-3' : ''}>
-                                                                {!displayAudit.singleResult && (
-                                                                    <p className="text-xs font-medium text-muted-foreground mb-1.5">{config.beforeLabel} — Individual Runs</p>
+                                                        {history1 && (() => {
+                                                            const cardKey = `runs-${index}-1`;
+                                                            const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            return (
+                                                            <div className={`rounded-md border border-border bg-background p-3 ${history2 ? 'mb-3' : ''}`}>
+                                                                <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
+                                                                    <p className="text-xs font-medium text-muted-foreground">{displayAudit.singleResult ? 'Individual Runs' : `${config.beforeLabel} — Individual Runs`}</p>
+                                                                    <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                </button>
+                                                                {cardOpen && (
+                                                                    <>
+                                                                        {renderRunHistory(history1, index, '1')}
+                                                                        {renderConsolidatedInsights(history1, `${index}-1`, undefined)}
+                                                                    </>
                                                                 )}
-                                                                {renderRunHistory(history1, index, '1')}
-                                                                {renderConsolidatedInsights(history1, `${index}-1`, undefined)}
                                                             </div>
-                                                        )}
+                                                            );
+                                                        })()}
 
                                                         {/* Slot 2 (comparison mode) */}
-                                                        {history2 && !displayAudit.singleResult && (
-                                                            <div>
-                                                                <p className="text-xs font-medium text-muted-foreground mb-1.5">{config.afterLabel} — Individual Runs</p>
-                                                                {renderRunHistory(history2, index, '2')}
-                                                                {renderConsolidatedInsights(history2, `${index}-2`, undefined)}
+                                                        {history2 && !displayAudit.singleResult && (() => {
+                                                            const cardKey = `runs-${index}-2`;
+                                                            const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            return (
+                                                            <div className="rounded-md border border-border bg-background p-3">
+                                                                <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
+                                                                    <p className="text-xs font-medium text-muted-foreground">{config.afterLabel} — Individual Runs</p>
+                                                                    <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                </button>
+                                                                {cardOpen && (
+                                                                    <>
+                                                                        {renderRunHistory(history2, index, '2')}
+                                                                        {renderConsolidatedInsights(history2, `${index}-2`, undefined)}
+                                                                    </>
+                                                                )}
                                                             </div>
-                                                        )}
+                                                            );
+                                                        })()}
 
                                                         {/* Single-run slots (no run history): per-slot label + Re-run, then insights */}
-                                                        {!history1 && result1 && (
-                                                            <div className="mt-3">
+                                                        {!history1 && result1 && (() => {
+                                                            const cardKey = `single-${index}-1`;
+                                                            const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            return (
+                                                            <div className="mt-3 rounded-md border border-border bg-background p-3">
                                                                 <div className="mb-1.5 flex items-center gap-2">
-                                                                    {!displayAudit.singleResult && <p className="text-xs font-semibold text-foreground">{config.beforeLabel}</p>}
+                                                                    <button onClick={() => toggleRunCard(cardKey)} className="flex flex-1 items-center gap-2 text-left">
+                                                                        <p className="text-xs font-semibold text-foreground">{displayAudit.singleResult ? 'Details' : config.beforeLabel}</p>
+                                                                        <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                    </button>
                                                                     {singleRunRerunButton(index, setResults1, '1')}
                                                                 </div>
-                                                                {renderInsights(result1, `${index}-1`)}
+                                                                {cardOpen && renderInsights(result1, `${index}-1`)}
                                                             </div>
-                                                        )}
+                                                            );
+                                                        })()}
 
-                                                        {!history2 && result2 && !displayAudit.singleResult && (
-                                                            <div className="mt-3">
+                                                        {!history2 && result2 && !displayAudit.singleResult && (() => {
+                                                            const cardKey = `single-${index}-2`;
+                                                            const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            return (
+                                                            <div className="mt-3 rounded-md border border-border bg-background p-3">
                                                                 <div className="mb-1.5 flex items-center gap-2">
-                                                                    <p className="text-xs font-semibold text-foreground">{config.afterLabel}</p>
+                                                                    <button onClick={() => toggleRunCard(cardKey)} className="flex flex-1 items-center gap-2 text-left">
+                                                                        <p className="text-xs font-semibold text-foreground">{config.afterLabel}</p>
+                                                                        <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                    </button>
                                                                     {singleRunRerunButton(index, setResults2, '2')}
                                                                 </div>
-                                                                {renderInsights(result2, `${index}-2`)}
+                                                                {cardOpen && renderInsights(result2, `${index}-2`)}
                                                             </div>
-                                                        )}
+                                                            );
+                                                        })()}
 
                                                         {/* Claude before/after analysis (comparison mode, both sides audited) */}
                                                         {!copying && renderAnalysisSection(index)}
