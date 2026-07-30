@@ -1,6 +1,34 @@
 import type { IAzureAPI } from './azureCapture.types';
 import type { IAzureMetricsAPI } from './azureMetrics.types';
 
+/**
+ * Shared shape for the three incident-report entry points (generate / fetchData /
+ * rca) — all built by one `buildIncidentPayload` in azureAppCard, so they take the
+ * same options. Optional fields degrade the report to an explicit "not configured"
+ * section rather than failing.
+ */
+export interface IncidentPayload {
+    startMs: number;
+    endMs: number;
+    subscriptionId: string;
+    resourceGroup?: string | undefined;
+    appName: string;
+    appType?: string | undefined;
+    appInsightsAppId?: string | undefined;
+    apiName?: string | undefined;
+    apiInsightsAppId?: string | undefined;
+    apiType?: string | undefined;
+    /** Server-side database metrics (Category 15). */
+    dbName?: string | undefined;
+    dbServerName?: string | undefined;
+    /** Edge / network-path diagnostics (Category 13). */
+    logAnalyticsWorkspaceId?: string | undefined;
+    appGatewayResourceId?: string | undefined;
+    frontDoorResourceId?: string | undefined;
+    loadBalancerResourceId?: string | undefined;
+    uptimeRobotIncidents?: unknown[] | undefined;
+}
+
 export interface IElectronAPI {
     // PageSpeed / Lighthouse  (existing)
     runAudit: (url: string, strategy: string, visitMode: string, runMode: 'single' | 'average') => Promise<PageSpeedInsightResult>;
@@ -84,34 +112,9 @@ export interface IElectronAPI {
 
     // Incident Report
     incidentReport: {
-        generate: (opts: {
-            startMs: number;
-            endMs: number;
-            subscriptionId: string;
-            resourceGroup: string;
-            appName: string;
-            perIncident?: boolean;
-        }) => Promise<{ success: boolean; path?: string; error?: string }>;
-        fetchData: (opts: {
-            startMs: number;
-            endMs: number;
-            subscriptionId: string;
-            resourceGroup: string;
-            appName: string;
-        }) => Promise<unknown>;
-        rca: (opts: {
-            subscriptionId: string;
-            resourceGroup?: string | undefined;
-            appName: string;
-            appType?: string | undefined;
-            appInsightsAppId?: string | undefined;
-            apiName?: string | undefined;
-            apiInsightsAppId?: string | undefined;
-            apiType?: string | undefined;
-            startMs: number;
-            endMs: number;
-            uptimeRobotIncidents?: unknown[] | undefined;
-        }) => Promise<{ success: boolean; rca?: string; error?: string }>;
+        generate: (opts: IncidentPayload) => Promise<{ success: boolean; path?: string; error?: string }>;
+        fetchData: (opts: IncidentPayload) => Promise<unknown>;
+        rca: (opts: IncidentPayload) => Promise<{ success: boolean; rca?: string; error?: string }>;
         aiRemarks: (opts: {
             summary: unknown;
         }) => Promise<{ success: boolean; status?: 'healthy' | 'warning' | 'critical'; remarks?: string; error?: string }>;
@@ -121,8 +124,15 @@ export interface IElectronAPI {
             endMs: number;
             markdown: string;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
+        exportRcaPdf: (opts: {
+            appName: string;
+            startMs: number;
+            endMs: number;
+            html: string;
+        }) => Promise<{ success: boolean; path?: string; error?: string }>;
         onRcaChunk: (cb: (data: { appKey: string; chunk: string }) => void) => () => void;
-        onRcaProgress: (cb: (data: { appKey: string; stage: string }) => void) => () => void;
+        /** `reset` is set when the model falls back mid-run: clear any streamed text. */
+        onRcaProgress: (cb: (data: { appKey: string; stage: string; reset?: boolean }) => void) => () => void;
     };
 
     // Unused Assets — Claude review pass

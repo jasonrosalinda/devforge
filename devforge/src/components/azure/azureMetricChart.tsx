@@ -1,6 +1,8 @@
 import {
   AreaChart,
   Area,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -23,6 +25,10 @@ interface InstanceSeries {
 interface CombinedChartProps {
   cpu: MetricSeries;
   memory: MetricSeries;
+  /** Azure SQL cpu_percent / sql_instance_memory_percent. Both are already
+   *  percentages, so they share the 0–100 axis with the app's CPU and memory. */
+  dbCpu?: MetricSeries | null | undefined;
+  dbMemory?: MetricSeries | null | undefined;
   downtimeIntervals?: DowntimeInterval[];
   urDowntimeIntervals?: DowntimeInterval[];
   availabilitySeries?: Array<{ t: string; v: number }> | undefined;
@@ -38,6 +44,14 @@ export const CHART_COLORS = {
   memAvg:  '#fdba74',
   memMax:  '#f97316',
   avail:   '#3fb950',
+  // Database. CPU and memory get separate hues for the same reason the app's do
+  // (purple vs orange) — two shades of one colour are unreadable once four lines
+  // overlap. None of these appear in INSTANCE_PALETTE below, which the per-instance
+  // health lines draw from: #2dd4bf and #22d3ee are in it, so the teal is 0d9488.
+  dbCpuAvg: '#5eead4',   // teal-300
+  dbCpuMax: '#0d9488',   // teal-600
+  dbMemAvg: '#a5b4fc',   // indigo-300
+  dbMemMax: '#4f46e5',   // indigo-600
 };
 
 export const INSTANCE_PALETTE = [
@@ -59,8 +73,152 @@ function formatTick(isoStr: string, spanMs: number): string {
   return `${get('hour')}:${get('minute')}`;
 }
 
+/** One metric on its own auto-scaled axis. CombinedChart is pinned to 0–100 for
+ *  percentages, so counts (users, requests) need this instead. */
+export function SeriesChart({
+  series, color, name, height = 120, valueFormatter,
+}: {
+  series: Array<{ t: string; v: number; m: number }>;
+  color: string;
+  name: string;
+  height?: number;
+  valueFormatter?: ((v: number) => string) | undefined;
+}) {
+  if (!series.length) {
+    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>No time-series data</div>;
+  }
+  const first = series[0]!.t;
+  const last = series[series.length - 1]!.t;
+  const spanMs = new Date(last).getTime() - new Date(first).getTime();
+  const fmt = valueFormatter ?? ((v: number) => v.toLocaleString());
+  const gid = `gSeries_${name.replace(/\W+/g, '')}`;
+  // Some series carry one value per bucket with avg and max set identically (the
+  // users series is a dcount, for instance). Drawing both would stack two
+  // indistinguishable lines, so collapse to one.
+  const singleValued = series.every(p => p.v === p.m);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <AreaChart data={series} margin={{ top: 4, right: 12, bottom: 0, left: -20 }}>
+        <defs>
+          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%"  stopColor={color} stopOpacity={0.3} />
+            <stop offset="95%" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
+        <YAxis tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v: number) => fmt(v)} width={48} />
+        <Tooltip
+          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: '#8b9ab3' }}
+          formatter={(val: unknown, key: unknown) => [fmt(Number(val)), String(key)]}
+          labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+        />
+        {!singleValued && (
+          <Area type="monotone" dataKey="v" name={`${name} Avg`} stroke={color} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} />
+        )}
+        <Area type="monotone" dataKey="m" name={singleValued ? name : `${name} Max`} stroke={color} fill={`url(#${gid})`} strokeWidth={2} dot={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+/**
+ * Per-instance health over time — one line per App Service instance.
+ *
+ * Replaces the per-instance table rows in the Instances block: a table could only
+ * show avg / latest / min, which hides *when* an instance dropped and whether the
+ * instances failed together (a plan-wide problem) or one at a time (a single
+ * crashed worker). That distinction is the whole point of looking per-instance.
+ */
+export function InstanceHealthChart({
+  instances, colors, height = 150,
+}: {
+  instances: Array<{ name: string; label: string; roleName?: string | null; series: Array<{ t: string; v: number }> }>;
+  colors: string[];
+  height?: number;
+}) {
+  const withData = instances.filter(i => i.series.length > 0);
+  if (!withData.length) {
+    return (
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>
+        No per-instance time-series data
+      </div>
+    );
+  }
+
+  // Merged on timestamp, not index: instances start and stop at different times, so
+  // aligning by position would draw one instance's dip at another's timestamp.
+  const maps = withData.map(i => new Map(i.series.map(p => [p.t, p.v])));
+  const stamps = [...new Set(withData.flatMap(i => i.series.map(p => p.t)))].sort();
+  const merged = stamps.map(t => {
+    const row: Record<string, number | string> = { t };
+    maps.forEach((m, idx) => {
+      const v = m.get(t);
+      // Left undefined when the instance reported nothing in this bucket — with
+      // connectNulls={false} the line breaks there instead of implying 0% health.
+      if (v != null) row[`i${idx}`] = v;
+    });
+    return row;
+  });
+
+  const spanMs = stamps.length > 1
+    ? new Date(stamps[stamps.length - 1]!).getTime() - new Date(stamps[0]!).getTime()
+    : 0;
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      {/* No negative left margin: the YAxis gets an explicit width sized to "100%"
+          instead. Offsetting a default 60px axis leftwards is what previously either
+          clipped the labels or left a wide empty gutter, depending on the offset. */}
+      <LineChart data={merged} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+        <XAxis
+          dataKey="t"
+          tickFormatter={(v: string) => formatTick(v, spanMs)}
+          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          minTickGap={40}
+        />
+        {/* Pinned 0–100: these are health percentages, and an auto-scaled axis makes
+            a dip from 100% to 96% look like a catastrophe. */}
+        {/* width 45: fits "100%" at 10px plus the tick mark, with a little breathing
+            room from the container edge. */}
+        <YAxis
+          domain={[0, 100]}
+          ticks={[0, 25, 50, 75, 100]}
+          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tickFormatter={(v: number) => `${v}%`}
+          width={45}
+        />
+        <Tooltip
+          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: '#8b9ab3' }}
+          formatter={(val: unknown, key: unknown) => {
+            const idx = Number(String(key).replace('i', ''));
+            return [`${Number(val).toFixed(2)}%`, withData[idx]?.label ?? String(key)];
+          }}
+          labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+        />
+        {withData.map((inst, idx) => (
+          <Line
+            key={inst.name}
+            type="monotone"
+            dataKey={`i${idx}`}
+            name={inst.label}
+            stroke={colors[idx % colors.length] ?? '#8b9ab3'}
+            strokeWidth={1.5}
+            dot={false}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
 export function CombinedChart({
-  cpu, memory, downtimeIntervals = [], urDowntimeIntervals = [], availabilitySeries,
+  cpu, memory, dbCpu, dbMemory,
+  downtimeIntervals = [], urDowntimeIntervals = [], availabilitySeries,
   instanceHealthSeries, apiInstanceHealthSeries,
   loading = false, height = 200,
 }: CombinedChartProps) {
@@ -106,6 +264,18 @@ export function CombinedChart({
     allInst.push({ key, label, map, colorIdx: feInst.length + i });
   });
 
+  // Keyed by timestamp rather than index: the DB metrics come from a different
+  // Azure resource, so a missing bucket would otherwise shift every later point.
+  const byTime = (s: MetricSeries | null | undefined) => {
+    const m = new Map<string, { v: number; m: number }>();
+    for (const p of s?.series ?? []) m.set(p.t, { v: p.v, m: p.m });
+    return m;
+  };
+  const dbCpuMap = byTime(dbCpu);
+  const dbMemMap = byTime(dbMemory);
+  const hasDbCpu = dbCpuMap.size > 0;
+  const hasDbMem = dbMemMap.size > 0;
+
   const merged = cpu.series.map((p, i) => {
     const row: Record<string, number | string> = {
       t: p.t,
@@ -116,6 +286,10 @@ export function CombinedChart({
     };
     const av = availabilitySeries?.[i]?.v;
     if (av != null) row.avail = av;
+    const dc = dbCpuMap.get(p.t);
+    if (dc) { row.dbCpuAvg = dc.v; row.dbCpuMax = dc.m; }
+    const dm = dbMemMap.get(p.t);
+    if (dm) { row.dbMemAvg = dm.v; row.dbMemMax = dm.m; }
     for (const inst of allInst) {
       const v = inst.map.get(p.t);
       if (v != null) row[inst.key] = v;
@@ -156,6 +330,18 @@ export function CombinedChart({
             <linearGradient id="gAvail" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor={CHART_COLORS.avail} stopOpacity={0.15} />
               <stop offset="95%" stopColor={CHART_COLORS.avail} stopOpacity={0} />
+            </linearGradient>
+          )}
+          {hasDbCpu && (
+            <linearGradient id="gDbCpuMax" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor={CHART_COLORS.dbCpuMax} stopOpacity={0.2} />
+              <stop offset="95%" stopColor={CHART_COLORS.dbCpuMax} stopOpacity={0} />
+            </linearGradient>
+          )}
+          {hasDbMem && (
+            <linearGradient id="gDbMemMax" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor={CHART_COLORS.dbMemMax} stopOpacity={0.2} />
+              <stop offset="95%" stopColor={CHART_COLORS.dbMemMax} stopOpacity={0} />
             </linearGradient>
           )}
           {allInst.map((inst, i) => (
@@ -206,6 +392,18 @@ export function CombinedChart({
         <Area type="monotone" dataKey="memMax" name="Mem Max" stroke={CHART_COLORS.memMax} fill="url(#gMemMax)" strokeWidth={2} dot={false} />
         {hasAvail && (
           <Area type="monotone" dataKey="avail" name="Availability" stroke={CHART_COLORS.avail} fill="url(#gAvail)" strokeWidth={2} dot={false} connectNulls={false} />
+        )}
+        {hasDbCpu && (
+          <>
+            <Area type="monotone" dataKey="dbCpuAvg" name="DB CPU Avg" stroke={CHART_COLORS.dbCpuAvg} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="dbCpuMax" name="DB CPU Max" stroke={CHART_COLORS.dbCpuMax} fill="url(#gDbCpuMax)" strokeWidth={2} dot={false} connectNulls={false} />
+          </>
+        )}
+        {hasDbMem && (
+          <>
+            <Area type="monotone" dataKey="dbMemAvg" name="DB Mem Avg" stroke={CHART_COLORS.dbMemAvg} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="dbMemMax" name="DB Mem Max" stroke={CHART_COLORS.dbMemMax} fill="url(#gDbMemMax)" strokeWidth={2} dot={false} connectNulls={false} />
+          </>
         )}
         {allInst.map(inst => (
           <Area

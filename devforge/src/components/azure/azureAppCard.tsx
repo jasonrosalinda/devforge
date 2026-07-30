@@ -1,14 +1,18 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Copy, Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch } from 'lucide-react';
+import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch } from 'lucide-react';
 import { marked } from 'marked';
 import { toast } from 'sonner';
 import { RcaDialog, type RcaStatus } from './rcaDialog';
+import {
+  buildRcaPrintHtml, formatSgt, formatSgtRange, splitQuickSummary,
+  buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
+} from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { CombinedChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
+import { CombinedChart, SeriesChart, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
 import { AppRemarks, buildRemarks } from './azureAppRemarks';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
@@ -51,13 +55,17 @@ function IpRepBadges({ rep }: { rep: IpReputation | undefined }) {
   );
 }
 
+// No "All": the top-dependency query ranks the top 10 per classification, so a
+// combined view is the union of two independent rankings rather than a real global
+// top-N. Internal and third-party are the two meaningful lists.
 const DEPS_FILTERS = [
-  { key: 'all',        label: 'All',         color: '#8b9ab3' },
   { key: 'internal',   label: 'Internal',    color: '#3fb950' },
   { key: 'thirdParty', label: 'Third-Party', color: '#d29922' },
+  { key: 'assets',     label: 'Assets',      color: '#8b9ab3' },
 ] as const;
+type DepsFilter = typeof DEPS_FILTERS[number]['key'];
 
-function DepsFilterPills({ value, onChange }: { value: 'all' | 'internal' | 'thirdParty'; onChange: (v: 'all' | 'internal' | 'thirdParty') => void }) {
+function DepsFilterPills({ value, onChange }: { value: DepsFilter; onChange: (v: DepsFilter) => void }) {
   return (
     <div className="flex gap-0.5" style={{ marginTop: 3 }}>
       {DEPS_FILTERS.map(f => (
@@ -74,6 +82,713 @@ function DepsFilterPills({ value, onChange }: { value: 'all' | 'internal' | 'thi
         >{f.label}</button>
       ))}
     </div>
+  );
+}
+
+// ─── Exception tabs: Unclassified / Timeout / Socket / OOM ───────────────────
+
+// Three mutually exclusive buckets — see SOCKET_MATCH / TIMEOUT_ONLY_MATCH /
+// GENERIC_MATCH in electron/ipc/azure-metrics.cjs. Counts sum to the row total.
+const EXC_TABS = [
+  // 'generic' is the internal key, matching GENERIC_MATCH / errorTypesGeneric in
+  // the query layer; the label says what it means to a reader.
+  { key: 'generic', label: 'Unclassified', color: '#f85149' },
+  { key: 'timeout', label: 'Timeout', color: '#d29922' },
+  { key: 'socket',  label: 'Socket',  color: '#06b6d4' },
+  { key: 'oom',     label: 'OOM',     color: '#a371f7' },
+] as const;
+type ExcTab = typeof EXC_TABS[number]['key'];
+
+const SOCKET_ACCENT  = '#06b6d4';
+const TIMEOUT_ACCENT = '#d29922';
+const OOM_ACCENT     = '#a371f7';
+
+export const getMeaningfulFrame = (raw: string) => {
+  try {
+    const frames = JSON.parse(raw) as Array<{ assembly?: string; fileName?: string; line?: number; method?: string }>;
+    return frames.find(f => {
+      const asm = f.assembly ?? '';
+      return asm && !asm.startsWith('System.') && !asm.startsWith('Microsoft.') && !asm.startsWith('mscorlib') && !asm.startsWith('netstandard');
+    }) ?? frames[0] ?? null;
+  } catch { return null; }
+};
+
+/** Exact per-bucket counts. `insight` carries them for the whole window, so the
+ *  total is not truncated the way `errorCount` (top 10 types only) is, and the
+ *  three tab counts always sum to the total shown on the row. */
+function excBucketCounts(ri: {
+  insight?: { socketLayerExceptions: number; timeoutExceptions: number; oomExceptions: number; genericExceptions: number; totalExceptions: number } | null
+  errorTypesGeneric?: Array<{ count: number; trueCount?: number }> | null
+  errorTypes?: Array<{ count: number; trueCount?: number }> | null
+  errorCount?: number | null
+} | null | undefined): Record<ExcTab, number | null> & { total: number; breakdown: string } {
+  const ins = ri?.insight;
+  if (ins && ins.totalExceptions > 0) {
+    return {
+      generic: ins.genericExceptions,
+      timeout: ins.timeoutExceptions,
+      socket:  ins.socketLayerExceptions,
+      oom:     ins.oomExceptions,
+      total:   ins.totalExceptions,
+      breakdown: `${ins.totalExceptions.toLocaleString()} exceptions = ${ins.genericExceptions.toLocaleString()} unclassified + ${ins.timeoutExceptions.toLocaleString()} timeout + ${ins.socketLayerExceptions.toLocaleString()} socket + ${ins.oomExceptions.toLocaleString()} OOM`,
+    };
+  }
+  // Pre-split cache: only the truncated type lists are available.
+  const list = ri?.errorTypesGeneric ?? ri?.errorTypes ?? [];
+  const generic = list.reduce((s, t) => s + (t.trueCount ?? t.count), 0);
+  const total = ri?.errorCount ?? generic;
+  return { generic, timeout: null, socket: null, oom: null, total, breakdown: 'Bucket breakdown unavailable — refresh to load it.' };
+}
+
+function ExcTabRow({ value, onChange, counts }: {
+  value: ExcTab;
+  onChange: (v: ExcTab) => void;
+  counts: Record<ExcTab, number | null>;
+}) {
+  return (
+    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+      <td colSpan={4} style={{ paddingLeft: 20, paddingTop: 4, paddingBottom: 4 }}>
+        <div className="flex gap-0.5 flex-wrap">
+          {EXC_TABS.map(t => {
+            const cnt = counts[t.key];
+            const active = value === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={e => { e.stopPropagation(); onChange(t.key); }}
+                style={{
+                  background: active ? `${t.color}22` : 'none',
+                  border: `1px solid ${active ? `${t.color}66` : 'transparent'}`,
+                  color: active ? t.color : 'var(--muted-foreground)',
+                  borderRadius: 4, padding: '1px 6px', fontSize: 9,
+                  cursor: 'pointer', fontWeight: active ? 600 : 400,
+                }}
+              >
+                {t.label}{cnt != null ? <span style={{ opacity: 0.7 }}> ({cnt.toLocaleString()})</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/** TimeWait vs Established ratio is the definitive "sockets are not pooled" signal. */
+function socketMetricVerdict(counters: SocketCounters | null | undefined) {
+  const sm = counters?.metrics;
+  if (!sm?.length) return null;
+  const pick = (n: string) => sm.find(m => m.name === n) ?? null;
+  const est = pick('SocketOutboundEstablished') ?? pick('TcpEstablished');
+  const tw  = pick('SocketOutboundTimeWait')    ?? pick('TcpTimeWait');
+  if (!est || !tw) return null;
+  if (est.avg <= 0 && tw.avg <= 0) return null;
+  const ratio = est.avg > 0 ? tw.avg / est.avg : Infinity;
+  if (ratio >= 2)   return { ratio, color: '#f85149', text: 'TimeWait ≫ Established — outbound sockets are closed and re-opened per call, not pooled. Root cause is client lifetime (new HttpClient/connection per request), not load.' };
+  if (ratio >= 0.5) return { ratio, color: '#d29922', text: 'Elevated TimeWait against Established — partial socket reuse. Connection churn is consuming SNAT ports faster than they are released.' };
+  return { ratio, color: '#3fb950', text: 'TimeWait low against Established — outbound sockets are being reused. No pooling defect visible in the counters.' };
+}
+
+const SOCKET_METRIC_HELP: Record<string, string> = {
+  SocketOutboundAll:         'All outbound sockets from this site. Sustained growth against a flat request rate means sockets are leaking.',
+  SocketOutboundEstablished: 'Outbound sockets in ESTABLISHED state — connections actively in use.',
+  SocketOutboundTimeWait:    'Outbound sockets in TIME_WAIT — closed but still holding their SNAT port (~4 min on Azure). High values here exhaust ports.',
+  TcpEstablished:            'TCP connections in ESTABLISHED state.',
+  TcpTimeWait:               'TCP connections in TIME_WAIT — port still reserved after close.',
+  TcpCloseWait:             'TCP connections in CLOSE_WAIT — remote closed, local app never did. Indicates undisposed clients/streams.',
+  TcpSynSent:                'TCP connections stuck in SYN_SENT — handshake never completed. Spikes here mean the port budget or the destination is refusing.',
+};
+
+function SocketSection({ label, title, children }: { label: string; title?: string | undefined; children: React.ReactNode }) {
+  return (
+    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.03)', fontSize: 9 }}>
+      <td colSpan={4} style={{ paddingLeft: 24, paddingTop: 4, paddingBottom: 4 }}>
+        {label !== '' && <div style={{ color: '#6e7681', fontWeight: 600, marginBottom: 3 }} title={title}>{label}</div>}
+        {children}
+      </td>
+    </tr>
+  );
+}
+
+function MiniBar({ pct, color }: { pct: number; color: string }) {
+  return (
+    <span style={{ display: 'inline-block', width: 46, height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, flexShrink: 0 }}>
+      <span style={{ display: 'block', width: `${Math.max(2, Math.min(100, pct))}%`, height: '100%', background: color, borderRadius: 2 }} />
+    </span>
+  );
+}
+
+/** What each timeout-class result code means, so a row is self-explanatory. */
+const RESULT_CODE_HELP: Record<string, string> = {
+  '408':      '408 Request Timeout — the server gave up waiting for the request.',
+  '504':      '504 Gateway Timeout — an upstream proxy timed out waiting for the origin.',
+  '524':      '524 — Cloudflare timed out waiting for the origin to respond.',
+  'Canceled': 'The .NET HttpClient deadline elapsed and cancelled the call. The duration is the configured timeout.',
+  '-2':       'SQL Server timeout error code — the command exceeded CommandTimeout.',
+};
+
+const RESULT_CODE_COLOR = (code: string) => (code === '-2' || code === '524' ? '#f85149' : '#d29922');
+
+
+/** Durations in the largest unit that keeps the number readable, so a 19,464ms P99
+ *  reads as 19.5s and a 2,128,617ms Cloudflare timeout as 35.5m rather than a wall
+ *  of digits. Input is always milliseconds. */
+export const fmtDuration = (ms: number | null | undefined): string => {
+  if (ms == null || !isFinite(ms)) return '—';
+  if (ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  // Trim a trailing .0 so whole values read "5m", not "5.0m".
+  const n = (v: number) => v.toFixed(1).replace(/\.0$/, '');
+  const s = ms / 1000;
+  if (s < 60) return `${n(s)}s`;
+  const m = s / 60;
+  if (m < 60) return `${n(m)}m`;
+  const h = m / 60;
+  if (h < 24) return `${n(h)}h`;
+  return `${n(h / 24)}d`;
+};
+
+/** Share of a total. Avoids rendering a real-but-tiny rate as a flat "0.0%". */
+const fmtPct = (n: number, total: number) => {
+  if (total <= 0) return '—';
+  const p = (n / total) * 100;
+  if (p === 0) return '0%';
+  return p < 0.1 ? '<0.1%' : `${p.toFixed(1)}%`;
+};
+
+/** Sub-tab pill colours for the Requests breakdown, reused by the summary row so
+ *  the 5xx / 4xx figures match the tab you click to drill into them. */
+const HTTP_4XX_COLOR = '#f97316';
+const HTTP_5XX_COLOR = '#f85149';
+
+/** Same idea for the Dependencies breakdown pills (Top / Failed / Timeout Deps). */
+const DEP_TOTAL_COLOR   = '#58a6ff';
+const DEP_FAILED_COLOR  = '#f85149';
+const DEP_TIMEOUT_COLOR = '#f97316';
+
+/** Names the layer that timed out, from the exception type. Drives the fix hint and
+ *  the section heading — when every record shares one layer the heading says which,
+ *  so `heading` replaces a separate layer chip rather than repeating it. */
+export function timeoutLayer(type: string): { layer: string; heading: string; hint: string } {
+  const t = type.toLowerCase();
+  if (t.includes('sqlexception') || t.includes('win32exception')) return { layer: 'SQL',    heading: 'SQL command timeouts',   hint: 'Command timeout — tune the query or add an index. Raising CommandTimeout only moves the wall.' };
+  if (t.includes('redis'))                                        return { layer: 'Redis',  heading: 'Redis timeouts',          hint: 'Redis did not answer in time — check cache CPU, large payloads, and the sync-op vs backlog split.' };
+  if (t.includes('taskcanceled') || t.includes('httprequest'))    return { layer: 'HTTP',   heading: 'HTTP client timeouts',    hint: 'HttpClient.Timeout elapsed — downstream is slow. Verify the deadline is realistic before raising it.' };
+  if (t.includes('operationcanceled'))                            return { layer: 'Cancel', heading: 'Cancelled operations',    hint: 'Operation cancelled on a deadline — confirm whether the token came from a timeout or a client disconnect.' };
+  if (t.includes('timeoutexception'))                             return { layer: 'App',    heading: 'Application timeouts',    hint: 'Explicit timeout in application code — check the configured deadline against real downstream latency.' };
+  return { layer: '—', heading: 'Application timeouts', hint: '' };
+}
+
+function renderTimeoutTab(
+  ti: TimeoutInsights | null | undefined,
+  fmtTime: (iso: string) => string,
+): React.ReactNode {
+  const summary  = ti?.summary ?? null;
+  const types    = ti?.types ?? [];
+  const details  = ti?.details ?? [];
+  const timeline = ti?.timeline ?? [];
+  const byEndpoint = ti?.byEndpoint ?? [];
+
+  if (!ti) {
+    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Timeout breakdown unavailable — expand the card to load details.</td></tr>;
+  }
+  if ((summary?.trueCount ?? 0) === 0 && types.length === 0) {
+    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No application-level timeouts in this window.</td></tr>;
+  }
+
+  const samplingX = summary && summary.records > 0 ? summary.trueCount / summary.records : 1;
+
+  // Burst vs sustained. No longer a visible line — the headline it lived on was
+  // redundant with the table — so it rides on the section label's tooltip.
+  const tlNonZero  = timeline.filter(p => p.count > 0).length;
+  const tlMax      = Math.max(1, ...timeline.map(p => p.count));
+  const tlPeak     = timeline.find(p => p.count === tlMax) ?? null;
+  const burstLabel = timeline.length > 1
+    ? (tlNonZero / timeline.length <= 0.25
+        ? `Burst: ${tlNonZero} of ${timeline.length} time buckets active, peak ${tlMax.toLocaleString()}${tlPeak ? ` at ${fmtTime(tlPeak.t)}` : ''}.`
+        : `Sustained across ${tlNonZero} of ${timeline.length} time buckets.`)
+    : null;
+
+  // Endpoint groups. Counts and windows come from byEndpoint (exact, whole
+  // window); the message/type/stack frame come from the capped detail records and
+  // are simply absent for endpoints outside the 50 newest.
+  const endpointGroups = (() => {
+    const firstDetail = new Map<string, { d: typeof details[number]; sampled: number }>();
+    for (const d of details) {
+      const key = d.operation_Name || '(unknown endpoint)';
+      const ex = firstDetail.get(key);
+      if (ex) ex.sampled++; else firstDetail.set(key, { d, sampled: 1 });
+    }
+    // Fall back to the sampled grouping when byEndpoint is missing (older cache).
+    const base = byEndpoint.length > 0
+      ? byEndpoint.map(e => ({ endpoint: e.endpoint, count: e.trueCount, firstSeen: e.firstSeen, lastSeen: e.lastSeen }))
+      : Array.from(firstDetail.entries()).map(([endpoint, { sampled }]) => ({
+          endpoint, count: Math.round(sampled * samplingX), firstSeen: '', lastSeen: '',
+        }));
+    return base
+      .map(b => ({ ...b, detail: firstDetail.get(b.endpoint)?.d ?? null }))
+      .sort((a, b) => b.count - a.count);
+  })();
+  const hiddenEndpoints = Math.max(0, (summary?.operations ?? 0) - endpointGroups.length);
+
+  return (
+    <>
+      {/* By layer only when more than one — the exception column covers the single-layer case */}
+      {types.length > 1 && (
+        <SocketSection label="By layer">
+          {types.map((t, i) => {
+            const { layer } = timeoutLayer(t.type);
+            const pct = types[0]!.trueCount > 0 ? (t.trueCount / types[0]!.trueCount) * 100 : 0;
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+                <span style={{ color: TIMEOUT_ACCENT, width: 44, flexShrink: 0 }}>{layer}</span>
+                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.type}>{t.type}</span>
+                <MiniBar pct={pct} color={TIMEOUT_ACCENT} />
+                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
+              </div>
+            );
+          })}
+        </SocketSection>
+      )}
+
+      {/* One table: time | exception | endpoint | total. No section heading — the
+             column headers carry it, and the window / sampling / burst detail lives
+             on their tooltip. */}
+      {endpointGroups.length > 0 && (
+        <SocketSection label="">
+          <div
+            style={{ display: 'flex', gap: 8, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}
+            title={[
+              summary ? `${summary.trueCount.toLocaleString()} timeouts across ${summary.operations.toLocaleString()} endpoint${summary.operations === 1 ? '' : 's'}${samplingX >= 1.5 ? `, reconstructed from ${summary.records.toLocaleString()} sampled records (App Insights kept 1 in ${samplingX.toFixed(1)})` : ''}.` : null,
+              burstLabel,
+            ].filter(Boolean).join(' ') || undefined}
+          >
+            <span style={{ width: 200, flexShrink: 0 }} title="The .NET exception type, with the layer it belongs to underneath. Hover a row's exception for what to do about it.">exception</span>
+            <span style={{ flex: 1, minWidth: 0 }}>endpoint</span>
+            <span style={{ width: 46, textAlign: 'right', flexShrink: 0 }}>total</span>
+          </div>
+
+          {endpointGroups.map((g, j) => {
+            const d = g.detail;
+            const frame = d?.parsedStack ? getMeaningfulFrame(d.parsedStack) : null;
+            const layerInfo = d ? timeoutLayer(d.type) : null;
+            return (
+              <React.Fragment key={j}>
+                <div
+                  style={{ display: 'flex', gap: 8, alignItems: 'flex-start',
+                           paddingTop: j > 0 ? 4 : 0, borderTop: j > 0 ? '1px solid rgba(255,255,255,0.04)' : undefined }}
+                >
+                  {/* exception — the .NET type, with the plain-language label on the
+                      line beneath. The fix hint is on hover, not a visible line: it
+                      wrapped to four rows and set the height of the whole row.
+                      Wraps mid-token because type names contain no spaces. */}
+                  <div
+                    style={{ width: 200, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 1 }}
+                    title={layerInfo?.hint || undefined}
+                  >
+                    <span style={{ color: TIMEOUT_ACCENT, fontWeight: 600, overflowWrap: 'anywhere' }}>{d?.type ?? '—'}</span>
+                    {layerInfo?.heading && <span style={{ color: '#8b949e' }}>({layerInfo.heading})</span>}
+                  </div>
+
+                  {/* endpoint */}
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      {/* Carries what used to be its own column (the first → last
+                          window) and its own line (the exception message), so the
+                          row stays two lines without losing either. */}
+                      <span
+                        style={{ color: '#cdd9e5' }}
+                        title={[
+                          g.endpoint,
+                          d?.innermostMessage || d?.outerMessage || null,
+                          g.firstSeen ? `First → last timeout from this endpoint: ${fmtTime(g.firstSeen)} → ${fmtTime(g.lastSeen)}` : null,
+                          burstLabel,
+                          d?.assembly || null,
+                        ].filter(Boolean).join('\n\n')}
+                      >{g.endpoint}</span>
+                      {/* Hidden when the throwing method is already the stack frame
+                          printed underneath; kept when they differ, which is the
+                          useful case (thrown in a retry wrapper, frame in your code). */}
+                      {d?.method && d.method !== frame?.method && (
+                        <span style={{ color: '#a371f7' }} title="Method that threw">{d.method}</span>
+                      )}
+                      {d?.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                    </div>
+                    {frame && (
+                      <div style={{ color: '#3fb950', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title="Most meaningful stack frame">
+                        {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* total */}
+                  <span
+                    className="tabular-nums"
+                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600 }}
+                    title={`${g.count.toLocaleString()} occurrences from this endpoint, counted over the whole window (not from the 50-record detail sample).`}
+                  >{g.count.toLocaleString()}</span>
+                </div>
+
+              </React.Fragment>
+            );
+          })}
+
+          {/* Only when the endpoint list is short of the true count */}
+          {hiddenEndpoints > 0 && (
+            <div style={{ color: '#484f58', marginTop: 2 }}>
+              Showing the {endpointGroups.length} largest of {summary!.operations} endpoints — narrow the time range to see the rest.
+            </div>
+          )}
+        </SocketSection>
+      )}
+
+    </>
+  );
+}
+
+function renderOomTab(
+  oi: OomInsights | null | undefined,
+): React.ReactNode {
+  const summary = oi?.summary ?? null;
+  const details = oi?.details ?? [];
+
+  if (!oi) {
+    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>OOM breakdown unavailable — expand the card to load details.</td></tr>;
+  }
+  if ((summary?.trueCount ?? 0) === 0) {
+    return (
+      <tr style={{ fontSize: 9 }}>
+        <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No out-of-memory exceptions in this window.</td>
+      </tr>
+    );
+  }
+
+  const samplingX  = summary && summary.records > 0 ? summary.trueCount / summary.records : 1;
+
+  return (
+    <>
+      {details.length > 0 && (() => {
+        // One row per endpoint, allocation sites nested beneath it. Keying on
+        // operation_Name + method instead produced two rows with an identical
+        // endpoint name, distinguishable only by the frame line — it read as a
+        // duplicate. A single OOM incident typically hits app code AND
+        // Thread.StartInternal, so multiple sites per endpoint is the norm.
+        type Site = { frame: ReturnType<typeof getMeaningfulFrame>; method: string; count: number };
+        const grouped = details.reduce<Map<string, { d: typeof details[number]; count: number; sites: Map<string, Site> }>>((map, d) => {
+          const key = d.operation_Name || '(unknown path)';
+          const g = map.get(key) ?? { d, count: 0, sites: new Map<string, Site>() };
+          g.count++;
+          const frame = d.parsedStack ? getMeaningfulFrame(d.parsedStack) : null;
+          const siteKey = frame
+            ? `${frame.method}${frame.fileName ? `@${frame.fileName}:${frame.line}` : ''}`
+            : (d.method || '(unknown site)');
+          const site = g.sites.get(siteKey);
+          if (site) site.count++; else g.sites.set(siteKey, { frame, method: d.method, count: 1 });
+          map.set(key, g);
+          return map;
+        }, new Map());
+        return (
+          <SocketSection label="">
+            {/* No exception column: every row in this tab is the same type, so it
+                carried no information. The Timeout tab keeps one because its rows
+                span SQL, HTTP and Redis. */}
+            <div style={{ display: 'flex', gap: 8, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}>
+              <span style={{ flex: 1, minWidth: 0 }}>endpoint</span>
+              <span style={{ width: 46, textAlign: 'right', flexShrink: 0 }}>total</span>
+            </div>
+
+            {Array.from(grouped.values())
+              .sort((a, b) => b.count - a.count)
+              .map(({ d, count, sites }, j) => {
+                const weighted = Math.round(count * samplingX);
+                const siteList = Array.from(sites.values()).sort((a, b) => b.count - a.count);
+                return (
+                  <div
+                    key={j}
+                    style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 3,
+                             paddingTop: j > 0 ? 4 : 0, borderTop: j > 0 ? '1px solid rgba(255,255,255,0.04)' : undefined }}
+                  >
+                    {/* endpoint, with one line per allocation site beneath it */}
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        {/* Message and assembly ride on this tooltip — the OOM message
+                            is always the same framework boilerplate, so it earned no
+                            line of its own. */}
+                        <span
+                          style={{ color: '#cdd9e5' }}
+                          title={[d.operation_Name, d.innermostMessage || d.outerMessage, d.assembly].filter(Boolean).join('\n\n')}
+                        >{d.operation_Name || '(unknown path)'}</span>
+                        {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                        {siteList.length > 1 && (
+                          <span style={{ color: '#8b949e' }} title="Distinct stack frames that ran out of memory under this endpoint">
+                            {siteList.length} sites
+                          </span>
+                        )}
+                      </div>
+                      {siteList.map((s, k) => (
+                        <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span
+                            style={{ color: '#3fb950', fontFamily: 'monospace', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            title={s.frame ? 'Most meaningful stack frame — the allocation site' : 'Method that threw'}
+                          >
+                            {s.frame
+                              ? `${s.frame.method}${s.frame.fileName ? ` @ ${s.frame.fileName}${s.frame.line ? `:${s.frame.line}` : ''}` : ''}`
+                              : (s.method || '(unknown site)')}
+                          </span>
+                          {siteList.length > 1 && (
+                            <span className="tabular-nums" style={{ color: '#8b949e', width: 40, textAlign: 'right', flexShrink: 0 }}>
+                              {Math.round(s.count * samplingX).toLocaleString()}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* total — always shown, including 1: a blank cell read as missing
+                        data rather than "once" */}
+                    <span
+                      className="tabular-nums"
+                      style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600 }}
+                      title={samplingX >= 1.5
+                        ? `${weighted.toLocaleString()} occurrences, from ${count} sampled record${count === 1 ? '' : 's'}`
+                        : `${weighted.toLocaleString()} occurrence${weighted === 1 ? '' : 's'}`}
+                    >{weighted.toLocaleString()}</span>
+                  </div>
+                );
+              })}
+
+            {/* summary.operations is an uncapped dcount; the list comes from the
+                50-record detail cap. Only speak up when the two disagree. */}
+            {(summary?.operations ?? 0) > grouped.size && (
+              <div
+                style={{ color: '#484f58', marginTop: 2 }}
+                title="Narrow the time range to see the others."
+              >
+                Showing {grouped.size} of {summary!.operations} endpoints — the rest fall outside the 50 newest records.
+              </div>
+            )}
+          </SocketSection>
+        );
+      })()}
+    </>
+  );
+}
+
+function renderSocketTab(
+  si: SocketInsights | null | undefined,
+  counters: SocketCounters | null | undefined,
+  fmtTime: (iso: string) => string,
+): React.ReactNode {
+  const sm = counters?.metrics ?? null;
+  const summary  = si?.summary ?? null;
+  const byType   = si?.byType ?? [];
+  const byInst   = si?.byInstance ?? [];
+  const timeline = si?.timeline ?? [];
+  const targets  = si?.targets ?? [];
+  const details  = si?.details ?? [];
+  const verdict  = socketMetricVerdict(counters);
+  const hasAny   = (summary?.records ?? 0) > 0 || byType.length > 0 || (sm?.length ?? 0) > 0;
+
+  if (!si && !sm?.length) {
+    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Socket breakdown unavailable — expand the card to load details.</td></tr>;
+  }
+  if (!hasAny) {
+    return (
+      <tr style={{ fontSize: 9 }}>
+        <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
+      </tr>
+    );
+  }
+
+  const instTotal   = byInst.reduce((s, i) => s + i.trueCount, 0);
+  const topInst     = byInst[0] ?? null;
+  const topShare    = instTotal > 0 && topInst ? (topInst.trueCount / instTotal) * 100 : 0;
+  const samplingX   = summary && summary.records > 0 ? summary.trueCount / summary.records : 1;
+  const tlMax       = Math.max(1, ...timeline.map(p => p.count));
+  const tlPeak      = timeline.find(p => p.count === tlMax) ?? null;
+  const tlNonZero   = timeline.filter(p => p.count > 0).length;
+  const burst       = timeline.length > 3 && tlNonZero > 0 && (tlNonZero / timeline.length) <= 0.25;
+
+  return (
+    <>
+      {/* Headline */}
+      {summary && summary.records > 0 && (
+        <SocketSection label="Socket exceptions">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'baseline' }}>
+            <span style={{ color: SOCKET_ACCENT, fontWeight: 700, fontSize: 11 }}>{summary.trueCount.toLocaleString()}</span>
+            <span style={{ color: '#8b949e' }} title="Sum of itemCount — corrected for App Insights ingestion sampling. The raw record count is what the KQL returned.">
+              {summary.records.toLocaleString()} records{samplingX >= 1.5 ? ` · sampling ×${samplingX.toFixed(1)}` : ''}
+            </span>
+            <span style={{ color: '#8b949e' }}>{summary.instances.toLocaleString()} instance{summary.instances === 1 ? '' : 's'}</span>
+            <span style={{ color: '#8b949e' }}>{summary.operations.toLocaleString()} operation{summary.operations === 1 ? '' : 's'}</span>
+            {summary.firstSeen && <span style={{ color: '#484f58' }}>{fmtTime(summary.firstSeen)} → {fmtTime(summary.lastSeen)}</span>}
+          </div>
+        </SocketSection>
+      )}
+
+      {/* Zero state still reached when only the plan counters have data */}
+      {(summary?.records ?? 0) === 0 && (
+        <tr style={{ fontSize: 9 }}>
+          <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingTop: 4, paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
+        </tr>
+      )}
+
+      {/* Timeline */}
+      {timeline.length > 1 && (
+        <SocketSection label={`Timeline${burst ? ' — burst' : ' — sustained'}`}>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 26 }}>
+            {timeline.map((p, i) => (
+              <span
+                key={i}
+                title={`${fmtTime(p.t)} — ${p.count.toLocaleString()}`}
+                style={{
+                  flex: 1, minWidth: 1,
+                  height: `${Math.max(p.count > 0 ? 8 : 1, (p.count / tlMax) * 100)}%`,
+                  background: p.count === 0 ? 'rgba(255,255,255,0.05)' : p.count >= tlMax * 0.6 ? '#f85149' : SOCKET_ACCENT,
+                }}
+              />
+            ))}
+          </div>
+          <div style={{ color: '#484f58', marginTop: 2 }}>
+            peak {tlMax.toLocaleString()}{tlPeak ? ` @ ${fmtTime(tlPeak.t)}` : ''} · {tlNonZero}/{timeline.length} buckets active
+            {burst ? ' — concentrated spike, look for a traffic or deploy event' : ' — steady across the window, points at a connection leak rather than a spike'}
+          </div>
+        </SocketSection>
+      )}
+
+      {/* By exception type / client library */}
+      {byType.length > 0 && (
+        <SocketSection label="By type &amp; library">
+          {byType.map((t, i) => {
+            const pct = byType[0]!.trueCount > 0 ? (t.trueCount / byType[0]!.trueCount) * 100 : 0;
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.exType}>{t.exType}</span>
+                <span style={{ color: '#a371f7', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Assembly: ${t.assembly}`}>{t.assembly || '—'}</span>
+                <MiniBar pct={pct} color={SOCKET_ACCENT} />
+                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
+              </div>
+            );
+          })}
+        </SocketSection>
+      )}
+
+      {/* Per instance — SNAT ports are per worker */}
+      {byInst.length > 0 && (
+        <SocketSection label="By instance">
+          {byInst.map((inst, i) => {
+            const pct = instTotal > 0 ? (inst.trueCount / instTotal) * 100 : 0;
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${inst.instance}${inst.roleName ? ` · ${inst.roleName}` : ''}`}>{inst.instance}</span>
+                <MiniBar pct={pct} color={pct >= 60 ? '#f85149' : SOCKET_ACCENT} />
+                <span className="tabular-nums" style={{ color: '#8b949e', width: 40, textAlign: 'right', flexShrink: 0 }}>{pct.toFixed(0)}%</span>
+                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{inst.trueCount.toLocaleString()}</span>
+              </div>
+            );
+          })}
+          {byInst.length > 1 && (
+            <div style={{ color: topShare >= 60 ? '#f0883e' : '#484f58', marginTop: 2 }}>
+              {topShare >= 60
+                ? `${topShare.toFixed(0)}% on ${topInst?.instance} — worker-local port exhaustion. Restarting or scaling out only moves the problem; the leak is per-instance.`
+                : 'Spread across instances — plan-wide connection pressure rather than one bad worker.'}
+            </div>
+          )}
+          {byInst.length === 1 && (
+            <div style={{ color: '#484f58', marginTop: 2 }}>Single instance reporting — scale out will not dilute this.</div>
+          )}
+        </SocketSection>
+      )}
+
+      {/* Correlated failing dependency targets */}
+      {targets.length > 0 && (
+        <SocketSection label="Downstream targets (correlated by operation_Id)">
+          {targets.map((t, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+              <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.target}>{t.target}</span>
+              <span style={{ color: '#a371f7', width: 60, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Dependency type: ${t.depType}`}>{t.depType || '—'}</span>
+              <span style={{ color: '#d29922', width: 34, flexShrink: 0 }} title="resultCode">{t.resultCode || '—'}</span>
+              <span className="tabular-nums" style={{ color: '#58a6ff', width: 62, textAlign: 'right', flexShrink: 0 }} title="p95 duration">{fmtDuration(t.p95)}</span>
+              <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.count.toLocaleString()}</span>
+            </div>
+          ))}
+        </SocketSection>
+      )}
+
+      {/* Platform socket / TCP counters — published on the plan, not the site */}
+      {(sm?.length ?? 0) > 0 && (
+        <SocketSection label={`Outbound socket / TCP counters — plan ${counters?.planName || '(unknown)'}`}>
+          {sm!.map((m, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+              <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={SOCKET_METRIC_HELP[m.name] ?? m.name}>{m.name}</span>
+              <span className="tabular-nums" style={{ color: '#8b949e', width: 70, textAlign: 'right', flexShrink: 0 }} title="Average">avg {Math.round(m.avg).toLocaleString()}</span>
+              <span className="tabular-nums" style={{ color: '#58a6ff', width: 70, textAlign: 'right', flexShrink: 0 }} title="Maximum">max {Math.round(m.max).toLocaleString()}</span>
+            </div>
+          ))}
+          {verdict && (
+            <div style={{ color: verdict.color, marginTop: 3 }}>
+              TimeWait / Established = {Number.isFinite(verdict.ratio) ? verdict.ratio.toFixed(2) : '∞'} — {verdict.text}
+            </div>
+          )}
+          <div style={{ color: '#484f58', marginTop: 2 }}>
+            Counters are published on the App Service Plan, so they cover every site sharing it — not this site alone. Azure allocates a fixed SNAT port budget per worker (128 ports per unique destination by default), and a TIME_WAIT socket holds its port for ~4 minutes, so churn — not concurrency — is what exhausts the budget.
+          </div>
+        </SocketSection>
+      )}
+
+      {/* Records */}
+      {details.length > 0 && (() => {
+        const grouped = details.reduce<Map<string, { d: typeof details[number]; count: number; weight: number }>>((map, d) => {
+          const key = `${d.operation_Name || '(unknown path)'}|${d.innermostType || d.type}`;
+          const ex = map.get(key);
+          if (ex) { ex.count++; ex.weight += d.itemCount || 1; }
+          else map.set(key, { d, count: 1, weight: d.itemCount || 1 });
+          return map;
+        }, new Map());
+        return (
+          <SocketSection label={`Records (${details.length}${details.length >= 50 ? ' shown, newest first' : ''})`}>
+            {Array.from(grouped.values()).map(({ d, count, weight }, j) => {
+              const frame = d.parsedStack ? getMeaningfulFrame(d.parsedStack) : null;
+              return (
+                <div key={j} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span style={{ color: '#cdd9e5' }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
+                      {/* Hidden when it duplicates the stack frame printed below */}
+                      {d.method && d.method !== frame?.method && (
+                        <span style={{ color: '#a371f7' }} title="Method that threw">{d.method}</span>
+                      )}
+                      {d.cloud_RoleInstance && <span style={{ color: '#484f58' }} title="Instance">@{d.cloud_RoleInstance}</span>}
+                      {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                    </div>
+                    <div style={{ color: '#f85149', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.innermostMessage || d.outerMessage}>
+                      {d.innermostMessage || d.outerMessage || '—'}
+                    </div>
+                    {(d.innermostType || d.innermostMethod || d.assembly) && (
+                      <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {d.innermostType && <span title="Innermost type">{d.innermostType}</span>}
+                        {d.assembly && <span style={{ color: '#a371f7', opacity: 0.7 }} title="Assembly">{d.assembly}</span>}
+                        {d.innermostMethod && <span style={{ color: '#a371f7', opacity: 0.7 }} title="Innermost method">{d.innermostMethod}</span>}
+                      </div>
+                    )}
+                    {frame && (
+                      <div style={{ color: '#3fb950', fontFamily: 'monospace' }} title="Most meaningful stack frame">
+                        {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
+                      </div>
+                    )}
+                  </div>
+                  <span
+                    className="tabular-nums"
+                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600, marginTop: 1 }}
+                    title={weight > count ? `${weight.toLocaleString()} occurrences, from ${count} sampled record${count === 1 ? '' : 's'}` : `${weight.toLocaleString()} occurrence${weight === 1 ? '' : 's'}`}
+                  >{weight.toLocaleString()}</span>
+                </div>
+              );
+            })}
+          </SocketSection>
+        );
+      })()}
+    </>
   );
 }
 
@@ -143,16 +858,25 @@ function snatScore(opts: {
 
   const socketScore     = Math.min(socketExceptions / 50, 1.0);
   const depFailScore    = Math.min(dependencyFailureRate / 20, 1.0);
-  const depTimeoutScore = Math.min(dependencyTimeouts / 25, 1.0);
+  // Divisor 400, not the original 25: the timeout-class result-code filter now catches
+  // Cloudflare 524s, HttpClient cancellations and SQL -2, and the count is corrected for
+  // ingestion sampling, so real apps land in the hundreds. At 25 every one of them
+  // clamped to 1.0 and the contributor could not discriminate at all.
+  const depTimeoutScore = Math.min(dependencyTimeouts / 400, 1.0);
   const depP99Score     = Math.min(dependencyP99Ms / 5000, 1.0);
   const connGrowth      = Math.max(connectionCurrent - connectionBaseline, 0);
   const connGrowthScore = Math.min(connGrowth / 64, 1.0);
   const http5xxScore    = Math.min(http5xxRate / 5, 1.0);
 
+  // Weights sum to 1.00. socketScore now counts socket-layer exceptions only
+  // (SOCKET_MATCH); it previously used a filter that also matched any "timeout"
+  // message, double-counting evidence already scored by depTimeoutScore. Weight
+  // moved from socket (0.30 → 0.20) to dependency timeouts (0.20 → 0.30) so
+  // timeout evidence keeps its proportional influence on the score.
   const baseConfidence = 100 * (
-    0.30 * socketScore +
+    0.20 * socketScore +
     0.25 * depFailScore +
-    0.20 * depTimeoutScore +
+    0.30 * depTimeoutScore +
     0.15 * depP99Score +
     0.05 * connGrowthScore +
     0.05 * http5xxScore
@@ -181,9 +905,17 @@ function snatScore(opts: {
   };
 }
 
-const DB_COLORS = { avg: '#5eead4', max: '#2dd4bf' } as const; // teal — distinct from CPU purple / Memory orange
 
 const AI_STATUS_COLORS = { healthy: '#3fb950', warning: '#d29922', critical: '#f85149' } as const;
+
+/** The CPI verdict, shown on the collapsed row so the diagnosis is visible without
+ *  expanding. Score bands mirror snatScore's label thresholds. */
+function snatVerdict(score: number, socketExc: number): { text: string; color: string; bold: boolean } | null {
+  if (score >= 81 && socketExc > 0)  return { text: '🔴 Probable SNAT Port Exhaustion — socket-layer exceptions detected with critical score', color: '#f85149', bold: true };
+  if (score >= 61 && socketExc > 0)  return { text: '⚠ SNAT port pressure detected — monitor socket exception trend', color: '#e6773d', bold: false };
+  if (score >= 81 && socketExc === 0) return { text: '🔴 Critical SNAT risk — check network connectivity and dependency health', color: '#f85149', bold: false };
+  return null;
+}
 
 const SNAT_FACTOR_COLORS = {
   socket:  '#06b6d4',
@@ -195,9 +927,9 @@ const SNAT_FACTOR_COLORS = {
 } as const;
 
 const SNAT_FACTOR_TIPS = {
-  socket:  'Socket Exceptions: count of App Insights exception logs matching SocketException patterns. Source: requestInsights.insight.socketExceptions',
+  socket:  'Socket Exceptions: transport-layer failures only — SocketException, ENOBUFS, "No buffer space available", connection refused, ETIMEDOUT, SNAT. No connection was established. Application timeouts are excluded (they are scored by Dependencies Timeouts). Weight 0.20. Source: requestInsights.insight.socketLayerExceptions',
   depFail: 'Dependencies Failure Rate: percentage of failed dependency calls. Source: App Insights dependencies where success == false / totalDependencies × 100',
-  depTO:   'Dependencies Timeouts: sum of dependency calls returning timeout-class result codes (408, 500, 502, 503, 504). Source: requestInsights.dependencyTimeouts',
+  depTO:   'Dependencies Timeouts: dependency calls returning a genuine timeout result code — 408 Request Timeout, 504 Gateway Timeout, 524 (Cloudflare origin timeout), Canceled (HttpClient deadline elapsed), and SQL -2 (command timeout). 500/502/503 are server errors, not timeouts, and are excluded. Carries the timeout evidence that used to be double-counted inside the socket signal — weight 0.30. Source: requestInsights.dependencyTimeouts',
   depP99:  'Dependencies P99: 99th-percentile dependency call duration in ms. Source: App Insights percentile(duration, 99) on dependencies',
   conn:    'Connection Growth: increase in active TCP connections (second-half avg − first-half avg). Source: Azure Monitor AppConnections metric',
   http5xx: 'HTTP 5xx Rate: percentage of requests returning 5xx status. Source: App Insights requests where resultCode startswith "5" / totalRequests × 100',
@@ -208,7 +940,7 @@ function SkeletonBlock({ className }: { className?: string }) {
 }
 
 export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
-  const { elementRef: cardRef, copyAsImage, isCopying } = useCopyElementAsImage<HTMLDivElement>({
+  const { elementRef: cardRef, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     fileNamePrefix: `azure-${appKey}-${Date.now()}`,
     backgroundColor: '#09090b',
   });
@@ -222,7 +954,12 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [urExpanded, setUrExpanded] = useState(false);
   const [requestsExpanded, setRequestsExpanded] = useState(false);
   const [depsExpanded, setDepsExpanded] = useState(false);
+  const [usersExpanded, setUsersExpanded] = useState(false);
+  const [connExpanded, setConnExpanded] = useState(false);
+  const [connAPIExpanded, setConnAPIExpanded] = useState(false);
   const [errorsExpanded, setErrorsExpanded] = useState(false);
+  const [errTab, setErrTab] = useState<ExcTab>('generic');
+  const [errAPITab, setErrAPITab] = useState<ExcTab>('generic');
   const [availExpanded, setAvailExpanded] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [visibleBlocks, setVisibleBlocks] = useState({
@@ -241,9 +978,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [snatExpanded, setSnatExpanded] = useState(false);
   const [snatAPIExpanded, setSnatAPIExpanded] = useState(false);
   const [depsTab, setDepsTab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
-  const [depsFilter, setDepsFilter] = useState<'all' | 'internal' | 'thirdParty'>('all');
+  const [depsFilter, setDepsFilter] = useState<DepsFilter>('internal');
   const [depsAPITab, setDepsAPITab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
-  const [depsAPIFilter, setDepsAPIFilter] = useState<'all' | 'internal' | 'thirdParty'>('all');
+  const [depsAPIFilter, setDepsAPIFilter] = useState<DepsFilter>('internal');
   const [depsAPIExpanded, setDepsAPIExpanded] = useState(false);
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
@@ -300,6 +1037,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       apiName: appCfg?.apiName,
       apiInsightsAppId: appCfg?.apiInsightsAppId,
       apiType: appCfg?.apiType,
+      // Needed for the report's server-side database metrics (Category 15).
+      dbName: appCfg?.dbName,
+      dbServerName: appCfg?.dbServerName,
       logAnalyticsWorkspaceId: appCfg?.logAnalyticsWorkspaceId,
       appGatewayResourceId: appCfg?.appGatewayResourceId,
       frontDoorResourceId: appCfg?.frontDoorResourceId,
@@ -332,8 +1072,12 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     const offChunk = window.electronAPI.incidentReport.onRcaChunk(({ appKey: k, chunk }) => {
       if (k === appKey) setRcaText(prev => prev + chunk);
     });
-    const offProgress = window.electronAPI.incidentReport.onRcaProgress(({ appKey: k, stage }) => {
-      if (k === appKey) setRcaStages(prev => [...prev, stage]);
+    const offProgress = window.electronAPI.incidentReport.onRcaProgress(({ appKey: k, stage, reset }) => {
+      if (k !== appKey) return;
+      setRcaStages(prev => [...prev, stage]);
+      // Model fallback restarts the stream — drop the aborted partial so the two
+      // attempts don't render as one stitched-together analysis.
+      if (reset) setRcaText('');
     });
     try {
       const result = await window.electronAPI.incidentReport.rca(buildIncidentPayload());
@@ -362,6 +1106,45 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       toast.success('RCA saved & markdown copied');
     } catch (e: any) {
       toast.error('Export failed', { description: e?.message });
+    }
+  }, [appKey, buildIncidentPayload, rcaText]);
+
+  const exportRcaPdf = useCallback(async () => {
+    try {
+      const { startMs, endMs } = buildIncidentPayload();
+      // HTML is built here rather than in main: `marked` and the print stylesheet
+      // both live on the renderer side, and this keeps the printed report in step
+      // with what the dialog shows.
+      const html = buildRcaPrintHtml(rcaText, {
+        appName: appKey,
+        window: formatSgtRange(startMs, endMs),
+        generated: formatSgt(Date.now()),
+      });
+      const result = await window.electronAPI.incidentReport.exportRcaPdf({ appName: appKey, startMs, endMs, html });
+      if (!result.success) throw new Error(result.error ?? 'PDF export failed');
+      toast.success('RCA PDF saved');
+    } catch (e: any) {
+      toast.error('PDF export failed', { description: e?.message });
+    }
+  }, [appKey, buildIncidentPayload, rcaText]);
+
+  // Just the plain-English summary, formatted for a Teams chat — the part that
+  // gets shared with non-engineers, without the full report attached.
+  const copySummaryForTeams = useCallback(async () => {
+    try {
+      const { summary } = splitQuickSummary(rcaText);
+      if (!summary) throw new Error('This report has no Quick Summary section.');
+      const { startMs, endMs } = buildIncidentPayload();
+      const meta = { appName: appKey, window: formatSgtRange(startMs, endMs) };
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([buildQuickSummaryTeamsHtml(summary, meta)], { type: 'text/html' }),
+          'text/plain': new Blob([buildQuickSummaryTeamsText(summary, meta)], { type: 'text/plain' }),
+        }),
+      ]);
+      toast.success('Quick Summary copied for Teams');
+    } catch (e: any) {
+      toast.error('Copy failed', { description: e?.message });
     }
   }, [appKey, buildIncidentPayload, rcaText]);
 
@@ -610,6 +1393,10 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
 
   const SGT = { timeZone: 'Asia/Singapore' } as const;
   const fmtShort = (d: Date) => d.toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT';
+  const fmtExcTime = (iso: string) => {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleTimeString('en-GB', { ...SGT, hour: '2-digit', minute: '2-digit', hour12: false });
+  };
   const seriesStart = metrics.cpu.series[0]?.t ? fmtShort(new Date(metrics.cpu.series[0].t)) : null;
   const seriesEnd = metrics.cpu.series.at(-1)?.t ? fmtShort(new Date(metrics.cpu.series.at(-1)!.t)) : null;
   const spanMinutes = metrics.cpu.series.length > 1
@@ -630,19 +1417,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     outage:             'hsl(var(--destructive))',
   };
 
-  const getMeaningfulFrame = (raw: string) => {
-    try {
-      const frames = JSON.parse(raw) as Array<{ assembly?: string; fileName?: string; line?: number; method?: string }>;
-      return frames.find(f => {
-        const asm = f.assembly ?? '';
-        return asm && !asm.startsWith('System.') && !asm.startsWith('Microsoft.') && !asm.startsWith('mscorlib') && !asm.startsWith('netstandard');
-      }) ?? frames[0] ?? null;
-    } catch { return null; }
-  };
-
-  type ErrDetail = { timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string };
+  type ErrDetail ={ timestamp: string; type: string; outerMessage: string; method: string; assembly: string; operation_Name: string; innermostMessage: string; severityLevel: number | null; handledAt: string; cloud_RoleName: string; client_Browser: string; client_OS: string; innermostType: string; innermostMethod: string; parsedStack: string };
   const renderErrTypes = (
-    types: Array<{ type: string; count: number }>,
+    // `trueCount` (sampling-corrected) is displayed when present so this list is in
+    // the same unit as the tab badge and the row total; `count` is the raw fallback.
+    types: Array<{ type: string; count: number; trueCount?: number }>,
     details: ErrDetail[] | null | undefined,
     selType: string | null,
     setSelType: (t: string | null) => void,
@@ -652,6 +1431,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       : <>{types.map((e, i) => {
         const isSelected = selType === e.type;
         const filtered = (details ?? []).filter(d => d.type === e.type);
+        const shown = e.trueCount ?? e.count;
         return (
           <React.Fragment key={i}>
             <tr
@@ -667,7 +1447,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 )}
                 {e.type}
               </td>
-              <td className="text-right tabular-nums" style={{ color: e.count > 10 ? '#f85149' : e.count > 3 ? '#d29922' : '#484f58' }}>{e.count.toLocaleString()}</td>
+              <td
+                className="text-right tabular-nums"
+                style={{ color: shown > 10 ? '#f85149' : shown > 3 ? '#d29922' : '#484f58' }}
+                title={e.trueCount != null && e.trueCount !== e.count ? `${e.trueCount.toLocaleString()} occurrences, from ${e.count.toLocaleString()} sampled records` : undefined}
+              >{shown.toLocaleString()}</td>
             </tr>
             {isSelected && filtered.length === 0 && (
               <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 32, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No detail records available</td></tr>
@@ -686,7 +1470,13 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ color: 'var(--muted-foreground)' }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
-                            {d.method && <span style={{ color: '#a371f7' }} title="Method">{d.method}</span>}
+                            {/* Same rule as the Timeout and OOM tabs: hidden when it
+                                duplicates the stack frame printed underneath, shown
+                                when they differ (thrown inside a library, frame in
+                                your own code). */}
+                            {d.method && d.method !== frame?.method && (
+                              <span style={{ color: '#a371f7' }} title="Method that threw">{d.method}</span>
+                            )}
                           </div>
                           {(d.innermostType || d.innermostMethod) && (
                             <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -700,7 +1490,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                             </div>
                           )}
                         </div>
-                        {count > 1 && <span style={{ color: '#f85149', fontWeight: 600, flexShrink: 0, marginTop: 1 }}>×{count}</span>}
+                        <span
+                          className="tabular-nums"
+                          style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600, marginTop: 1 }}
+                          title={`${count.toLocaleString()} sampled record${count === 1 ? '' : 's'}`}
+                        >{count.toLocaleString()}</span>
                       </div>
                     </td>
                   </tr>
@@ -821,7 +1615,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
             onClick={() => handleRunRca()}
             disabled={rcaOpen && rcaStatus === 'running'}
-            title="Run Claude RCA on captured metrics"
+            title="Generate RCA Report from captured metrics"
             data-html2canvas-ignore="true"
           >
             <ScanSearch
@@ -832,17 +1626,6 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
               } : undefined}
             />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            onClick={copyAsImage}
-            style={{ visibility: isCopying ? 'hidden' : 'visible' }}
-            title="Copy as image"
-            data-html2canvas-ignore="true"
-          >
-            <Copy className="w-3.5 h-3.5" />
           </Button>
           <Button
             variant="ghost"
@@ -872,9 +1655,13 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       )}
       {/* Chart — edge to edge */}
       <div data-teams-chart>
+        {/* dbCpu/dbMemory follow the Database block toggle, so hiding those rows
+            hides their lines from the chart too. */}
         <CombinedChart
           cpu={metrics.cpu}
           memory={metrics.memory}
+          dbCpu={visibleBlocks.database ? metrics.dbCpu : null}
+          dbMemory={visibleBlocks.database ? metrics.dbMemory : null}
           downtimeIntervals={downtimeIntervals}
           urDowntimeIntervals={urDowntimeIntervals}
           availabilitySeries={undefined}
@@ -918,9 +1705,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             {visibleBlocks.response && metrics.responseTime != null && (
               <tr>
                 <td className="text-muted-foreground font-bold" title="Response Time: average and P99 server-side request duration in seconds, sourced from App Insights request telemetry. Elevated P99 often correlates with SNAT port wait or slow downstream dependencies.">Response</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.avg}s</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.p99 != null ? `${metrics.responseTime.p99}s` : '—'}</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{metrics.responseTime.max}s</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.avg * 1000)}</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.p99 != null ? metrics.responseTime.p99 * 1000 : null)}</td>
+                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.max * 1000)}</td>
               </tr>
             )}
             {visibleBlocks.users && metrics.users != null && (() => {
@@ -931,18 +1718,41 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const maxPoint = series.reduce<typeof series[number] | null>((best, p) => (best == null || p.m > best.m ? p : best), null);
               const p99Val = metrics.users.p99;
               const p99Point = series.reduce<typeof series[number] | null>((best, p) => (best == null || Math.abs(p.v - p99Val) < Math.abs(best.v - p99Val) ? p : best), null);
+              const hasSeries = series.length > 1;
               return (
-                <tr>
-                  <td className="text-muted-foreground font-bold" title="Users: distinct client IPs seen in requests per time bucket, sourced from App Insights (Frontend only). Average/P99/Max are computed across buckets, not across individual requests.">Users</td>
-                  <td className="text-right" style={{ color: '#a371f7' }} title={firstPoint && lastPoint ? `Across ${series.length} time buckets from ${fmtSgt(firstPoint.t)} to ${fmtSgt(lastPoint.t)} SGT` : undefined}>{metrics.users.avg}</td>
-                  <td className="text-right" style={{ color: '#a371f7' }} title={p99Point ? `Closest bucket at ${fmtSgt(p99Point.t)} SGT (${p99Point.v} users)` : undefined}>{metrics.users.p99}</td>
-                  <td className="text-right" style={{ color: '#a371f7' }} title={maxPoint ? `Peak at ${fmtSgt(maxPoint.t)} SGT` : undefined}>{metrics.users.max}</td>
-                </tr>
+                <>
+                  <tr
+                    style={{ cursor: hasSeries ? 'pointer' : 'default' }}
+                    onClick={() => hasSeries && setUsersExpanded(v => !v)}
+                    onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold" title="Users: distinct client IPs seen in requests per time bucket, sourced from App Insights (Frontend only). Average/P99/Max are computed across buckets, not across individual requests.">
+                      Users
+                      {hasSeries && (usersExpanded
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                      )}
+                    </td>
+                    <td className="text-right" style={{ color: '#a371f7' }} title={firstPoint && lastPoint ? `Across ${series.length} time buckets from ${fmtSgt(firstPoint.t)} to ${fmtSgt(lastPoint.t)} SGT` : undefined}>{metrics.users.avg}</td>
+                    <td className="text-right" style={{ color: '#a371f7' }} title={p99Point ? `Closest bucket at ${fmtSgt(p99Point.t)} SGT (${p99Point.v} users)` : undefined}>{metrics.users.p99}</td>
+                    <td className="text-right" style={{ color: '#a371f7' }} title={maxPoint ? `Peak at ${fmtSgt(maxPoint.t)} SGT` : undefined}>{metrics.users.max}</td>
+                  </tr>
+                  {usersExpanded && hasSeries && (
+                    <tr>
+                      <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
+                        <SeriesChart series={series} color="#a371f7" name="Users" height={130} />
+                        <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
+                          Distinct client IPs per time bucket — one value per bucket, so the Average / P99 / Max above are computed across buckets, not within them.
+                          {maxPoint ? ` Peak ${maxPoint.m.toLocaleString()} at ${fmtSgt(maxPoint.t)} SGT.` : ''}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
               );
             })()}
             {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
-              const availPct = metrics.availability?.pct ?? null;
-              const availColor = availPct == null ? 'var(--muted-foreground)' : availPct >= 99 ? '#3fb950' : availPct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
               const feInstances = metrics.instances ?? [];
               const apiInstances = metrics.apiInstances ?? [];
               const feNames = new Set(feInstances.map(i => i.name.toLowerCase()));
@@ -954,13 +1764,73 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                   .map(i => ({ ...i, role: 'api' as const })),
               ];
               const hasInstances = allInstances.length > 0;
-              const allSeriesVals = (metrics.instanceHealthSeries ?? []).flatMap(s => s.series.map(p => p.v));
-              const instAvgHealth = allSeriesVals.length ? allSeriesVals.reduce((s, v) => s + v, 0) / allSeriesVals.length : null;
-              const instMinHealth = allSeriesVals.length ? Math.min(...allSeriesVals) : null;
-              const crashedInstCount = instMinHealth != null && instMinHealth < 1
-                ? (metrics.instanceHealthSeries ?? []).filter(s => s.series.some(p => p.v < 1)).length
-                : 0;
-              const healthColor = (v: number | null) => v == null ? 'var(--muted-foreground)' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : '#f85149';
+              const hc = (v: number | null) => v == null ? '#8b9ab3' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+
+              // Derived once and used by both the collapsed header summary and the
+              // expanded chart, so the latest-health figures in the two can never
+              // disagree.
+              const rows = allInstances.map((inst, i) => {
+                      const shortInstName = inst.name.split('_').slice(-1)[0] || inst.name;
+                      const apiOnly = inst.role === 'api';
+                      const activeSeries = apiOnly
+                        ? (metrics.apiInstanceHealthSeries ?? [])
+                        : (metrics.instanceHealthSeries ?? []);
+                      const seriesIdx = activeSeries.findIndex(
+                        s => s.name === inst.name ||
+                             s.name.toLowerCase() === inst.name.toLowerCase() ||
+                             s.name.toLowerCase().includes(shortInstName.toLowerCase()) ||
+                             inst.name.toLowerCase().includes(s.name.toLowerCase())
+                      );
+                      const series = seriesIdx >= 0 ? activeSeries[seriesIdx] : undefined;
+                      const points = series?.series ?? [];
+                      const vals = points.map(p => p.v);
+                      const apiOnlyIdx = apiOnly
+                        ? apiInstances.filter(a => !feNames.has(a.name.toLowerCase())).findIndex(a => a.name === inst.name)
+                        : -1;
+                      const colorIdx = apiOnly
+                        ? (feInstances.length + (apiOnlyIdx >= 0 ? apiOnlyIdx : i)) % INSTANCE_PALETTE.length
+                        : seriesIdx >= 0 ? seriesIdx % INSTANCE_PALETTE.length : i % INSTANCE_PALETTE.length;
+                      // API instances with no metric data still have an ARM health status.
+                      const statusFallback = (apiOnly && inst.healthPct === null && !vals.length)
+                        ? (inst.healthStatus === 'Healthy' ? 100 : inst.healthStatus === 'Degraded' ? 70 : inst.healthStatus === 'Stopped' ? 0 : null)
+                        : null;
+                      const fallbackPct = inst.healthPct ?? statusFallback;
+                      const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
+                      const minVal = vals.length ? Math.min(...vals) : fallbackPct;
+                      // Latest = the most recent bucket in which the instance actually
+                      // served traffic. No-data buckets are excluded upstream, so this
+                      // is a real reading rather than an assumed 100%.
+                      const latest = vals.length ? (vals[vals.length - 1] ?? null) : fallbackPct;
+                      const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
+                      const seriesRoleName = series?.roleName ?? null;
+
+                      // Lifecycle. A point exists in the series only for buckets where
+                      // the instance produced traffic, so the first point ≈ when it came
+                      // online and the last ≈ its final activity. An instance still
+                      // reporting at the end of the range is shown as running to the
+                      // range end rather than to its last bucket, which would otherwise
+                      // read as though it had disappeared.
+                      const firstSeenIso = points.length ? (points[0]?.t ?? null) : null;
+                      const lastSeenIso = points.length ? (points[points.length - 1]?.t ?? null) : null;
+                      const fmtDt = (iso: string) => new Date(iso).toLocaleString(undefined, {
+                        month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+                      });
+                      const rangeEndMs = rangeEnd ? new Date(rangeEnd).getTime() : Date.now();
+                      const stillActive = lastSeenIso
+                        ? (rangeEndMs - new Date(lastSeenIso).getTime()) <= 15 * 60 * 1000
+                        : false;
+                      const lifecycle = firstSeenIso && lastSeenIso
+                        ? `${fmtDt(firstSeenIso)} → ${stillActive ? fmtDt(new Date(rangeEndMs).toISOString()) : fmtDt(lastSeenIso)}`
+                        : null;
+
+                return {
+                  name: inst.name,
+                  label: seriesRoleName ? `${seriesRoleName}: ${shortName}` : shortName,
+                  shortName, seriesRoleName, avg, minVal, latest, points,
+                  lifecycle, stillActive,
+                  color: INSTANCE_PALETTE[colorIdx] ?? '#8b9ab3',
+                };
+              }).filter(r => r.avg !== null || r.points.length > 0);
 
               return (
                 <>
@@ -970,101 +1840,86 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     onMouseEnter={e => hasInstances && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
-                    <td className="text-muted-foreground font-bold">
-                      <span title="Instances: individual App Service instances (scale-out units). Each instance has its own SNAT port allocation — more instances means more total SNAT ports available. Health % reflects App Insights availability probe results per instance.">Instances</span>{hasInstances && (availExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
-                    </td>
-                    <td className="text-right tabular-nums" style={{ color: instAvgHealth != null ? healthColor(instAvgHealth) : 'var(--muted-foreground)' }}>
-                      {instAvgHealth != null ? `${instAvgHealth.toFixed(2)}%` : '—'}
-                    </td>
-                    <td className="text-right text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums" style={{ color: instMinHealth != null ? healthColor(instMinHealth) : 'var(--muted-foreground)' }}>
-                      {instMinHealth != null ? `${instMinHealth.toFixed(2)}%${crashedInstCount > 0 ? ` · ${crashedInstCount} inst` : ''} - min` : '—'}
+                    {/* Merged: the old empty cells only drew column dividers across an
+                        otherwise blank row. One cell carries the label plus each
+                        instance's latest health, so the collapsed row still says which
+                        instances exist and how they are doing right now. */}
+                    <td colSpan={4}>
+                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px 10px' }}>
+                        <span className="text-muted-foreground font-bold">
+                          <span title="Instances: individual App Service instances (scale-out units). Each instance has its own SNAT port allocation — more instances means more total SNAT ports available. Health % is request-derived per instance: (requests − 5xx) / requests.">Instances</span>
+                          {hasInstances && (availExpanded
+                            ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                            : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
+                        </span>
+                        {rows.length > 0 && (
+                          <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px 12px' }}>
+                            {rows.map(r => (
+                              <span key={r.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10 }} title={`${r.name} — latest health`}>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: r.color, flexShrink: 0 }} />
+                                <span style={{ color: r.color }}>{r.shortName}</span>
+                                <span className="tabular-nums" style={{ color: hc(r.latest) }}>
+                                  {r.latest != null ? `${r.latest.toFixed(2)}%` : '—'}
+                                </span>
+                                {!r.stillActive && r.lifecycle && (
+                                  <span style={{ color: '#d29922', fontSize: 9 }} title="Stopped reporting before the window ended.">stopped</span>
+                                )}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
-                  {availExpanded && allInstances.map((inst, i) => {
-                    const shortInstName = inst.name.split('_').slice(-1)[0] || inst.name;
-                    const instHealthSeries = metrics.instanceHealthSeries ?? [];
-                    const apiHealthSeries = metrics.apiInstanceHealthSeries ?? [];
-                    const apiOnly = inst.role === 'api';
-                    const activeSeries = apiOnly ? apiHealthSeries : instHealthSeries;
-                    const preSeriesIdx = activeSeries.findIndex(
-                      s => s.name === inst.name ||
-                           s.name.toLowerCase() === inst.name.toLowerCase() ||
-                           s.name.toLowerCase().includes(shortInstName.toLowerCase()) ||
-                           inst.name.toLowerCase().includes(s.name.toLowerCase())
-                    );
-                    const preSeriesPoints = preSeriesIdx >= 0 ? (activeSeries[preSeriesIdx]?.series ?? []) : [];
-                    const preVals = preSeriesPoints.map(p => p.v);
-                    const apiOnlyIdx = apiOnly
-                      ? apiInstances.filter(a => !feNames.has(a.name.toLowerCase())).findIndex(a => a.name === inst.name)
-                      : -1;
-                    const seriesIdx = preSeriesIdx;
-                    const series = seriesIdx >= 0 ? activeSeries[seriesIdx] : undefined;
-                    const colorIdx = apiOnly
-                      ? (feInstances.length + (apiOnlyIdx >= 0 ? apiOnlyIdx : i)) % INSTANCE_PALETTE.length
-                      : seriesIdx >= 0 ? seriesIdx % INSTANCE_PALETTE.length : i % INSTANCE_PALETTE.length;
-                    const instanceColor = INSTANCE_PALETTE[colorIdx];
-                    const vals = preVals;
-                    // For API instances with no metric data, derive a fallback from ARM healthStatus
-                    const statusFallback = (apiOnly && inst.healthPct === null && !vals.length)
-                      ? (inst.healthStatus === 'Healthy' ? 100 : inst.healthStatus === 'Degraded' ? 70 : inst.healthStatus === 'Stopped' ? 0 : null)
-                      : null;
-                    const fallbackPct = inst.healthPct ?? statusFallback;
-                    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
-                    const latest = vals.length ? (vals[vals.length - 1] ?? null) : fallbackPct;
-                    const minVal = vals.length ? Math.min(...vals) : fallbackPct;
-                    const minIdx = vals.length ? vals.indexOf(Math.min(...vals)) : -1;
-                    const minTimeIso = minIdx >= 0 ? (preSeriesPoints[minIdx]?.t ?? null) : null;
-                    if (avg === null && latest === null && minVal === null) return null;
-                    const hc = (v: number | null) => v == null ? '#8b9ab3' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : 'hsl(var(--destructive))';
-                    const avgColor = hc(avg);
-                    const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
-                    // roleName from App Insights overrides ARM-based role detection
-                    const seriesRoleName = series?.roleName ?? null;
-                    const effectiveRole = seriesRoleName
-                      ? (seriesRoleName === appConfig?.apiName ? 'api' : 'fe')
-                      : inst.role;
-
-                    // First / last seen — derived from the per-instance series.
-                    // A point exists in the series only when the instance produced traffic in that bucket,
-                    // so first point ≈ when instance came online and last point ≈ last activity.
-                    const firstSeenIso = preSeriesPoints.length ? (preSeriesPoints[0]?.t ?? null) : null;
-                    const lastSeenIso  = preSeriesPoints.length ? (preSeriesPoints[preSeriesPoints.length - 1]?.t ?? null) : null;
-                    const fmtDt = (iso: string) => {
-                      const d = new Date(iso);
-                      return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
-                    };
-                    // Determine "still active": lastSeen within 1 granularity bucket of rangeEnd.
-                    const rangeEndMs = rangeEnd ? new Date(rangeEnd).getTime() : Date.now();
-                    const stillActive = lastSeenIso
-                      ? (rangeEndMs - new Date(lastSeenIso).getTime()) <= 15 * 60 * 1000
-                      : false;
-                    const lifecycle = firstSeenIso && lastSeenIso
-                      ? `${fmtDt(firstSeenIso)} → ${stillActive ? fmtDt(new Date(rangeEndMs).toISOString()) : fmtDt(lastSeenIso)}`
-                      : null;
-                    return (
-                      <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                        <td className="truncate max-w-0" style={{ paddingLeft: 20, color: instanceColor }} title={inst.name}>
-                          <div>
-                            {shortName}
-                            {seriesRoleName && (
-                              <span style={{ marginLeft: 5, fontSize: 9, color: '#484f58', fontWeight: 600, letterSpacing: '0.04em' }}>
-                                {seriesRoleName}
-                              </span>
-                            )}
+                  {availExpanded && rows.length > 0 && (
+                    <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                        {/* No left indent: the chart spans the full row width, and the
+                            YAxis width already supplies the gutter its labels need.
+                            Indenting here (as the removed per-instance rows did) just
+                            left an empty strip beside the axis. */}
+                        <td colSpan={4} style={{ padding: '8px 12px 10px 0' }}>
+                          <InstanceHealthChart
+                            instances={rows.map(r => ({ name: r.name, label: r.label, series: r.points }))}
+                            colors={rows.map(r => r.color)}
+                            height={150}
+                          />
+                          {/* Legend doubles as the readout the removed rows carried:
+                              colour, name, role, avg, min, and lifecycle range. */}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '8px 18px', marginTop: 8 }}>
+                            {rows.map(r => (
+                              <div key={r.name} style={{ fontSize: 10, lineHeight: 1.4 }} title={r.name}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                  <span style={{ width: 8, height: 2, background: r.color, borderRadius: 1, flexShrink: 0 }} />
+                                  <span style={{ color: r.color }}>{r.shortName}</span>
+                                  {r.seriesRoleName && (
+                                    <span style={{ fontSize: 9, color: '#484f58', fontWeight: 600, letterSpacing: '0.04em' }}>{r.seriesRoleName}</span>
+                                  )}
+                                  <span className="tabular-nums" style={{ color: hc(r.avg) }}>
+                                    {r.avg != null ? `${r.avg.toFixed(2)}%` : '—'}
+                                  </span>
+                                  <span className="tabular-nums" style={{ color: '#6e7681' }}>
+                                    min {r.minVal != null ? `${r.minVal.toFixed(2)}%` : '—'}
+                                  </span>
+                                </div>
+                                {r.lifecycle && (
+                                  <div style={{ fontSize: 9, color: '#6e7681', fontWeight: 400, marginTop: 1, paddingLeft: 13 }}>
+                                    {r.lifecycle}
+                                    {!r.stillActive && (
+                                      <span
+                                        style={{ marginLeft: 4, color: '#d29922' }}
+                                        title="No traffic in the final buckets of the range — this instance stopped reporting before the window ended."
+                                      >
+                                        stopped
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
                           </div>
-                          {lifecycle && (
-                            <div style={{ fontSize: 9, color: '#6e7681', fontWeight: 400, marginTop: 1 }}>
-                              {lifecycle}
-                            </div>
-                          )}
-                        </td>
-                        <td className="text-right tabular-nums" style={{ color: avgColor }}>{avg != null ? `${avg.toFixed(2)}%` : '—'}</td>
-                        <td className="text-right tabular-nums" style={{ color: hc(latest) }}>{latest != null ? <>{latest.toFixed(2)}%{lastSeenIso && <span style={{ fontSize: 9, color: '#6e7681', fontWeight: 400, marginLeft: 4 }}>{new Date(lastSeenIso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}</span>}</> : '—'}</td>
-                        <td className="text-right tabular-nums" style={{ color: hc(minVal) }}>{minVal != null ? <>{minVal.toFixed(2)}%<span style={{ marginLeft: 4 }}>- min</span>{minTimeIso && <span style={{ fontSize: 9, color: '#6e7681', fontWeight: 400, marginLeft: 4 }}>{new Date(minTimeIso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}</span>}</> : '—'}</td>
-                      </tr>
-                    );
-                  })}
+                    </td>
+                  </tr>
+                  )}
                 </>
               );
             })()}
@@ -1075,7 +1930,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const spanSec = spanMinutes * 60;
               const uptimePct = spanSec > 0 ? Math.round((1 - totalDownSec / spanSec) * 10000) / 100 : null;
               const uptimeColor = uptimePct == null ? '#8b9ab3' : uptimePct >= 99 ? '#3fb950' : uptimePct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
-              const fmtDur = (sec: number) => sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.round(sec / 60)}m` : `${(sec / 3600).toFixed(1)}h`;
+              const fmtDur = (sec: number) => fmtDuration(sec * 1000);
               const incidentColor = totalIncidents === 0 ? '#3fb950' : '#f85149';
               return (
                 <>
@@ -1292,17 +2147,17 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             {(metrics.dbCpu?.series?.length ?? 0) > 0 && (
               <tr>
                 <td className="text-muted-foreground font-bold" title="DB CPU: average and max CPU utilization of the Azure SQL database (vCore/serverless), sourced from Azure Monitor cpu_percent metric.">CPU</td>
-                <td className="text-right" style={{ color: DB_COLORS.avg }}>{(+metrics.dbCpu!.avg).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbCpu!.p99).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbCpu!.max).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbCpuAvg }}>{(+metrics.dbCpu!.avg).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbCpuMax }}>{(+metrics.dbCpu!.p99).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbCpuMax }}>{(+metrics.dbCpu!.max).toFixed(2)}%</td>
               </tr>
             )}
             {(metrics.dbMemory?.series?.length ?? 0) > 0 && (
               <tr>
                 <td className="text-muted-foreground font-bold" title="DB Memory: average and max memory utilization of the Azure SQL instance, sourced from Azure Monitor sql_instance_memory_percent metric.">Memory</td>
-                <td className="text-right" style={{ color: DB_COLORS.avg }}>{(+metrics.dbMemory!.avg).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbMemory!.p99).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: DB_COLORS.max }}>{(+metrics.dbMemory!.max).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbMemAvg }}>{(+metrics.dbMemory!.avg).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbMemMax }}>{(+metrics.dbMemory!.p99).toFixed(2)}%</td>
+                <td className="text-right" style={{ color: CHART_COLORS.dbMemMax }}>{(+metrics.dbMemory!.max).toFixed(2)}%</td>
               </tr>
             )}
             </tbody>
@@ -1340,7 +2195,6 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     const reqTotal = ai?.insight?.totalRequests ?? metrics.requests?.total ?? 0;
                     const errTotal = total4xx + total5xx;
                     const pct = reqTotal > 0 ? (errTotal / reqTotal * 100) : 0;
-                    const errColor = pct >= 10 ? '#f85149' : errTotal > 0 ? '#f97316' : '#3fb950';
                     const feSeries = metrics.failedRequestsSeries ?? [];
                     const feMid = Math.floor(feSeries.length / 2);
                     const feAvg = (arr: typeof feSeries) => arr.length ? arr.reduce((s, p) => s + (p.count ?? 0), 0) / arr.length : 0;
@@ -1348,15 +2202,25 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     const isSpiking5xx = feSeries.length >= 2 && fe2 >= 1 && fe2 > fe1 * 1.05;
                     return (
                       <>
-                        <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                          <span style={{ color: isSpiking5xx ? '#f85149' : total5xx > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>5xx - {total5xx.toLocaleString()}</span>
-                        </td>
+                        <td className="text-right tabular-nums text-muted-foreground">—</td>
                         <td className="text-right" style={{ color: '#58a6ff' }}>
-                          {ai?.insight?.requestP99 != null ? `${Math.round(ai.insight.requestP99)}ms` : '—'}
+                          {fmtDuration(ai?.insight?.requestP99)}
                         </td>
-                        <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                        {/* 5xx (% of total) / 4xx (% of total) / total — the 5xx count
+                            moved here from its own cell so all three read together. */}
+                        <td
+                          className="text-right"
+                          style={{ whiteSpace: 'nowrap' }}
+                          title={`${total5xx.toLocaleString()} server errors (5xx) and ${total4xx.toLocaleString()} client errors (4xx) out of ${reqTotal.toLocaleString()} requests — ${pct.toFixed(2)}% failed overall.${isSpiking5xx ? ' 5xx rate is rising across the window.' : ''}`}
+                        >
                           {errTotal > 0
-                            ? <><span style={{ color: errColor, fontWeight: 400, fontSize: 10 }}>{errTotal.toLocaleString()} ({pct.toFixed(1)}%)</span><span style={{ color: '#58a6ff' }}> / {reqTotal.toLocaleString()}</span></>
+                            ? <>
+                                <span style={{ color: total5xx > 0 ? HTTP_5XX_COLOR : '#484f58', fontSize: 10, fontWeight: isSpiking5xx ? 700 : 400 }}>{total5xx.toLocaleString()} ({fmtPct(total5xx, reqTotal)})</span>
+                                <span style={{ color: '#484f58' }}> / </span>
+                                <span style={{ color: total4xx > 0 ? HTTP_4XX_COLOR : '#484f58', fontSize: 10 }}>{total4xx.toLocaleString()} ({fmtPct(total4xx, reqTotal)})</span>
+                                <span style={{ color: '#484f58' }}> / </span>
+                                <span style={{ color: '#58a6ff' }}>{reqTotal.toLocaleString()}</span>
+                              </>
                             : <span style={{ color: '#3fb950' }}>{reqTotal.toLocaleString()}</span>
                           }
                         </td>
@@ -1380,8 +2244,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                 <div className="flex flex-col gap-1 pt-1">
                                   {/* Tab buttons */}
                                   <div className="flex gap-0.5 flex-wrap">
-                                    {(['highfreq', 'http4xx', 'http5xx', 'requests', 'bots'] as const).map(t => {
-                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'User Agents' };
+                                    {(['requests', 'highfreq', 'http4xx', 'http5xx', 'bots'] as const).map(t => {
+                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Top', bots: 'User Agents' };
                                       const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
                                       const c = colors[t];
                                       return (
@@ -1517,17 +2381,42 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const threshold = feConHalfAvg(feConPts) * 0.05;
               const trend = feConPts.length < 2 ? null : diff > threshold ? '↑' : diff < -threshold ? '↓' : '→';
               const trendColor = trend === '↑' ? '#f85149' : '#3fb950';
+              const hasSeries = feConPts.length > 1;
               return (
-                <tr>
-                  <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">Connections</td>
-                  <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                    {trend
-                      ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
-                      : <span className="text-muted-foreground">—</span>}
-                  </td>
-                  <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.p99)}</td>
-                  <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.max)}</td>
-                </tr>
+                <>
+                  <tr
+                    style={{ cursor: hasSeries ? 'pointer' : 'default' }}
+                    onClick={() => hasSeries && setConnExpanded(v => !v)}
+                    onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">
+                      Connections
+                      {hasSeries && (connExpanded
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                      )}
+                    </td>
+                    <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                      {trend
+                        ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
+                        : <span className="text-muted-foreground">—</span>}
+                    </td>
+                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.p99)}</td>
+                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.max)}</td>
+                  </tr>
+                  {connExpanded && hasSeries && (
+                    <tr>
+                      <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
+                        <SeriesChart series={feConPts} color="#22d3ee" name="Connections" height={130} />
+                        <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
+                          Active outbound TCP connections — solid is the bucket peak, dashed the bucket average.
+                          {' '}Sustained growth with flat traffic is the SNAT / pooling signal the CPI watches for.
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
               );
             })()}
             {visibleBlocks.dependencies && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
@@ -1539,8 +2428,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const topDeps     = metrics.requestInsights.topDependencies ?? [];
               const failedDeps  = metrics.failedDependencies ?? [];
               const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || insight.totalDependencies > 0 || insight.failedDependencies > 0;
-              const filteredTopDeps    = depsFilter === 'all' ? topDeps    : topDeps.filter(d => d.classification === depsFilter);
-              const filteredFailedDeps = depsFilter === 'all' ? failedDeps : failedDeps.filter(d => d.classification === depsFilter);
+              const filteredTopDeps    = topDeps.filter(d => d.classification === depsFilter);
+              const filteredFailedDeps = failedDeps.filter(d => d.classification === depsFilter);
               return (
                 <>
                   <tr
@@ -1556,16 +2445,26 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                       )}
                     </td>
-                    <td className="text-right tabular-nums">
-                      {(() => { const total = (metrics.requestInsights.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0); return <span style={{ color: total > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>Timeout - {total}</span>; })()}
-                    </td>
+                    <td className="text-right tabular-nums text-muted-foreground">—</td>
                     <td className="text-right tabular-nums" style={{ color: depP99 > 5000 ? '#f85149' : depP99 > 1000 ? '#d29922' : '#58a6ff' }}>
-                      {depP99 > 0 ? `${Math.round(depP99).toLocaleString()}ms` : '—'}
+                      {depP99 > 0 ? fmtDuration(depP99) : '—'}
                     </td>
-                    <td className="text-right tabular-nums">
-                      {depTotal > 0 ? (() => { const c = depFailRate >= 10 ? '#f85149' : depFailRate > 0 ? '#d29922' : '#3fb950'; return insight.failedDependencies > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{insight.failedDependencies.toLocaleString()} ({depFailRate.toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {depTotal.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>; })() : '—'}
+                    {/* failed (% of total) / timeout (% of total) / total — timeouts sit
+                        in the middle because they are a subset of the failures, so the
+                        row reads broadest to most-specific, then the denominator. */}
+                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
+                      {depTotal > 0 ? (() => {
+                        const depTO = (metrics.requestInsights?.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
+                        return insight.failedDependencies > 0 || depTO > 0
+                          ? <span title={`${insight.failedDependencies.toLocaleString()} failed, of which ${depTO.toLocaleString()} timed out, out of ${depTotal.toLocaleString()} dependency calls — ${depFailRate.toFixed(2)}% failure rate.`}>
+                              <span style={{ color: insight.failedDependencies > 0 ? DEP_FAILED_COLOR : '#484f58', fontSize: 10 }}>{insight.failedDependencies.toLocaleString()} ({fmtPct(insight.failedDependencies, depTotal)})</span>
+                              <span style={{ color: '#484f58' }}> / </span>
+                              <span style={{ color: depTO > 0 ? DEP_TIMEOUT_COLOR : '#484f58', fontSize: 10 }}>{depTO.toLocaleString()} ({fmtPct(depTO, depTotal)})</span>
+                              <span style={{ color: '#484f58' }}> / </span>
+                              <span style={{ color: DEP_TOTAL_COLOR }}>{depTotal.toLocaleString()}</span>
+                            </span>
+                          : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>;
+                      })() : '—'}
                     </td>
                   </tr>
                   {depsExpanded && hasDetail && (
@@ -1577,9 +2476,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                         <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
                           <div className="flex gap-0.5">
                             {([
-                              { key: 'topDeps',     label: 'Top Deps',     color: '#58a6ff' },
-                              { key: 'failedDeps',  label: 'Failed Deps',  color: '#f85149' },
-                              { key: 'timeoutDeps', label: 'Timeout Deps', color: '#f97316' },
+                              { key: 'topDeps',     label: 'Top',     color: '#58a6ff' },
+                              { key: 'failedDeps',  label: 'Failed',  color: '#f85149' },
+                              { key: 'timeoutDeps', label: 'Timeout', color: '#f97316' },
                             ] as const).map(t => (
                               <button
                                 key={t.key}
@@ -1599,14 +2498,14 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       </tr>}
                       {detailsLoaded && depsTab === 'topDeps' && (
                         filteredTopDeps.length === 0
-                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No dependency data</td></tr>
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No {depsFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsFilter === 'internal' ? topDeps.some(d => d.classification === 'thirdParty') : topDeps.some(d => d.classification === 'internal')) ? ` — try ${depsFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
                           : filteredTopDeps.map((d, i) => (
                             <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
                               <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
                                 {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
                               </td>
                               <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
                               <td className="text-right tabular-nums">
                                 {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
   ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
@@ -1621,23 +2520,23 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                           ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No timeout dependencies</td></tr>
                           : <>{tDeps.map((d, i) => (
                             <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={d.name}>{d.name}</td>
-                              <td className="text-right tabular-nums text-muted-foreground">—</td>
-                              <td className="text-right tabular-nums text-muted-foreground">—</td>
+                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}`}>{d.name}</td>
+                              <td className="text-right tabular-nums" style={{ color: RESULT_CODE_COLOR(d.resultCode), fontSize: 10 }} title={RESULT_CODE_HELP[d.resultCode] ?? `resultCode ${d.resultCode}`}>{d.resultCode || '—'}</td>
+                              <td className="text-right tabular-nums" style={{ color: '#58a6ff' }} title="p95 duration">{d.p95 > 0 ? fmtDuration(d.p95) : '—'}</td>
                               <td className="text-right tabular-nums" style={{ color: '#f97316' }}>{d.count.toLocaleString()}</td>
                             </tr>
                           ))}</>;
                       })()}
                       {detailsLoaded && depsTab === 'failedDeps' && (
                         filteredFailedDeps.length === 0
-                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed dependencies</td></tr>
+                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed {depsFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsFilter === 'internal' ? failedDeps.some(d => d.classification === 'thirdParty') : failedDeps.some(d => d.classification === 'internal')) ? ` — try ${depsFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
                           : filteredFailedDeps.slice(0, 10).map((d, i) => (
                             <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
                               <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
                                 {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
                               </td>
                               <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
                               <td className="text-right tabular-nums">
                                 {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
   ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
@@ -1652,12 +2551,19 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               );
             })()}
             {visibleBlocks.exceptions && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
-              const errorCount = metrics.requestInsights.errorCount ?? 0;
               const errorTypes = metrics.requestInsights.errorTypes ?? [];
               const hasDetail  = errorTypes.length > 0;
+              const excCounts  = excBucketCounts(metrics.requestInsights);
+              const errorCount = excCounts.total;
               if (errorCount === 0 && !hasDetail) return null;
               const errColor = errorCount === 0 ? '#3fb950' : errorCount <= 10 ? '#d29922' : '#f85149';
-              const socketExc = metrics.requestInsights.insight?.socketExceptions ?? 0;
+              // Generic tab = neither socket-layer nor timeout, split server-side. Falls back
+              // to the unsplit list when the split queries did not run (older cache).
+              const genericTypes   = metrics.requestInsights.errorTypesGeneric ?? errorTypes;
+              const genericDetails = metrics.requestInsights.errorDetailsGeneric ?? metrics.requestInsights.errorDetails ?? [];
+              const socketIns      = metrics.requestInsights.socketInsights ?? null;
+              const timeoutIns     = metrics.requestInsights.timeoutInsights ?? null;
+              const oomIns         = metrics.requestInsights.oomInsights ?? null;
               return (
                 <>
                   <tr
@@ -1667,23 +2573,30 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Includes socket exceptions (key CPI signal), SQL/HTTP errors, and general runtime failures. Expand to see breakdown by exception type and individual error details.">Exceptions</span>
+                      <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
                       {hasDetail && (errorsExpanded
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                       )}
                     </td>
-                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
-                      <span style={{ color: socketExc > 10 ? '#f85149' : socketExc > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>Socket - {socketExc.toLocaleString()}</span>
-                    </td>
                     <td className="text-right tabular-nums text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums" style={{ color: errColor }}>{errorCount.toLocaleString()}</td>
+                    <td className="text-right tabular-nums text-muted-foreground">—</td>
+                    <td className="text-right tabular-nums" style={{ color: errColor }} title={excCounts.breakdown}>{errorCount.toLocaleString()}</td>
                   </tr>
                   {errorsExpanded && hasDetail && detailsLoading && !detailsLoaded && (
                     <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
                   )}
                   {errorsExpanded && hasDetail && (!detailsLoading || detailsLoaded) && (
-                    renderErrTypes(errorTypes, metrics.requestInsights!.errorDetails ?? [], selectedErrType, setSelectedErrType)
+                    <>
+                      <ExcTabRow value={errTab} onChange={setErrTab} counts={excCounts} />
+                      {errTab === 'generic'
+                        ? renderErrTypes(genericTypes, genericDetails, selectedErrType, setSelectedErrType)
+                        : errTab === 'timeout'
+                        ? renderTimeoutTab(timeoutIns, fmtExcTime)
+                        : errTab === 'oom'
+                        ? renderOomTab(oomIns)
+                        : renderSocketTab(socketIns, metrics.socketMetrics, fmtExcTime)}
+                    </>
                   )}
                 </>
               );
@@ -1692,7 +2605,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
               const snatDetails  = metrics.requestInsights.snatDetails ?? [];
               const count        = snatDetails.length;
               const feInsight    = metrics.requestInsights.insight;
-              const socketExc    = feInsight?.socketExceptions      ?? 0;
+              // Socket-layer only — application timeouts are scored by depTimeouts.
+              const socketExc    = feInsight?.socketLayerExceptions ?? 0;
               const depFailRate  = feInsight?.dependencyFailureRate ?? 0;
               const depTimeouts  = (metrics.requestInsights.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
               const depP99Ms     = feInsight?.dependencyP99         ?? 0;
@@ -1721,10 +2635,10 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 totalRequests: feReqTotal,
               });
               const subscores = [
-                { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${socketExc}`,                    norm: risk.socketScore,     wt: 30, pts: 30 * risk.socketScore,     normFormulaRaw: `${socketExc}`,                    normFormulaThreshold: '50 exceptions' },
+                { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${socketExc}`,                    norm: risk.socketScore,     wt: 20, pts: 20 * risk.socketScore,     normFormulaRaw: `${socketExc}`,                    normFormulaThreshold: '50 exceptions' },
                 { key: 'depFail' as const, label: 'Dependencies Failure',  raw: `${depFailRate.toFixed(1)}%`,      norm: risk.depFailScore,    wt: 25, pts: 25 * risk.depFailScore,    normFormulaRaw: `${depFailRate.toFixed(1)}%`,       normFormulaThreshold: '20% fail rate' },
-                { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${depTimeouts}`,                  norm: risk.depTimeoutScore, wt: 20, pts: 20 * risk.depTimeoutScore, normFormulaRaw: `${depTimeouts}`,                   normFormulaThreshold: '25 timeouts' },
-                { key: 'depP99'  as const, label: 'Dependencies P99',      raw: `${Math.round(depP99Ms)}ms`,       norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(depP99Ms)}ms`,        normFormulaThreshold: '5000ms P99' },
+                { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${depTimeouts}`,                  norm: risk.depTimeoutScore, wt: 30, pts: 30 * risk.depTimeoutScore, normFormulaRaw: `${depTimeouts}`,                   normFormulaThreshold: '400 timeouts' },
+                { key: 'depP99'  as const, label: 'Dependencies P99',      raw: fmtDuration(depP99Ms),       norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(depP99Ms)}ms`,        normFormulaThreshold: '5000ms P99' },
                 { key: 'conn'    as const, label: 'Connection Growth',     raw: `+${Math.round(risk.connGrowth)}`, norm: risk.connGrowthScore, wt: 5,  pts: 5  * risk.connGrowthScore, normFormulaRaw: `${Math.round(risk.connGrowth)}`,   normFormulaThreshold: '64 new conns' },
                 { key: 'http5xx' as const, label: 'HTTP 5xx Rate',         raw: `${fe5xxRate.toFixed(1)}%`,        norm: risk.http5xxScore,    wt: 5,  pts: 5  * risk.http5xxScore,    normFormulaRaw: `${fe5xxRate.toFixed(1)}%`,         normFormulaThreshold: '5% error rate' },
               ];
@@ -1737,15 +2651,28 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <td className="text-muted-foreground font-bold">
-                      <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket exceptions, dependency failure rate, timeouts, P99 latency, connection growth, and HTTP 5xx rate into a normalized 0–100 confidence score.">Connection Pressure Index</span>
+                      <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket-layer exceptions (0.20), dependency failure rate (0.25), dependency timeouts (0.30), P99 latency (0.15), connection growth (0.05), and HTTP 5xx rate (0.05) into a normalized 0–100 confidence score.">Connection Pressure Index</span>
                       {snatExpanded
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                       }
                     </td>
-                    <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)}</td>
-                    <td className="text-right tabular-nums text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.label}</td>
+                    {/* The two spare cells merge into one and carry the verdict that
+                        used to sit inside the expanded panel. */}
+                    {(() => {
+                      const v = snatVerdict(risk.score, socketExc);
+                      return (
+                        <td
+                          colSpan={2}
+                          className={v ? '' : 'text-right tabular-nums text-muted-foreground'}
+                          style={v ? { color: v.color, fontWeight: v.bold ? 700 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}
+                          title={v?.text}
+                        >{v ? v.text : '—'}</td>
+                      );
+                    })()}
+                    {/* Score and band read as one value, in the same cell every other
+                        row puts its headline figure. */}
+                    <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)} - {risk.label}</td>
                   </tr>
                   {snatExpanded && (
                     <tr>
@@ -1951,16 +2878,6 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                             <span style={{ color: '#6e7681' }}> · </span>
                             <span style={{ color: '#f85149' }}>81–100 Critical</span>
                           </div>
-                          {/* Section D: Port exhaustion diagnostics */}
-                          {risk.score >= 81 && socketExc > 0 && (
-                            <div style={{ color: '#f85149', marginTop: 4, fontWeight: 700 }}>🔴 Probable SNAT Port Exhaustion — socket exceptions detected with critical score</div>
-                          )}
-                          {risk.score >= 61 && risk.score < 81 && socketExc > 0 && (
-                            <div style={{ color: '#e6773d', marginTop: 4 }}>⚠ SNAT port pressure detected — monitor socket exception trend</div>
-                          )}
-                          {risk.score >= 81 && socketExc === 0 && (
-                            <div style={{ color: '#f85149', marginTop: 4 }}>🔴 Critical SNAT risk — check network connectivity and dependency health</div>
-                          )}
                           {/* Section E: SNAT exception details */}
                           {count > 0 && (
                             <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
@@ -2019,18 +2936,26 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       const reqTotal = ai?.insight?.totalRequests ?? 0;
                       const errTotal = total4xx + total5xx;
                       const pct = reqTotal > 0 ? (errTotal / reqTotal * 100) : 0;
-                      const errColor = pct >= 10 ? '#f85149' : errTotal > 0 ? '#f97316' : '#3fb950';
                       return (
                         <>
-                          <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                            <span style={{ color: total5xx > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>5xx - {total5xx.toLocaleString()}</span>
-                          </td>
+                          <td className="text-right tabular-nums text-muted-foreground">—</td>
                           <td className="text-right" style={{ color: '#58a6ff' }}>
-                            {ai?.insight?.requestP99 != null ? `${Math.round(ai.insight.requestP99)}ms` : '—'}
+                            {fmtDuration(ai?.insight?.requestP99)}
                           </td>
-                          <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                          {/* 5xx (% of total) / 4xx (% of total) / total */}
+                          <td
+                            className="text-right"
+                            style={{ whiteSpace: 'nowrap' }}
+                            title={`${total5xx.toLocaleString()} server errors (5xx) and ${total4xx.toLocaleString()} client errors (4xx) out of ${reqTotal.toLocaleString()} requests — ${pct.toFixed(2)}% failed overall.`}
+                          >
                             {errTotal > 0
-                              ? <><span style={{ color: errColor, fontWeight: 400, fontSize: 10 }}>{errTotal.toLocaleString()} ({pct.toFixed(1)}%)</span><span style={{ color: '#58a6ff' }}> / {reqTotal.toLocaleString()}</span></>
+                              ? <>
+                                  <span style={{ color: total5xx > 0 ? HTTP_5XX_COLOR : '#484f58', fontSize: 10 }}>{total5xx.toLocaleString()} ({fmtPct(total5xx, reqTotal)})</span>
+                                  <span style={{ color: '#484f58' }}> / </span>
+                                  <span style={{ color: total4xx > 0 ? HTTP_4XX_COLOR : '#484f58', fontSize: 10 }}>{total4xx.toLocaleString()} ({fmtPct(total4xx, reqTotal)})</span>
+                                  <span style={{ color: '#484f58' }}> / </span>
+                                  <span style={{ color: '#58a6ff' }}>{reqTotal.toLocaleString()}</span>
+                                </>
                               : <span style={{ color: '#3fb950' }}>{reqTotal.toLocaleString()}</span>
                             }
                           </td>
@@ -2053,8 +2978,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                 return (
                                   <div className="flex flex-col gap-1 pt-1">
                                     <div className="flex gap-0.5 flex-wrap">
-                                      {(['highfreq', 'http4xx', 'http5xx', 'requests', 'bots'] as const).map(t => {
-                                        const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Requests', bots: 'User Agents' };
+                                      {(['requests', 'highfreq', 'http4xx', 'http5xx', 'bots'] as const).map(t => {
+                                        const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Top', bots: 'User Agents' };
                                         const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
                                         const c = colors[t];
                                         return (
@@ -2166,17 +3091,42 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 const threshold = apiConHalfAvg(apiConPts) * 0.05;
                 const trend = apiConPts.length < 2 ? null : diff > threshold ? '↑' : diff < -threshold ? '↓' : '→';
                 const trendColor = trend === '↑' ? '#f85149' : '#3fb950';
+                const hasSeries = apiConPts.length > 1;
                 return (
-                  <tr>
-                    <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">Connections</td>
-                    <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                      {trend
-                        ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
-                        : <span className="text-muted-foreground">—</span>}
-                    </td>
-                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.p99)}</td>
-                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.max)}</td>
-                  </tr>
+                  <>
+                    <tr
+                      style={{ cursor: hasSeries ? 'pointer' : 'default' }}
+                      onClick={() => hasSeries && setConnAPIExpanded(v => !v)}
+                      onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">
+                        Connections
+                        {hasSeries && (connAPIExpanded
+                          ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                          : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        )}
+                      </td>
+                      <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
+                        {trend
+                          ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
+                          : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.p99)}</td>
+                      <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.max)}</td>
+                    </tr>
+                    {connAPIExpanded && hasSeries && (
+                      <tr>
+                        <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
+                          <SeriesChart series={apiConPts} color="#22d3ee" name="Connections" height={130} />
+                          <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
+                            Active outbound TCP connections — solid is the bucket peak, dashed the bucket average.
+                            {' '}Sustained growth with flat traffic is the SNAT / pooling signal the CPI watches for.
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
                 );
               })()}
               {visibleBlocks.dependencies && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
@@ -2188,8 +3138,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 const topDeps     = metrics.apiRequestInsights.topDependencies ?? [];
                 const failedDeps  = metrics.apiFailedDependencies ?? [];
                 const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || apiInsight.totalDependencies > 0 || apiInsight.failedDependencies > 0;
-                const filteredTopDeps    = depsAPIFilter === 'all' ? topDeps    : topDeps.filter(d => d.classification === depsAPIFilter);
-                const filteredFailedDeps = depsAPIFilter === 'all' ? failedDeps : failedDeps.filter(d => d.classification === depsAPIFilter);
+                const filteredTopDeps    = topDeps.filter(d => d.classification === depsAPIFilter);
+                const filteredFailedDeps = failedDeps.filter(d => d.classification === depsAPIFilter);
                 return (
                   <>
                     <tr
@@ -2205,16 +3155,24 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                           : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         )}
                       </td>
-                      <td className="text-right tabular-nums">
-                        {(() => { const total = (metrics.apiRequestInsights?.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0); return <span style={{ color: total > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>Timeout - {total}</span>; })()}
-                      </td>
+                      <td className="text-right tabular-nums text-muted-foreground">—</td>
                       <td className="text-right tabular-nums" style={{ color: depP99 > 5000 ? '#f85149' : depP99 > 1000 ? '#d29922' : '#58a6ff' }}>
-                        {depP99 > 0 ? `${Math.round(depP99).toLocaleString()}ms` : '—'}
+                        {depP99 > 0 ? fmtDuration(depP99) : '—'}
                       </td>
-                      <td className="text-right tabular-nums">
-                        {depTotal > 0 ? (() => { const c = depFailRate >= 10 ? '#f85149' : depFailRate > 0 ? '#d29922' : '#3fb950'; return apiInsight.failedDependencies > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{apiInsight.failedDependencies.toLocaleString()} ({depFailRate.toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {depTotal.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>; })() : '—'}
+                      {/* failed (% of total) / timeout (% of total) / total */}
+                      <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
+                        {depTotal > 0 ? (() => {
+                          const depTO = (metrics.apiRequestInsights?.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
+                          return apiInsight.failedDependencies > 0 || depTO > 0
+                            ? <span title={`${apiInsight.failedDependencies.toLocaleString()} failed, of which ${depTO.toLocaleString()} timed out, out of ${depTotal.toLocaleString()} dependency calls — ${depFailRate.toFixed(2)}% failure rate.`}>
+                                <span style={{ color: apiInsight.failedDependencies > 0 ? DEP_FAILED_COLOR : '#484f58', fontSize: 10 }}>{apiInsight.failedDependencies.toLocaleString()} ({fmtPct(apiInsight.failedDependencies, depTotal)})</span>
+                                <span style={{ color: '#484f58' }}> / </span>
+                                <span style={{ color: depTO > 0 ? DEP_TIMEOUT_COLOR : '#484f58', fontSize: 10 }}>{depTO.toLocaleString()} ({fmtPct(depTO, depTotal)})</span>
+                                <span style={{ color: '#484f58' }}> / </span>
+                                <span style={{ color: DEP_TOTAL_COLOR }}>{depTotal.toLocaleString()}</span>
+                              </span>
+                            : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>;
+                        })() : '—'}
                       </td>
                     </tr>
                     {depsAPIExpanded && hasDetail && (
@@ -2226,9 +3184,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                           <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
                             <div className="flex gap-0.5">
                               {([
-                                { key: 'topDeps',     label: 'Top Deps',     color: '#58a6ff' },
-                                { key: 'failedDeps',  label: 'Failed Deps',  color: '#f85149' },
-                                { key: 'timeoutDeps', label: 'Timeout Deps', color: '#f97316' },
+                                { key: 'topDeps',     label: 'Top',     color: '#58a6ff' },
+                                { key: 'failedDeps',  label: 'Failed',  color: '#f85149' },
+                                { key: 'timeoutDeps', label: 'Timeout', color: '#f97316' },
                               ] as const).map(t => (
                                 <button
                                   key={t.key}
@@ -2248,14 +3206,14 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                         </tr>}
                         {detailsLoaded && depsAPITab === 'topDeps' && (
                           filteredTopDeps.length === 0
-                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No dependency data</td></tr>
+                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No {depsAPIFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsAPIFilter === 'internal' ? topDeps.some(d => d.classification === 'thirdParty') : topDeps.some(d => d.classification === 'internal')) ? ` — try ${depsAPIFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
                             : filteredTopDeps.map((d, i) => (
                               <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
                                 <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
                                   {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
                                 </td>
                                 <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
                                 <td className="text-right tabular-nums">
                                   {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
   ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
@@ -2279,14 +3237,14 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                         })()}
                         {detailsLoaded && depsAPITab === 'failedDeps' && (
                           filteredFailedDeps.length === 0
-                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed dependencies</td></tr>
+                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed {depsAPIFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsAPIFilter === 'internal' ? failedDeps.some(d => d.classification === 'thirdParty') : failedDeps.some(d => d.classification === 'internal')) ? ` — try ${depsAPIFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
                             : filteredFailedDeps.slice(0, 10).map((d, i) => (
                               <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
                                 <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
                                   {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
                                 </td>
                                 <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{d.p99.toLocaleString()}ms</td>
+                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
                                 <td className="text-right tabular-nums">
                                   {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
   ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
@@ -2301,11 +3259,16 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 );
               })()}
               {visibleBlocks.exceptions && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
-                const apiErrorCount = metrics.apiRequestInsights.errorCount ?? 0;
                 const apiErrorTypes = metrics.apiRequestInsights.errorTypes ?? [];
                 const apiHasDetail  = apiErrorTypes.length > 0;
+                const apiExcCounts  = excBucketCounts(metrics.apiRequestInsights);
+                const apiErrorCount = apiExcCounts.total;
                 const apiErrColor = apiErrorCount === 0 ? '#3fb950' : apiErrorCount <= 10 ? '#d29922' : '#f85149';
-                const apiSocketExc = metrics.apiRequestInsights.insight?.socketExceptions ?? 0;
+                const apiGenericTypes   = metrics.apiRequestInsights.errorTypesGeneric ?? apiErrorTypes;
+                const apiGenericDetails = metrics.apiRequestInsights.errorDetailsGeneric ?? metrics.apiRequestInsights.errorDetails ?? [];
+                const apiSocketIns      = metrics.apiRequestInsights.socketInsights ?? null;
+                const apiTimeoutIns     = metrics.apiRequestInsights.timeoutInsights ?? null;
+                const apiOomIns         = metrics.apiRequestInsights.oomInsights ?? null;
                 return (
                   <>
                     <tr
@@ -2315,23 +3278,30 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                     >
                       <td className="text-muted-foreground font-bold">
-                        <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Includes socket exceptions (key CPI signal), SQL/HTTP errors, and general runtime failures. Expand to see breakdown by exception type and individual error details.">Exceptions</span>
+                        <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
                         {apiHasDetail && (errAPIExpanded
                           ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                           : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         )}
                       </td>
-                      <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
-                        <span style={{ color: apiSocketExc > 10 ? '#f85149' : apiSocketExc > 0 ? '#f97316' : '#3fb950', fontSize: 10 }}>Socket - {apiSocketExc.toLocaleString()}</span>
-                      </td>
                       <td className="text-right tabular-nums text-muted-foreground">—</td>
-                      <td className="text-right tabular-nums" style={{ color: apiErrColor }}>{apiErrorCount.toLocaleString()}</td>
+                      <td className="text-right tabular-nums text-muted-foreground">—</td>
+                      <td className="text-right tabular-nums" style={{ color: apiErrColor }} title={apiExcCounts.breakdown}>{apiErrorCount.toLocaleString()}</td>
                     </tr>
                     {errAPIExpanded && apiHasDetail && detailsLoading && !detailsLoaded && (
                       <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
                     )}
                     {errAPIExpanded && apiHasDetail && (!detailsLoading || detailsLoaded) && (
-                      renderErrTypes(apiErrorTypes, metrics.apiRequestInsights!.errorDetails ?? [], selectedErrAPIType, setSelectedErrAPIType)
+                      <>
+                        <ExcTabRow value={errAPITab} onChange={setErrAPITab} counts={apiExcCounts} />
+                        {errAPITab === 'generic'
+                          ? renderErrTypes(apiGenericTypes, apiGenericDetails, selectedErrAPIType, setSelectedErrAPIType)
+                          : errAPITab === 'timeout'
+                          ? renderTimeoutTab(apiTimeoutIns, fmtExcTime)
+                          : errAPITab === 'oom'
+                          ? renderOomTab(apiOomIns)
+                          : renderSocketTab(apiSocketIns, metrics.apiSocketMetrics, fmtExcTime)}
+                      </>
                     )}
                   </>
                 );
@@ -2340,7 +3310,8 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 const snatDetails     = metrics.apiRequestInsights.snatDetails ?? [];
                 const count           = snatDetails.length;
                 const apiInsight      = metrics.apiRequestInsights.insight;
-                const apiSocketExc    = apiInsight?.socketExceptions      ?? 0;
+                // Socket-layer only — application timeouts are scored by depTimeouts.
+                const apiSocketExc    = apiInsight?.socketLayerExceptions ?? 0;
                 const apiDepFailRate  = apiInsight?.dependencyFailureRate ?? 0;
                 const apiDepTimeouts  = (metrics.apiRequestInsights.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
                 const apiDepP99Ms     = apiInsight?.dependencyP99         ?? 0;
@@ -2367,10 +3338,10 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                   totalRequests: apiReqTotal,
                 });
                 const subscores = [
-                  { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${apiSocketExc}`,                 norm: risk.socketScore,     wt: 30, pts: 30 * risk.socketScore,     normFormulaRaw: `${apiSocketExc}`,                 normFormulaThreshold: '50 exceptions' },
+                  { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${apiSocketExc}`,                 norm: risk.socketScore,     wt: 20, pts: 20 * risk.socketScore,     normFormulaRaw: `${apiSocketExc}`,                 normFormulaThreshold: '50 exceptions' },
                   { key: 'depFail' as const, label: 'Dependencies Failure',  raw: `${apiDepFailRate.toFixed(1)}%`,   norm: risk.depFailScore,    wt: 25, pts: 25 * risk.depFailScore,    normFormulaRaw: `${apiDepFailRate.toFixed(1)}%`,    normFormulaThreshold: '20% fail rate' },
-                  { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${apiDepTimeouts}`,               norm: risk.depTimeoutScore, wt: 20, pts: 20 * risk.depTimeoutScore, normFormulaRaw: `${apiDepTimeouts}`,                normFormulaThreshold: '25 timeouts' },
-                  { key: 'depP99'  as const, label: 'Dependencies P99',      raw: `${Math.round(apiDepP99Ms)}ms`,    norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(apiDepP99Ms)}ms`,     normFormulaThreshold: '5000ms P99' },
+                  { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${apiDepTimeouts}`,               norm: risk.depTimeoutScore, wt: 30, pts: 30 * risk.depTimeoutScore, normFormulaRaw: `${apiDepTimeouts}`,                normFormulaThreshold: '400 timeouts' },
+                  { key: 'depP99'  as const, label: 'Dependencies P99',      raw: fmtDuration(apiDepP99Ms),    norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(apiDepP99Ms)}ms`,     normFormulaThreshold: '5000ms P99' },
                   { key: 'conn'    as const, label: 'Connection Growth',     raw: `+${Math.round(risk.connGrowth)}`, norm: risk.connGrowthScore, wt: 5,  pts: 5  * risk.connGrowthScore, normFormulaRaw: `${Math.round(risk.connGrowth)}`,   normFormulaThreshold: '64 new conns' },
                   { key: 'http5xx' as const, label: 'HTTP 5xx Rate',         raw: `${api5xxRate.toFixed(1)}%`,       norm: risk.http5xxScore,    wt: 5,  pts: 5  * risk.http5xxScore,    normFormulaRaw: `${api5xxRate.toFixed(1)}%`,        normFormulaThreshold: '5% error rate' },
                 ];
@@ -2383,15 +3354,24 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                     >
                       <td className="text-muted-foreground font-bold">
-                        <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket exceptions, dependency failure rate, timeouts, P99 latency, connection growth, and HTTP 5xx rate into a normalized 0–100 confidence score.">Connection Pressure Index</span>
+                        <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket-layer exceptions (0.20), dependency failure rate (0.25), dependency timeouts (0.30), P99 latency (0.15), connection growth (0.05), and HTTP 5xx rate (0.05) into a normalized 0–100 confidence score.">Connection Pressure Index</span>
                         {snatAPIExpanded
                           ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                           : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         }
                       </td>
-                      <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)}</td>
-                      <td className="text-right tabular-nums text-muted-foreground">—</td>
-                      <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.label}</td>
+                      {(() => {
+                        const v = snatVerdict(risk.score, apiSocketExc);
+                        return (
+                          <td
+                            colSpan={2}
+                            className={v ? '' : 'text-right tabular-nums text-muted-foreground'}
+                            style={v ? { color: v.color, fontWeight: v.bold ? 700 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}
+                            title={v?.text}
+                          >{v ? v.text : '—'}</td>
+                        );
+                      })()}
+                      <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)} - {risk.label}</td>
                     </tr>
                     {snatAPIExpanded && (
                       <tr>
@@ -2596,16 +3576,6 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                               <span style={{ color: '#6e7681' }}> · </span>
                               <span style={{ color: '#f85149' }}>81–100 Critical</span>
                             </div>
-                            {/* Section D: Port exhaustion diagnostics */}
-                            {risk.score >= 81 && apiSocketExc > 0 && (
-                              <div style={{ color: '#f85149', marginTop: 4, fontWeight: 700 }}>🔴 Probable SNAT Port Exhaustion — socket exceptions detected with critical score</div>
-                            )}
-                            {risk.score >= 61 && risk.score < 81 && apiSocketExc > 0 && (
-                              <div style={{ color: '#e6773d', marginTop: 4 }}>⚠ SNAT port pressure detected — monitor socket exception trend</div>
-                            )}
-                            {risk.score >= 81 && apiSocketExc === 0 && (
-                              <div style={{ color: '#f85149', marginTop: 4 }}>🔴 Critical SNAT risk — check network connectivity and dependency health</div>
-                            )}
                             {/* Section E: SNAT exception details */}
                             {count > 0 && (
                               <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
@@ -2676,7 +3646,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       stages={rcaStages}
       error={rcaError}
       onExport={exportRca}
+      onExportPdf={exportRcaPdf}
       onCopyTeams={copyRcaForTeams}
+      onCopySummary={copySummaryForTeams}
       onRetry={handleRunRca}
     />
 

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         rca: (opts) => ipcRenderer.invoke('incident-report:rca', opts),
         aiRemarks: (opts) => ipcRenderer.invoke('incident-report:ai-remarks', opts),
         saveRca: (opts) => ipcRenderer.invoke('incident-report:saveRca', opts),
+        exportRcaPdf: (opts) => ipcRenderer.invoke('incident-report:exportRcaPdf', opts),
         onRcaChunk: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('incident-report:rca-chunk', fn);

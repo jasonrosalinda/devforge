@@ -38,6 +38,41 @@ const DURATION_MAP = {
   '30d': 'P30D',
 };
 
+// ─── Exception bucket classifiers ────────────────────────────────────────────
+// Shared with the incident report — see exception-buckets.cjs for the rules.
+const {
+  SOCKET_MATCH,
+  TIMEOUT_ONLY_MATCH,
+  OOM_ONLY_MATCH,
+  GENERIC_MATCH,
+  TIMEOUT_RESULT_CODES,
+} = require('./exception-buckets.cjs');
+
+// ─── Dependency classification ───────────────────────────────────────────────
+// Static asset fetches — Blazor framework files and Razor class library content.
+// They dominate a browser-side app's dependency list by volume while saying
+// nothing about service health, so they get their own bucket instead of crowding
+// out real calls in the internal / third-party top-10s.
+// `contains`, not `has`: these are path fragments, not whole terms.
+const ASSET_DEP_MATCH = '(name contains "_framework/" or name contains "_content/")';
+
+/** Three-way dependency classification. `internalCondition` is null when the app's
+ *  hostnames could not be resolved, in which case everything non-asset is third-party. */
+function depClassifyExpr(internalCondition) {
+  const rest = internalCondition ? `iff(${internalCondition}, "internal", "thirdParty")` : '"thirdParty"';
+  return `extend classification = iff(${ASSET_DEP_MATCH}, "assets", ${rest})`;
+}
+
+// ─── Shared signal helpers ───────────────────────────────────────────────────
+// Downtime detection and socket metric names live in azure-signals.cjs so the
+// incident report detects outages with the same rules — see that file.
+const {
+  SOCKET_METRIC_NAMES,
+  extractDowntimeIntervals,
+  classifyDowntimeCause,
+  extractDowntimeIntervalsMultiSignal,
+} = require('./azure-signals.cjs');
+
 // ─── Pure Helpers (exported for testing) ─────────────────────────────────────
 
 function getGranularity(range) {
@@ -294,13 +329,26 @@ if (!reqSeries.length) return null;
     return reqSeries.map(ts_ => {
       const name = ts_.metadataValues?.find(m => (m.name?.value ?? m.name)?.toLowerCase() === 'instance')?.value ?? 'unknown';
       const errByTime = errMap.get(name) ?? new Map();
-      const series = (ts_.data || []).map(d => {
-        const t = d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp);
+      // Buckets with no requests are OMITTED, not scored 100%.
+      //
+      // Azure returns a data point for every bucket in the timespan for each
+      // instance dimension, with `total` absent where the instance served nothing —
+      // including every bucket before it was created. Scoring those 100% made all
+      // instances look like they existed for the whole window (so scale-out was
+      // invisible and first-seen was always the range start), inflated the average
+      // for short-lived instances, and — worst — let an instance that was DOWN and
+      // therefore serving no traffic read as perfectly healthy.
+      //
+      // No requests means no request-derived health signal. A gap is the honest
+      // answer; the ARM instance list still reports that the instance exists.
+      const series = [];
+      for (const d of ts_.data || []) {
         const total = d.total ?? 0;
+        if (total <= 0) continue;
+        const t = d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp);
         const failed = errByTime.get(t) ?? 0;
-        const v = total > 0 ? Math.round((total - failed) / total * 1000) / 10 : 100;
-        return { t, v };
-      });
+        series.push({ t, v: Math.round((total - failed) / total * 1000) / 10 });
+      }
       return { name, series };
     });
   } catch { return null; }
@@ -362,119 +410,6 @@ async function getResponseTime(client, resId, range, granularity, customStart, c
   } catch {
     return null;
   }
-}
-
-function extractDowntimeIntervals(series) {
-  const intervals = [];
-  let start = null;
-  for (const p of series) {
-    const down = (p.average ?? 100) < 95;
-    if (down && start === null) {
-      start = new Date(p.timeStamp).getTime();
-    } else if (!down && start !== null) {
-      intervals.push({ start, end: new Date(p.timeStamp).getTime() });
-      start = null;
-    }
-  }
-  if (start !== null) {
-    const last = series[series.length - 1];
-    intervals.push({ start, end: new Date(last.timeStamp).getTime() });
-  }
-  return intervals;
-}
-
-/**
- * Classify confirmed downtime by instance impact.
- * one instance affected → instance_crash
- * all instances affected → full_outage
- * instances healthy      → dependency_failure
- */
-function classifyDowntimeCause(interval, { instanceHealthSeries }) {
-  const { start, end } = interval;
-  const total = instanceHealthSeries?.length ?? 0;
-  if (total === 0) return 'outage';
-  let affected = 0;
-  for (const inst of instanceHealthSeries) {
-    const bad = inst.series.some(p => {
-      const t = new Date(p.t).getTime();
-      return t >= start && t <= end && p.v < 50;
-    });
-    if (bad) affected++;
-  }
-  if (affected === total) return 'full_outage';
-  if (affected >= 1)      return 'instance_crash';
-  return 'dependency_failure';
-}
-
-/**
- * Strict 4-condition downtime detection.
- * DOWN only when ALL are true for 2+ consecutive points:
- *   1. availability < 100%
- *   2. failed (5xx) requests > 0
- *   3. 5xx dominant over 4xx (not auth/client errors)
- *   4. at least one probe failure (if probe data available)
- * Closes after 3+ consecutive clean points.
- */
-function extractDowntimeIntervalsMultiSignal(availSeries, failedSeries5xx, http4xxSeries, probeSeries) {
-  if (!availSeries || !availSeries.length) return [];
-
-  const OPEN_THRESHOLD  = 2;
-  const CLOSE_THRESHOLD = 3;
-
-  const granMs = availSeries.length > 1
-    ? new Date(availSeries[1].t).getTime() - new Date(availSeries[0].t).getTime()
-    : 15 * 60_000;
-
-  const fail5xxMap = new Map((failedSeries5xx || []).map(p => [p.t, p.count]));
-  const fail4xxMap = new Map((http4xxSeries   || []).map(p => [p.t, p.count]));
-
-  function probeFailAt(tMs) {
-    if (!probeSeries || !probeSeries.length) return false;
-    return probeSeries.some(inst => {
-      if (!inst.series.length) return false;
-      const closest = inst.series.reduce((best, s) =>
-        Math.abs(new Date(s.t).getTime() - tMs) < Math.abs(new Date(best.t).getTime() - tMs) ? s : best
-      , inst.series[0]);
-      return Math.abs(new Date(closest.t).getTime() - tMs) < granMs && closest.v < 50;
-    });
-  }
-
-  const intervals = [];
-  let consecBad   = 0;
-  let consecGood  = 0;
-  let incidentStart = null;
-
-  for (const p of availSeries) {
-    const tMs    = new Date(p.t).getTime();
-    const fail5  = fail5xxMap.get(p.t) ?? 0;
-    const fail4  = fail4xxMap.get(p.t) ?? 0;
-    const cond1  = p.v < 100;
-    const cond2  = fail5 > 0;
-    const cond3  = fail5 > 0 && (fail4 === 0 || fail5 >= fail4);
-    const cond4  = (probeSeries && probeSeries.length) ? probeFailAt(tMs) : true;
-    const isDown = cond1 && cond2 && cond3 && cond4;
-
-    if (isDown) {
-      consecBad++;
-      consecGood = 0;
-      if (consecBad === OPEN_THRESHOLD && incidentStart === null) {
-        incidentStart = tMs - (OPEN_THRESHOLD - 1) * granMs;
-      }
-    } else {
-      consecGood++;
-      consecBad = 0;
-      if (consecGood >= CLOSE_THRESHOLD && incidentStart !== null) {
-        intervals.push({ start: incidentStart, end: tMs - (CLOSE_THRESHOLD - 1) * granMs });
-        incidentStart = null;
-      }
-    }
-  }
-
-  if (incidentStart !== null) {
-    intervals.push({ start: incidentStart, end: new Date(availSeries[availSeries.length - 1].t).getTime() });
-  }
-
-  return intervals;
 }
 
 async function getAvailabilityFromAppInsights(appId, credential, range, granularity, customStart, customEnd) {
@@ -639,9 +574,7 @@ async function getFailedDependencies(appId, credential, range, customStart, cust
     const aiToken = await credential.getToken('https://api.applicationinsights.io/.default');
     const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
     const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-    const classifyExpr = internalCondition
-      ? `extend classification = iff(${internalCondition}, "internal", "thirdParty")`
-      : `extend classification = "thirdParty"`;
+    const classifyExpr = depClassifyExpr(internalCondition);
     const query = `dependencies
 | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
 | ${classifyExpr}
@@ -665,7 +598,7 @@ async function getFailedDependencies(appId, credential, range, customStart, cust
     const t = startTime.toISOString();
     return rows.map(([classification, name, depType, depTarget, totalCount, failCount, avgDuration, p95, p99]) => ({
       t,
-      classification: classification === 'internal' ? 'internal' : 'thirdParty',
+      classification: classification === 'internal' ? 'internal' : classification === 'assets' ? 'assets' : 'thirdParty',
       name:        name      ?? '(unknown)',
       type:        depType   ?? '(unknown)',
       target:      depTarget ?? '',
@@ -842,12 +775,10 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     }
   }
 
-  const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketExceptions=countif(outerMessage has_any("SocketException","timeout","ENOBUFS","No buffer space available"));let users=requests|extend dimIp=tostring(customDimensions["Client IP Address"])|extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))|where isnotempty(ip)|summarize UniqueUsers=dcount(ip);deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|join kind=inner(users|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1,JoinKey2|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
+  const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketLayerExceptions=sumif(itemCount,${SOCKET_MATCH}),TimeoutExceptions=sumif(itemCount,${TIMEOUT_ONLY_MATCH}),OomExceptions=sumif(itemCount,${OOM_ONLY_MATCH}),GenericExceptions=sumif(itemCount,${GENERIC_MATCH}),TotalExceptions=sum(itemCount);let users=requests|extend dimIp=tostring(customDimensions["Client IP Address"])|extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))|where isnotempty(ip)|summarize UniqueUsers=dcount(ip);deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|join kind=inner(users|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1,JoinKey2|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketLayerExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketLayerExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
 
   // Group A: request/dependency-based (8 queries → 1 HTTP call)
-  const depsClassifyExpr = internalCondition
-    ? `extend classification = iff(${internalCondition}, "internal", "thirdParty") | `
-    : `extend classification = "thirdParty" | `;
+  const depsClassifyExpr = `${depClassifyExpr(internalCondition)} | `;
   const topDepsKql =
     `dependencies | ${depsClassifyExpr}summarize totalCount=count(), failCount=countif(success==false), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0), p99=round(percentile(duration,99),0) by classification, name, type, target ` +
     `| order by classification asc, totalCount desc | serialize | extend rn=row_number(1, prev(classification) != classification) | where rn <= 10 | project-away rn`;
@@ -862,7 +793,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     topDepsKql,
     `exceptions | summarize count=count() by type | order by count desc | take 10`,
     `exceptions | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
-    `dependencies | where success == false | where resultCode in ("408","500","502","503","504") | summarize timeoutCount=count() by name | project name, timeoutCount`,
+    `dependencies | where success == false | where resultCode in (${TIMEOUT_RESULT_CODES}) | extend nameClean = iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize timeoutCount=sum(itemCount), p95=round(percentile(duration,95),0), maxMs=round(max(duration),0) by nameClean, resultCode, type | project name=nameClean, resultCode, type, p95, maxMs, timeoutCount | order by timeoutCount desc | take 15`,
   ];
 
   // Group B: client-based + SNAT + SQL/HTTP timeouts (6 queries → 1 HTTP call)
@@ -875,10 +806,52 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `exceptions | where outerMessage has_any ("timeout","Timeout","timed out","SqlException","SqlTimeout","TaskCanceledException","HttpRequestException","TimeoutException") | where not(outerMessage has_any ("SocketException","ENOBUFS","No buffer space available","actively refused","Connection refused","ETIMEDOUT","SNAT")) | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
   ];
 
+  // Group C: socket-exception deep dive + socket-excluded generic exceptions
+  // (8 queries → 1 HTTP call). Kept in its own batch so a failure here (e.g. an
+  // unsupported column) cannot take down groups A/B.
+  const socketBin = spanMins <= 60 ? '1m' : spanMins <= 360 ? '5m' : spanMins <= 1440 ? '15m' : spanMins <= 10080 ? '1h' : '6h';
+  const socketProject = `project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, cloud_RoleInstance, innermostType, innermostMethod, operation_Id, itemCount, parsedStack=tostring(details[0].parsedStack)`;
+  const groupCKqls = [
+    // C0 — totals. trueCount uses sum(itemCount) so ingestion sampling does not undercount.
+    `exceptions | where ${SOCKET_MATCH} | summarize records=count(), trueCount=sum(itemCount), instances=dcount(cloud_RoleInstance), operations=dcount(operation_Name), firstSeen=min(timestamp), lastSeen=max(timestamp)`,
+    // C1 — which exception type / client library
+    `exceptions | where ${SOCKET_MATCH} | extend exType=iff(isempty(innermostType), type, innermostType) | summarize records=count(), trueCount=sum(itemCount) by exType, assembly | order by trueCount desc | take 12`,
+    // C2 — per instance: SNAT ports are allocated per worker, so skew matters
+    `exceptions | where ${SOCKET_MATCH} | summarize records=count(), trueCount=sum(itemCount), operations=dcount(operation_Name), firstSeen=min(timestamp), lastSeen=max(timestamp) by instance=cloud_RoleInstance, roleName=cloud_RoleName | order by trueCount desc | take 20`,
+    // C3 — burst vs steady leak
+    `exceptions | where ${SOCKET_MATCH} | summarize trueCount=sum(itemCount) by bin(timestamp, ${socketBin}) | order by timestamp asc`,
+    // C4 — which downstream target ate the ports (correlated via operation_Id)
+    `exceptions | where ${SOCKET_MATCH} | distinct operation_Id | join kind=inner (dependencies | where success == false | project operation_Id, depTarget=target, depType=type, resultCode, duration, itemCount) on operation_Id | summarize count=sum(itemCount), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0) by target=depTarget, depType, resultCode | order by count desc | take 15`,
+    // C5 — raw records, full field set
+    `exceptions | where ${SOCKET_MATCH} | ${socketProject} | top 50 by timestamp desc`,
+    // C6 — generic types: neither socket-layer nor timeout (own tab)
+    `exceptions | where ${GENERIC_MATCH} | summarize count=count(), trueCount=sum(itemCount) by type | order by count desc | take 10`,
+    // C7 — generic records
+    `exceptions | where ${GENERIC_MATCH} | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+    // C8 — timeout totals
+    `exceptions | where ${TIMEOUT_ONLY_MATCH} | summarize records=count(), trueCount=sum(itemCount), instances=dcount(cloud_RoleInstance), operations=dcount(operation_Name), firstSeen=min(timestamp), lastSeen=max(timestamp)`,
+    // C9 — timeout types: which layer is timing out (SQL vs HTTP vs custom)
+    `exceptions | where ${TIMEOUT_ONLY_MATCH} | summarize count=count(), trueCount=sum(itemCount) by type | order by count desc | take 10`,
+    // C10 — timeout records
+    `exceptions | where ${TIMEOUT_ONLY_MATCH} | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+    // C11 — timeout over time
+    `exceptions | where ${TIMEOUT_ONLY_MATCH} | summarize trueCount=sum(itemCount) by bin(timestamp, ${socketBin}) | order by timestamp asc`,
+    // C12 — exact per-endpoint timeout totals and windows. Needed because the
+    // detail records (C10) are capped at 50: counting groups from them understates
+    // any endpoint with more than 50 records, and the summary's first/last seen is
+    // the union across every endpoint, which cannot say which one started it.
+    `exceptions | where ${TIMEOUT_ONLY_MATCH} | summarize records=count(), trueCount=sum(itemCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by endpoint=operation_Name | order by trueCount desc | take 20`,
+    // C13 — OOM totals
+    `exceptions | where ${OOM_ONLY_MATCH} | summarize records=count(), trueCount=sum(itemCount), instances=dcount(cloud_RoleInstance), operations=dcount(operation_Name), firstSeen=min(timestamp), lastSeen=max(timestamp)`,
+    // C14 — OOM records
+    `exceptions | where ${OOM_ONLY_MATCH} | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
+  ];
+
   let urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows;
   let ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows;
   let depTimeoutRows;
   let insightResult;
+  let groupCRows = null;
 
   if (summaryOnly) {
     // Only fetch summary aggregates needed for collapsed badges (2 HTTP calls)
@@ -892,14 +865,89 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     topDepRows = null; errorDetailRows = null;
     ipRows = null; uaRows = null; botRows = null; hfRows = null; snatDetailRows = null; sqlHttpDetailRows = null;
   } else {
-    [[urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows, depTimeoutRows], [ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult] = await Promise.all([
+    [[urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows, depTimeoutRows], [ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult, groupCRows] = await Promise.all([
       runBatch(groupAKqls),
       runBatch(groupBKqls),
       runQueryFull(insightKql),
+      runBatch(groupCKqls),
     ]);
   }
 
   const parseOrErr = (rows, mapper) => Array.isArray(rows) ? rows.map(mapper) : rows;
+
+  // ── Group C parse ──────────────────────────────────────────────────────────
+  const cRows = (i) => (Array.isArray(groupCRows) && Array.isArray(groupCRows[i]) ? groupCRows[i] : null);
+  const str = (v) => String(v ?? '');
+  const num = (v) => Number(v) || 0;
+
+  const socketDetailMapper = ([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, cloud_RoleInstance, innermostType, innermostMethod, operation_Id, itemCount, parsedStack]) => ({
+    timestamp: str(timestamp), type: str(type) || 'Unknown', outerMessage: str(outerMessage), method: str(method),
+    assembly: str(assembly), operation_Name: str(operation_Name), innermostMessage: str(innermostMessage),
+    severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: str(handledAt),
+    cloud_RoleName: str(cloud_RoleName), cloud_RoleInstance: str(cloud_RoleInstance),
+    innermostType: str(innermostType), innermostMethod: str(innermostMethod),
+    operation_Id: str(operation_Id), itemCount: itemCount != null ? Number(itemCount) : 1,
+    parsedStack: str(parsedStack),
+  });
+
+  const socketSummaryRow = cRows(0)?.[0] ?? null;
+  const socketInsights = groupCRows == null ? null : {
+    summary: socketSummaryRow ? {
+      records:    num(socketSummaryRow[0]),
+      trueCount:  num(socketSummaryRow[1]),
+      instances:  num(socketSummaryRow[2]),
+      operations: num(socketSummaryRow[3]),
+      firstSeen:  str(socketSummaryRow[4]),
+      lastSeen:   str(socketSummaryRow[5]),
+    } : null,
+    byType:     (cRows(1) ?? []).map(([exType, assembly, records, trueCount]) => ({ exType: str(exType) || 'Unknown', assembly: str(assembly), records: num(records), trueCount: num(trueCount) })),
+    byInstance: (cRows(2) ?? []).map(([instance, roleName, records, trueCount, operations, firstSeen, lastSeen]) => ({ instance: str(instance) || 'unknown', roleName: str(roleName), records: num(records), trueCount: num(trueCount), operations: num(operations), firstSeen: str(firstSeen), lastSeen: str(lastSeen) })),
+    timeline:   (cRows(3) ?? []).map(([t, count]) => ({ t: str(t), count: num(count) })),
+    targets:    (cRows(4) ?? []).map(([target, depType, resultCode, count, avgDuration, p95]) => ({ target: str(target) || '(unknown)', depType: str(depType), resultCode: str(resultCode), count: num(count), avgDuration: num(avgDuration), p95: num(p95) })),
+    details:    (cRows(5) ?? []).map(socketDetailMapper),
+  };
+
+  const genericDetailMapper = ([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({
+    timestamp: str(timestamp), type: str(type) || 'Unknown', outerMessage: str(outerMessage), method: str(method),
+    assembly: str(assembly), operation_Name: str(operation_Name), innermostMessage: str(innermostMessage),
+    severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: str(handledAt),
+    cloud_RoleName: str(cloud_RoleName), client_Browser: str(client_Browser), client_OS: str(client_OS),
+    innermostType: str(innermostType), innermostMethod: str(innermostMethod), parsedStack: str(parsedStack),
+  });
+
+  const timeoutSummaryRow = cRows(8)?.[0] ?? null;
+  const timeoutInsights = groupCRows == null ? null : {
+    summary: timeoutSummaryRow ? {
+      records:    num(timeoutSummaryRow[0]),
+      trueCount:  num(timeoutSummaryRow[1]),
+      instances:  num(timeoutSummaryRow[2]),
+      operations: num(timeoutSummaryRow[3]),
+      firstSeen:  str(timeoutSummaryRow[4]),
+      lastSeen:   str(timeoutSummaryRow[5]),
+    } : null,
+    types:    (cRows(9) ?? []).map(([type, count, trueCount]) => ({ type: str(type) || 'Unknown', count: num(count), trueCount: num(trueCount) })),
+    details:  (cRows(10) ?? []).map(genericDetailMapper),
+    timeline: (cRows(11) ?? []).map(([t, count]) => ({ t: str(t), count: num(count) })),
+    byEndpoint: (cRows(12) ?? []).map(([endpoint, records, trueCount, firstSeen, lastSeen]) => ({ endpoint: str(endpoint) || '(unknown endpoint)', records: num(records), trueCount: num(trueCount), firstSeen: str(firstSeen), lastSeen: str(lastSeen) })),
+  };
+
+  const oomSummaryRow = cRows(13)?.[0] ?? null;
+  const oomInsights = groupCRows == null ? null : {
+    summary: oomSummaryRow ? {
+      records:    num(oomSummaryRow[0]),
+      trueCount:  num(oomSummaryRow[1]),
+      instances:  num(oomSummaryRow[2]),
+      operations: num(oomSummaryRow[3]),
+      firstSeen:  str(oomSummaryRow[4]),
+      lastSeen:   str(oomSummaryRow[5]),
+    } : null,
+    details: (cRows(14) ?? []).map(genericDetailMapper),
+  };
+
+  const errorTypesGeneric = cRows(6)
+    ? cRows(6).map(([type, count, trueCount]) => ({ type: str(type) || 'Unknown', count: num(count), trueCount: num(trueCount) }))
+    : null;
+  const errorDetailsGeneric = cRows(7) ? cRows(7).map(genericDetailMapper) : null;
 
   let insight = null;
   if (insightResult && !insightResult.error && insightResult.rows?.length > 0) {
@@ -918,7 +966,13 @@ async function getRequestInsights(appId, credential, range, customStart, customE
       requestFailureRate:    Number(get('RequestFailureRate')    ?? 0),
       requestP95:            Number(get('RequestP95')            ?? 0),
       requestP99:            Number(get('RequestP99')            ?? 0),
-      socketExceptions:      Number(get('SocketExceptions')      ?? 0),
+      socketLayerExceptions: Number(get('SocketLayerExceptions') ?? 0),
+      timeoutExceptions:     Number(get('TimeoutExceptions')     ?? 0),
+      oomExceptions:         Number(get('OomExceptions')         ?? 0),
+      genericExceptions:     Number(get('GenericExceptions')     ?? 0),
+      // Exact count of every exception row. errorCount only sums the top 10
+      // types, so it undercounts whenever an app has more than 10 distinct types.
+      totalExceptions:       Number(get('TotalExceptions')       ?? 0),
       uniqueUsers:           Number(get('UniqueUsers')           ?? 0),
     };
   }
@@ -937,13 +991,42 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     total5xx: Array.isArray(total5xxRows) && total5xxRows[0] ? Number(total5xxRows[0][0]) || 0 : null,
     snatDetails: Array.isArray(snatDetailRows) ? snatDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
     sqlHttpDetails: Array.isArray(sqlHttpDetailRows) ? sqlHttpDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
-    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([classification, name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ classification: classification === 'internal' ? 'internal' : 'thirdParty', name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
+    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([classification, name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ classification: classification === 'internal' ? 'internal' : classification === 'assets' ? 'assets' : 'thirdParty', name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
     errorTypes: Array.isArray(errorTypeRows) ? errorTypeRows.map(([type, count]) => ({ type: String(type || 'Unknown'), count: Number(count) || 0 })) : null,
     errorCount: Array.isArray(errorTypeRows) ? errorTypeRows.reduce((s, [, c]) => s + (Number(c) || 0), 0) : null,
     errorDetails: Array.isArray(errorDetailRows) ? errorDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), client_Browser: String(client_Browser ?? ''), client_OS: String(client_OS ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
-    dependencyTimeouts: Array.isArray(depTimeoutRows) ? depTimeoutRows.map(([name, count]) => ({ name: String(name ?? ''), count: Number(count) || 0 })) : null,
+    dependencyTimeouts: Array.isArray(depTimeoutRows) ? depTimeoutRows.map(([name, resultCode, depType, p95, maxMs, count]) => ({ name: String(name ?? ''), resultCode: String(resultCode ?? ''), type: String(depType ?? ''), p95: Math.round(Number(p95) || 0), maxMs: Math.round(Number(maxMs) || 0), count: Number(count) || 0 })) : null,
+    socketInsights,
+    timeoutInsights,
+    oomInsights,
+    errorTypesGeneric,
+    errorDetailsGeneric,
     insight,
   };
+}
+
+// Outbound socket / TCP state counters. These are published on the App Service
+// PLAN (Microsoft.Web/serverfarms), not the site — querying a site returns
+// HTTP 400 "Failed to find metric configuration". Because they are plan-scoped
+// they cover every site sharing the plan, which the UI states explicitly.
+// Returns null when nothing reported (Container Apps, plans without the counters).
+async function getSocketMetrics(client, token, siteResId, range, granularity, customStart, customEnd) {
+  const plan = await getPlanInfo(token, siteResId).catch(() => null);
+  if (!plan?.farmId) return null;
+  const ts = buildTimespan(range, customStart, customEnd);
+  const results = await Promise.all(SOCKET_METRIC_NAMES.map(async (name) => {
+    try {
+      const res = await client.queryResource(plan.farmId, [name], { timespan: ts, granularity, aggregations: ['Average', 'Maximum'] });
+      const data = res.metrics[0]?.timeseries?.[0]?.data || [];
+      if (!data.length) return null;
+      const s = summarize(data);
+      if (!s.series.length || s.series.every(p => p.v === 0 && p.m === 0)) return null;
+      return { name, avg: s.avg, max: s.max, series: s.series.map(p => ({ t: p.t, v: p.v, m: p.m })) };
+    } catch { return null; }
+  }));
+  const metrics = results.filter(Boolean);
+  if (!metrics.length) return null;
+  return { planName: plan.farmId.split('/').pop() || '', metrics };
 }
 
 async function fetchAppMetrics(client, token, credential, app, subscriptionId, range, customStart, customEnd, granularityOverride) {
@@ -1213,15 +1296,29 @@ async function fetchAppDetailsData(app, subscriptionId, credential, range, custo
     (isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null) : null);
 
   let apiAiAppId = null;
+  const apiIsContainerAppEarly = (app.apiType || 'appservice') === 'containerapp';
   if (app.apiName) {
-    const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
     apiAiAppId = app.apiInsightsAppId ||
-      (!apiIsContainerApp && isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null) : null);
+      (!apiIsContainerAppEarly && isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null) : null);
   }
 
-  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, failedDependencies: null, apiFailedDependencies: null };
+  // Platform socket/TCP counters — independent of App Insights, so fetched even
+  // when the app has no AI component wired up.
+  const { MetricsQueryClient } = require('@azure/monitor-query');
+  const metricsClient = new MetricsQueryClient(credential);
+  const gran = (customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range);
+  const [socketMetrics, apiSocketMetrics] = await Promise.all([
+    isAppService
+      ? getSocketMetrics(metricsClient, token, resourceId(subscriptionId, app), range, gran, customStart, customEnd).catch(() => null)
+      : Promise.resolve(null),
+    (app.apiName && !apiIsContainerAppEarly)
+      ? getSocketMetrics(metricsClient, token, resourceId(subscriptionId, { type: 'appservice', resourceGroup: app.resourceGroup, name: app.apiName }), range, gran, customStart, customEnd).catch(() => null)
+      : Promise.resolve(null),
+  ]);
 
-  const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
+  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, failedDependencies: null, apiFailedDependencies: null, socketMetrics, apiSocketMetrics };
+
+  const apiIsContainerApp = apiIsContainerAppEarly;
   const [appHostnames, apiHostnames] = await Promise.all([
     getAppHostnames(token, resourceId(subscriptionId, app), app.type),
     app.apiName
@@ -1237,7 +1334,7 @@ async function fetchAppDetailsData(app, subscriptionId, credential, range, custo
     apiAiAppId ? getFailedDependencies(apiAiAppId, credential, range, customStart, customEnd, internalCondition).catch(() => null) : Promise.resolve(null),
   ]);
 
-  return { requestInsights, apiRequestInsights, failedDependencies: failedDependencies ?? null, apiFailedDependencies: apiFailedDependencies ?? null };
+  return { requestInsights, apiRequestInsights, failedDependencies: failedDependencies ?? null, apiFailedDependencies: apiFailedDependencies ?? null, socketMetrics, apiSocketMetrics };
 }
 
 // ─── Detector KQL helpers ─────────────────────────────────────────────────────
@@ -1275,7 +1372,7 @@ const DETECTOR_QUERIES = [
       kql: `dependencies | where {BETWEEN} | summarize AvgDuration=avg(duration), P95=percentile(duration,95) by target | order by P95 desc | take 10` },
   ]},
   { id: 'snat', label: 'SNAT Port Exhaustion', color: '#a371f7', queries: [
-    { name: 'Socket Exceptions',
+    { name: 'Connection Errors',
       kql: `exceptions | where {BETWEEN} | where outerMessage has_any ("SocketException","timeout","No buffer space available","actively refused","ENOBUFS") | summarize Count=count() by outerMessage | order by Count desc` },
     { name: 'Dependency Duration Spike',
       kql: `dependencies | where {BETWEEN} | summarize Total=count(), Failed=countif(success==false), DurationP95=percentile(duration,95), DurationP99=percentile(duration,99) by target | extend FailureRate=todouble(Failed)/Total*100 | order by DurationP99 desc` },

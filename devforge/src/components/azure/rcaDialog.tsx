@@ -1,7 +1,8 @@
 import { marked } from 'marked';
-import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check } from 'lucide-react';
+import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check, FileText } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { splitQuickSummary } from './rcaHtml';
 
 export type RcaStatus = 'running' | 'done' | 'error';
 
@@ -14,14 +15,21 @@ interface RcaDialogProps {
   stages: string[];
   error: string | null;
   onExport: () => void;
+  onExportPdf: () => void;
   onCopyTeams: () => void;
+  onCopySummary: () => void;
   onRetry: () => void;
 }
 
 export function RcaDialog({
-  open, onOpenChange, title, status, markdown, stages, error, onExport, onCopyTeams, onRetry,
+  open, onOpenChange, title, status, markdown, stages, error,
+  onExport, onExportPdf, onCopyTeams, onCopySummary, onRetry,
 }: RcaDialogProps) {
-  const html = status === 'done' ? (marked.parse(markdown, { async: false }) as string) : '';
+  // Lift the plain-English summary out of the body so it renders as a callout —
+  // it is the part non-engineers read, and it is easy to miss inline.
+  const { summary, body } = status === 'done' ? splitQuickSummary(markdown) : { summary: '', body: '' };
+  const html = status === 'done' ? (marked.parse(body, { async: false }) as string) : '';
+  const summaryHtml = summary ? (marked.parse(summary, { async: false }) as string) : '';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -29,7 +37,7 @@ export function RcaDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <ScanSearch className="h-4 w-4 text-[#58a6ff]" />
-            Claude RCA — {title}
+            RCA Report — {title}
           </DialogTitle>
         </DialogHeader>
 
@@ -76,13 +84,36 @@ export function RcaDialog({
               )}
             </div>
           ) : (
-            <div className="rca-content" dangerouslySetInnerHTML={{ __html: html }} />
+            <>
+              {summaryHtml && (
+                <div className="rca-summary">
+                  <div className="rca-summary-label">
+                    <ScanSearch className="h-3.5 w-3.5" />
+                    <span>Quick Summary</span>
+                    <button
+                      type="button"
+                      className="rca-summary-copy"
+                      onClick={onCopySummary}
+                      title="Copy the Quick Summary formatted for Microsoft Teams"
+                    >
+                      <Share2 className="h-3 w-3" />
+                      Copy for Teams
+                    </button>
+                  </div>
+                  <div dangerouslySetInnerHTML={{ __html: summaryHtml }} />
+                </div>
+              )}
+              <div className="rca-content" dangerouslySetInnerHTML={{ __html: html }} />
+            </>
           )}
         </div>
 
         <div className="flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExport}>
-            <Download className="mr-1.5 h-3.5 w-3.5" /> Export
+            <Download className="mr-1.5 h-3.5 w-3.5" /> Export MD
+          </Button>
+          <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExportPdf}>
+            <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
           </Button>
           <Button variant="default" size="sm" disabled={status !== 'done'} onClick={onCopyTeams}>
             <Share2 className="mr-1.5 h-3.5 w-3.5" /> Copy for Teams
@@ -90,6 +121,30 @@ export function RcaDialog({
         </div>
 
         <style>{`
+          .rca-summary {
+            border: 1px solid rgba(88, 166, 255, .35); border-left: 3px solid #58a6ff;
+            border-radius: 6px; background: rgba(88, 166, 255, .08);
+            padding: 12px 14px; margin-bottom: 16px;
+          }
+          .rca-summary-label {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+            color: #58a6ff; margin-bottom: 6px;
+          }
+          .rca-summary-copy {
+            margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+            font: inherit; letter-spacing: .04em; color: #58a6ff;
+            background: transparent; border: 1px solid rgba(88, 166, 255, .4);
+            border-radius: 4px; padding: 2px 6px; cursor: pointer;
+          }
+          .rca-summary-copy:hover { background: rgba(88, 166, 255, .15); }
+          .rca-summary p { font-size: 14px; line-height: 1.65; margin: 0; color: hsl(var(--foreground)); }
+          .rca-summary p + p { margin-top: .5rem; }
+          /* The summary leads with a verdict line, then a facts table. */
+          .rca-summary table { width: auto; border-collapse: collapse; margin: .6rem 0; font-size: 12px; }
+          .rca-summary th, .rca-summary td { border: 1px solid hsl(var(--border)); padding: 4px 9px; text-align: left; vertical-align: top; }
+          .rca-summary th { background: hsl(var(--muted)); font-weight: 600; }
+          .rca-summary td:first-child { white-space: nowrap; color: hsl(var(--muted-foreground)); }
           .rca-content { font-size: 13px; line-height: 1.6; color: hsl(var(--foreground)); }
           .rca-content > *:first-child { margin-top: 0; }
           .rca-content h1 { font-size: 1.25rem; font-weight: 700; margin: 0 0 .5rem; }
