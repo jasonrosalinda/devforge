@@ -542,4 +542,27 @@ describe('buildRcaPrompt', () => {
     expect(instructions).toContain('## 8. Analysis Confidence & Data Gaps');
     expect(instructions).not.toMatch(/^## (9|10)\. /m);
   });
+
+  // Analyst notes are optional context typed in the RCA dialog. Absent, the prompt
+  // must not carry an empty section or hint at notes that were never supplied.
+  it('omits the analyst-notes section when no notes are given', () => {
+    for (const p of [prompt(), buildRcaPrompt(render(makeData()), ''), buildRcaPrompt(render(makeData()), '   \n ')]) {
+      expect(p).not.toMatch(/ANALYST INVESTIGATION NOTES/);
+      expect(p).not.toMatch(/analyst investigation notes/);
+    }
+  });
+
+  it('includes analyst notes as reference evidence, above the telemetry', () => {
+    const p = buildRcaPrompt(render(makeData()), 'Release 1.16.0 deployed 14:05 SGT; new EF query lacks AsNoTracking.');
+    expect(p).toContain('## ANALYST INVESTIGATION NOTES');
+    expect(p).toContain('Release 1.16.0 deployed 14:05 SGT');
+    expect(p.indexOf('## ANALYST INVESTIGATION NOTES')).toBeLessThan(p.indexOf('## TELEMETRY REPORT'));
+    // Notes are weighed against the metrics — never a source of numbers, and a
+    // contradiction has to be surfaced rather than quietly resolved either way.
+    expect(p).toMatch(/REFERENCE, not telemetry/);
+    expect(p).toMatch(/never let them override a measured value/);
+    expect(p).toMatch(/CONTRADICT the telemetry/);
+    expect(p).toMatch(/no figure may originate from them/);
+    expect(p).toMatch(/include that candidate in the differential diagnosis/);
+  });
 });

@@ -114,7 +114,11 @@ export interface IElectronAPI {
     incidentReport: {
         generate: (opts: IncidentPayload) => Promise<{ success: boolean; path?: string; error?: string }>;
         fetchData: (opts: IncidentPayload) => Promise<unknown>;
-        rca: (opts: IncidentPayload) => Promise<{ success: boolean; rca?: string; error?: string }>;
+        /**
+         * `investigationNotes` is the engineer's own findings (code, deploy, infra)
+         * typed into the RCA dialog — passed to the model as corroborating context.
+         */
+        rca: (opts: IncidentPayload & { investigationNotes?: string }) => Promise<{ success: boolean; rca?: string; error?: string }>;
         aiRemarks: (opts: {
             summary: unknown;
         }) => Promise<{ success: boolean; status?: 'healthy' | 'warning' | 'critical'; remarks?: string; error?: string }>;

@@ -985,7 +985,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
   const [rcaOpen, setRcaOpen] = useState(false);
-  const [rcaStatus, setRcaStatus] = useState<RcaStatus>('running');
+  const [rcaStatus, setRcaStatus] = useState<RcaStatus>('idle');
   const [rcaText, setRcaText] = useState('');
   const [rcaError, setRcaError] = useState<string | null>(null);
   const [rcaStages, setRcaStages] = useState<string[]>([]);
@@ -1063,8 +1063,20 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     }
   }, [buildIncidentPayload]);
 
-  const handleRunRca = useCallback(async () => {
+  // Opens the dialog on its input step — the analysis only starts when the user
+  // presses Generate, so they can supply their own findings first.
+  const openRcaDialog = useCallback(() => {
     setRcaOpen(true);
+    // A run keeps going when the dialog is dismissed — reopening shows its progress
+    // rather than resetting state out from under the in-flight analysis.
+    if (rcaStatus === 'running') return;
+    setRcaStatus('idle');
+    setRcaText('');
+    setRcaError(null);
+    setRcaStages([]);
+  }, [rcaStatus]);
+
+  const handleRunRca = useCallback(async (investigationNotes: string) => {
     setRcaStatus('running');
     setRcaText('');
     setRcaError(null);
@@ -1080,7 +1092,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       if (reset) setRcaText('');
     });
     try {
-      const result = await window.electronAPI.incidentReport.rca(buildIncidentPayload());
+      const result = await window.electronAPI.incidentReport.rca({ ...buildIncidentPayload(), investigationNotes });
       if (result.success && result.rca) {
         setRcaText(result.rca);
         setRcaStatus('done');
@@ -1613,14 +1625,13 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             variant="ghost"
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            onClick={() => handleRunRca()}
-            disabled={rcaOpen && rcaStatus === 'running'}
-            title="Generate RCA Report from captured metrics"
+            onClick={openRcaDialog}
+            title={rcaStatus === 'running' ? 'RCA analysis running…' : 'RCA Report — add investigation notes, then generate'}
             data-html2canvas-ignore="true"
           >
             <ScanSearch
               className="w-3.5 h-3.5"
-              style={(rcaOpen && rcaStatus === 'running') ? {
+              style={rcaStatus === 'running' ? {
                 color: '#58a6ff',
                 filter: 'drop-shadow(0 0 6px #58a6ff)',
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
@@ -3649,7 +3660,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       onExportPdf={exportRcaPdf}
       onCopyTeams={copyRcaForTeams}
       onCopySummary={copySummaryForTeams}
-      onRetry={handleRunRca}
+      onGenerate={handleRunRca}
     />
 
     </>

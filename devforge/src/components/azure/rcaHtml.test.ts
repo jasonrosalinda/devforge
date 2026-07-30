@@ -207,6 +207,29 @@ describe('buildRcaPrintHtml', () => {
     expect(html).toContain('Detail.');
   });
 
+  // The wrapper used to print its own title above the report's, so the PDF opened
+  // with "Root Cause Analysis Report" twice.
+  it('prints the report title once, from the markdown itself', () => {
+    const html = buildRcaPrintHtml('# Root Cause Analysis Report\n\n**App:** app-prod\n\n## 1. Executive Summary\n\nDetail.', meta);
+    const rendered = html.slice(html.indexOf('<body>'));
+    expect(rendered.match(/Root Cause Analysis Report/g)!.length).toBe(1);
+    expect(rendered.match(/<h1[\s>]/g)!.length).toBe(1);
+    expect(html).not.toContain('doc-header');
+  });
+
+  // A truncated stream can arrive without the title; the PDF must not be headerless.
+  it('falls back to a wrapper header when the markdown has no h1', () => {
+    const html = buildRcaPrintHtml('## 1. Executive Summary\n\nDetail.', meta);
+    expect(html).toContain('<h1>Root Cause Analysis Report</h1>');
+    expect(html).toContain(meta.window);
+  });
+
+  it('keeps the generation timestamp in the footer', () => {
+    const html = buildRcaPrintHtml('# Root Cause Analysis Report', meta);
+    expect(html).toContain('2026-07-30 14:20 SGT');
+    expect(html).toMatch(/class="footer"[\s\S]*2026-07-30 14:20 SGT/);
+  });
+
   it('escapes the app name in the title and header', () => {
     const html = buildRcaPrintHtml('# Root Cause Analysis Report', { ...meta, appName: 'a<script>b' });
     expect(html).not.toContain('a<script>b');

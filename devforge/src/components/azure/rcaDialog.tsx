@@ -1,10 +1,12 @@
+import { useState } from 'react';
 import { marked } from 'marked';
-import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check, FileText } from 'lucide-react';
+import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check, FileText, Sparkles } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { splitQuickSummary } from './rcaHtml';
 
-export type RcaStatus = 'running' | 'done' | 'error';
+export type RcaStatus = 'idle' | 'running' | 'done' | 'error';
 
 interface RcaDialogProps {
   open: boolean;
@@ -18,13 +20,23 @@ interface RcaDialogProps {
   onExportPdf: () => void;
   onCopyTeams: () => void;
   onCopySummary: () => void;
-  onRetry: () => void;
+  /** Runs the analysis. Notes are the engineer's own findings, passed as context. */
+  onGenerate: (investigationNotes: string) => void;
 }
+
+const NOTES_PLACEHOLDER = `Optional. Anything you already know that the metrics cannot show, for example:
+• Code: a new EF query on /Enrollment ships without .AsNoTracking(); HttpClient created per request.
+• Deploy: release 1.16.0 went out 14:05 SGT, right before the spike.
+• Infra: DB scaled down to S2 last night; App Gateway WAF rule changed.
+• Suspicion: I think the connection pool is exhausted, but I can't prove it.`;
 
 export function RcaDialog({
   open, onOpenChange, title, status, markdown, stages, error,
-  onExport, onExportPdf, onCopyTeams, onCopySummary, onRetry,
+  onExport, onExportPdf, onCopyTeams, onCopySummary, onGenerate,
 }: RcaDialogProps) {
+  // Kept in the dialog so a retry reuses the notes the engineer already typed.
+  const [notes, setNotes] = useState('');
+
   // Lift the plain-English summary out of the body so it renders as a callout —
   // it is the part non-engineers read, and it is easy to miss inline.
   const { summary, body } = status === 'done' ? splitQuickSummary(markdown) : { summary: '', body: '' };
@@ -42,13 +54,43 @@ export function RcaDialog({
         </DialogHeader>
 
         <div className="flex-1 min-h-[200px] overflow-y-auto rounded-md border border-border bg-card/40 p-4 text-sm">
-          {status === 'error' ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-              <AlertTriangle className="h-8 w-8 text-destructive" />
-              <p className="max-w-md text-sm text-destructive">{error || 'Something went wrong.'}</p>
-              <Button variant="outline" size="sm" onClick={onRetry}>
-                <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-              </Button>
+          {status === 'idle' || status === 'error' ? (
+            <div className="flex flex-col gap-3">
+              {status === 'error' && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                  <p className="text-xs leading-relaxed text-destructive">{error || 'Something went wrong.'}</p>
+                </div>
+              )}
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Pulls Azure telemetry for the selected window and runs a Claude root-cause analysis.
+                Add your own investigation findings below and they are used as reference evidence
+                alongside the metrics.
+              </p>
+              <div className="flex flex-col gap-1.5">
+                <label htmlFor="rca-notes" className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Your investigation notes — code / infra / deploys
+                </label>
+                <Textarea
+                  id="rca-notes"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder={NOTES_PLACEHOLDER}
+                  className="min-h-[160px] resize-y font-mono text-xs leading-relaxed"
+                  spellCheck={false}
+                />
+                <span className="text-[11px] text-muted-foreground">
+                  Telemetry stays the only source of numbers — notes are weighed against it, and a
+                  contradiction is called out in the report.
+                </span>
+              </div>
+              <div className="flex justify-end">
+                <Button variant="default" size="sm" onClick={() => onGenerate(notes)}>
+                  {status === 'error'
+                    ? <><RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry analysis</>
+                    : <><Sparkles className="mr-1.5 h-3.5 w-3.5" /> Generate RCA</>}
+                </Button>
+              </div>
             </div>
           ) : status === 'running' ? (
             <div className="flex flex-col gap-3">
