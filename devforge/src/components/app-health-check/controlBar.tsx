@@ -1,11 +1,13 @@
 import { useMemo, useEffect } from 'react';
 import { AppDropdown } from './appDropdown';
-import { C, GRANULARITIES, inputStyle, maxEndDt } from './styles';
+import { C, GRANULARITIES, inputStyle, nowDt } from './styles';
 
 type Props = {
   notConfigured: boolean;
   effectiveSelected: string[];
   allAppKeys: string[];
+  /** App key → platform name, for the picker. */
+  appLabels?: Record<string, string>;
   onSelectedChange: (keys: string[]) => void;
   startDt: string;
   setStartDt: (v: string) => void;
@@ -22,7 +24,7 @@ type Props = {
 
 export function ControlBar(props: Props) {
   const {
-    notConfigured, effectiveSelected, allAppKeys, onSelectedChange,
+    notConfigured, effectiveSelected, allAppKeys, appLabels, onSelectedChange,
     startDt, setStartDt, endDt, setEndDt,
     granularity, setGranularity,
     loading, fetchDisabled, onFetch,
@@ -46,7 +48,7 @@ export function ControlBar(props: Props) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
       {!notConfigured && (
-        <AppDropdown selected={effectiveSelected} allKeys={allAppKeys} onChange={onSelectedChange} />
+        <AppDropdown selected={effectiveSelected} allKeys={allAppKeys} onChange={onSelectedChange} labels={appLabels ?? {}} />
       )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -61,16 +63,12 @@ export function ControlBar(props: Props) {
         <input
           type="datetime-local"
           value={endDt}
-          max={maxEndDt()}
-          onChange={e => {
-            const max = maxEndDt();
-            setEndDt(e.target.value > max ? max : e.target.value);
-          }}
+          onChange={e => setEndDt(e.target.value)}
           style={inputStyle}
         />
         <button
-          onClick={() => setEndDt(maxEndDt())}
-          title="Set end to now (−5 min ingestion delay)"
+          onClick={() => setEndDt(nowDt())}
+          title="Set end to now. Telemetry lags a few minutes, so the last bucket may be thin or empty."
           style={{
             padding: '4px 8px',
             borderRadius: 6,

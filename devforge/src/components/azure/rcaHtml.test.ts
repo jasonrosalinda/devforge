@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   splitQuickSummary, buildRcaPrintHtml, formatSgt, formatSgtRange,
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
+  parseRcaFields, composeRcaMarkdown, isRcaFieldsEmpty, EMPTY_RCA_FIELDS,
+  stripMarkdown, buildRcaWordHtml, htmlToPlainText, plainTextToHtml, isHtmlEmpty,
+  composeTrackerMarkdown, isTrackerEmpty, parseTrackerFields, EMPTY_TRACKER_FIELDS,
+  type RcaTrackerFields,
 } from './rcaHtml';
 
 // The RCA prompt asks for the Quick Summary as the FIRST section, ahead of the
@@ -242,5 +246,395 @@ describe('buildRcaPrintHtml', () => {
     expect(html).toContain('@page');
     expect(html).toContain('display: table-header-group');
     expect(html).toContain('print-color-adjust: exact');
+  });
+});
+
+// The card's RCA section is an editable form: a generated report is parsed back
+// into fields, and the fields are composed back into the report's own layout.
+describe('parseRcaFields', () => {
+  const report = [
+    '## Quick Summary',
+    '',
+    '**Cause:** Login was blocked at the edge.',
+    '',
+    '# RCA Report: MIMS CPD Login Issue',
+    '',
+    '## Root Cause Analysis (RCA)',
+    '',
+    '**Incident number:** INC-202607-001',
+    '**Incident:** MIMS CPD Login Issue',
+    '**Services Affected:** mims-cpd.com',
+    '**Incident Period:** 27 June 2026 – 01 Jul 2026',
+    '**Severity:** High',
+    '',
+    '## 1. Background',
+    '',
+    'a. 29 June at 7:30 PM SGT - reported by a user.',
+    '',
+    '## 2. Impact',
+    '',
+    'Enrolments dropped by about 90%.',
+    '',
+    '## 3. Root Cause',
+    '',
+    'Cloudflare challenged the authentication request.',
+    '',
+    '## 7. Current Status',
+    '',
+    'Resolved and retested.',
+  ].join('\n');
+
+  it('pulls the title and every metadata field', () => {
+    const f = parseRcaFields(report);
+    expect(f.title).toBe('MIMS CPD Login Issue');
+    expect(f.incidentNumber).toBe('INC-202607-001');
+    expect(f.services).toBe('mims-cpd.com');
+    expect(f.period).toBe('27 June 2026 – 01 Jul 2026');
+    expect(f.severity).toBe('High');
+  });
+
+  it('maps numbered sections onto their fields', () => {
+    const f = parseRcaFields(report);
+    expect(f.background).toContain('29 June at 7:30 PM SGT');
+    expect(f.impact).toBe('Enrolments dropped by about 90%.');
+    expect(f.rootCause).toBe('Cloudflare challenged the authentication request.');
+    expect(f.status).toBe('Resolved and retested.');
+  });
+
+  // A missing section must stay empty rather than absorb the next one's text.
+  it('leaves absent sections undefined', () => {
+    const f = parseRcaFields(report);
+    expect(f.resolution).toBeUndefined();
+    expect(f.lessons).toBeUndefined();
+    expect(f.preventive).toBeUndefined();
+  });
+
+  it('tolerates CRLF and unbolded metadata labels', () => {
+    const f = parseRcaFields('# RCA Report: X\r\n\r\nIncident number: INC-202607-009\r\n');
+    expect(f.incidentNumber).toBe('INC-202607-009');
+  });
+
+  it('returns nothing for empty input', () => {
+    expect(parseRcaFields('')).toEqual({});
+  });
+});
+
+describe('composeRcaMarkdown', () => {
+  const fields = {
+    ...EMPTY_RCA_FIELDS,
+    title: 'MIMS CPD Login Issue',
+    incidentNumber: 'INC-202607-001',
+    severity: 'High',
+    background: 'a. 29 June at 7:30 PM SGT - reported by a user.',
+    rootCause: 'Cloudflare challenged the authentication request.',
+  };
+
+  it('emits the title, metadata block and only the filled sections', () => {
+    const md = composeRcaMarkdown(fields);
+    expect(md).toContain('# RCA Report: MIMS CPD Login Issue');
+    expect(md).toContain('## Root Cause Analysis (RCA)');
+    expect(md).toContain('**Incident number:** INC-202607-001');
+    expect(md).toContain('## 1. Background');
+    expect(md).toContain('## 3. Root Cause');
+    // Empty fields would print as bare headings, which reads as missing analysis.
+    expect(md).not.toContain('## 2. Impact');
+    expect(md).not.toContain('## 7. Current Status');
+    expect(md).not.toContain('**Incident:**');
+  });
+
+  it('puts the Quick Summary ahead of the title so the split still finds it', () => {
+    const md = composeRcaMarkdown(fields, 'Login was blocked at the edge.');
+    expect(md.indexOf('## Quick Summary')).toBeLessThan(md.indexOf('# RCA Report:'));
+    const { summary, body } = splitQuickSummary(md);
+    expect(summary).toBe('Login was blocked at the edge.');
+    expect(body).toContain('# RCA Report: MIMS CPD Login Issue');
+  });
+
+  it('falls back to the incident name, then a placeholder, for the title', () => {
+    expect(composeRcaMarkdown({ ...EMPTY_RCA_FIELDS, incident: 'Login Issue' }))
+      .toContain('# RCA Report: Login Issue');
+    expect(composeRcaMarkdown(EMPTY_RCA_FIELDS)).toContain('# RCA Report: Untitled Incident');
+  });
+
+  it('round-trips a composed report back through the parser', () => {
+    const parsed = parseRcaFields(composeRcaMarkdown(fields));
+    expect(parsed.title).toBe(fields.title);
+    expect(parsed.incidentNumber).toBe(fields.incidentNumber);
+    expect(parsed.background).toBe(fields.background);
+    expect(parsed.rootCause).toBe(fields.rootCause);
+  });
+
+  it('reports an untouched form as empty', () => {
+    expect(isRcaFieldsEmpty(EMPTY_RCA_FIELDS)).toBe(true);
+    expect(isRcaFieldsEmpty({ ...EMPTY_RCA_FIELDS, impact: '  ' })).toBe(true);
+    expect(isRcaFieldsEmpty(fields)).toBe(false);
+  });
+});
+
+// The RCA form is plain-text and the document is Word/PDF, so generated markdown is
+// stripped before it fills a field — otherwise the reader sees the markup.
+describe('stripMarkdown', () => {
+  it('drops emphasis, code spans and heading markers', () => {
+    expect(stripMarkdown('## 3. Root Cause')).toBe('3. Root Cause');
+    expect(stripMarkdown('**Primary cause:** the database was at its limit'))
+      .toBe('Primary cause: the database was at its limit');
+    expect(stripMarkdown('run `az webapp restart` to recover')).toBe('run az webapp restart to recover');
+    expect(stripMarkdown('*emphasis* and __strong__ text')).toBe('emphasis and strong text');
+  });
+
+  it('turns bullets into a plain bullet character and keeps lettered items', () => {
+    expect(stripMarkdown('- first\n- second')).toBe('• first\n• second');
+    expect(stripMarkdown('a. 29 June at 7:30 PM SGT — reported by a user.'))
+      .toBe('a. 29 June at 7:30 PM SGT — reported by a user.');
+  });
+
+  it('flattens a pipe table into readable lines and drops the separator row', () => {
+    const table = [
+      '| What | Detail |',
+      '|---|---|',
+      '| Root cause | The database was at its limit |',
+      '| Duration | 23 minutes |',
+    ].join('\n');
+    expect(stripMarkdown(table)).toBe([
+      'What: Detail',
+      'Root cause: The database was at its limit',
+      'Duration: 23 minutes',
+    ].join('\n'));
+  });
+
+  it('keeps link text with its target and drops rules', () => {
+    expect(stripMarkdown('see [the portal](https://portal.azure.com)'))
+      .toBe('see the portal (https://portal.azure.com)');
+    expect(stripMarkdown('before\n\n---\n\nafter')).toBe('before\n\nafter');
+  });
+
+  it('leaves fenced code content alone and collapses blank runs', () => {
+    expect(stripMarkdown('```\nkeep **this**\n```')).toBe('keep **this**');
+    expect(stripMarkdown('one\n\n\n\ntwo')).toBe('one\n\ntwo');
+    expect(stripMarkdown('')).toBe('');
+  });
+});
+
+describe('buildRcaWordHtml', () => {
+  const meta = {
+    appName: 'app-prod',
+    window: '2026-07-30 00:00 SGT → 2026-07-30 23:59 SGT',
+    generated: '2026-07-30 14:20 SGT',
+  };
+
+  it('emits a Word-flavoured document with the report body', () => {
+    const html = buildRcaWordHtml('# RCA Report: MEDU Downtime\n\n## 1. Background\n\nDetail.', meta);
+    expect(html).toContain('xmlns:w="urn:schemas-microsoft-com:office:word"');
+    expect(html).toContain('<w:WordDocument>');
+    expect(html).toContain('RCA Report: MEDU Downtime');
+    expect(html).toContain('1. Background');
+  });
+
+  // Same rule as the PDF: the summary is the shareable blurb, not part of the report.
+  it('excludes the Quick Summary', () => {
+    const html = buildRcaWordHtml('## Quick Summary\n\nDown 30 minutes.\n\n# RCA Report: X\n\nDetail.', meta);
+    expect(html).not.toContain('Quick Summary');
+    expect(html).not.toContain('Down 30 minutes');
+  });
+
+  it('falls back to a title only when the markdown carries none', () => {
+    expect(buildRcaWordHtml('Body only.', meta)).toContain('<h1>RCA Report</h1>');
+    const titled = buildRcaWordHtml('# RCA Report: X\n\nDetail.', meta);
+    expect(titled.match(/<h1/g)).toHaveLength(1);
+  });
+
+  it('escapes the app name and keeps the generation footer', () => {
+    const html = buildRcaWordHtml('# RCA Report: X', { ...meta, appName: 'a<script>b' });
+    expect(html).not.toContain('a<script>b');
+    expect(html).toContain('a&lt;script&gt;b');
+    expect(html).toContain('2026-07-30 14:20 SGT');
+  });
+});
+
+// The seven section fields are rich text (lists, attached screenshots), so they hold
+// HTML. These conversions are what keeps the prompt clean and the exports whole.
+describe('htmlToPlainText', () => {
+  it('flattens paragraphs and lists to readable lines', () => {
+    expect(htmlToPlainText('<p>First.</p><p>Second.</p>')).toBe('First.\nSecond.');
+    expect(htmlToPlainText('<ul><li>one</li><li>two</li></ul>')).toBe('- one\n- two');
+    expect(htmlToPlainText('line<br>break')).toBe('line\nbreak');
+  });
+
+  it('replaces an image with a named marker, never its payload', () => {
+    const html = '<p>Before</p><img src="data:image/png;base64,AAAA" alt="waf-rule.png"><p>After</p>';
+    const text = htmlToPlainText(html);
+    expect(text).toContain('[image: waf-rule.png]');
+    expect(text).not.toContain('base64');
+    expect(text).toContain('Before');
+    expect(text).toContain('After');
+  });
+
+  it('unescapes entities and drops script content', () => {
+    expect(htmlToPlainText('<p>a &amp; b &lt;c&gt;</p>')).toBe('a & b <c>');
+    expect(htmlToPlainText('<script>alert(1)</script><p>text</p>')).toBe('text');
+  });
+});
+
+describe('plainTextToHtml', () => {
+  it('makes paragraphs, and a list from bullet lines', () => {
+    expect(plainTextToHtml('First.\n\nSecond.')).toBe('<p>First.</p><p>Second.</p>');
+    expect(plainTextToHtml('• one\n• two')).toBe('<ul><li>one</li><li>two</li></ul>');
+  });
+
+  // The Background chronology is lettered; an <ol> would renumber and lose the letters.
+  it('keeps lettered items as paragraphs', () => {
+    expect(plainTextToHtml('a. first\nb. second')).toBe('<p>a. first</p><p>b. second</p>');
+  });
+
+  it('escapes markup and returns nothing for blank input', () => {
+    expect(plainTextToHtml('<script>x</script>')).toBe('<p>&lt;script&gt;x&lt;/script&gt;</p>');
+    expect(plainTextToHtml('   ')).toBe('');
+  });
+});
+
+describe('isHtmlEmpty', () => {
+  it('treats an untouched or whitespace-only editor as empty', () => {
+    expect(isHtmlEmpty('')).toBe(true);
+    expect(isHtmlEmpty('<br>')).toBe(true);
+    expect(isHtmlEmpty('<p><br></p>')).toBe(true);
+    expect(isHtmlEmpty('<p>&nbsp;</p>')).toBe(true);
+  });
+
+  it('counts an attached image as content even with no text', () => {
+    expect(isHtmlEmpty('<img src="data:image/png;base64,AAAA">')).toBe(false);
+    expect(isHtmlEmpty('<p>Detail.</p>')).toBe(false);
+  });
+
+  // hasContent drives the export buttons, so an image-only section must enable them.
+  it('drives isRcaFieldsEmpty for the HTML sections', () => {
+    expect(isRcaFieldsEmpty({ ...EMPTY_RCA_FIELDS, impact: '<p><br></p>' })).toBe(true);
+    expect(isRcaFieldsEmpty({ ...EMPTY_RCA_FIELDS, impact: '<img src="data:image/png;base64,AAAA">' })).toBe(false);
+  });
+});
+
+describe('composeRcaMarkdown with rich-text sections', () => {
+  it('keeps section HTML verbatim so images reach the PDF and Word file', () => {
+    const md = composeRcaMarkdown({
+      ...EMPTY_RCA_FIELDS,
+      title: 'MEDU Downtime',
+      rootCause: '<p>Cloudflare challenged the login request.</p><img src="data:image/png;base64,AAAA" alt="rule.png">',
+    });
+    expect(md).toContain('## 3. Root Cause');
+    expect(md).toContain('<img src="data:image/png;base64,AAAA" alt="rule.png">');
+  });
+
+  it('omits a section whose editor holds only an empty paragraph', () => {
+    const md = composeRcaMarkdown({ ...EMPTY_RCA_FIELDS, title: 'X', impact: '<p><br></p>' });
+    expect(md).not.toContain('## 2. Impact');
+  });
+});
+
+// The tracker is the engineer's record, drafted by the AI where they left it blank, and rides at
+// the end of the report, after section 7.
+describe('composeTrackerMarkdown', () => {
+  const tracker = (fields: Partial<RcaTrackerFields> = {}) => ({ ...EMPTY_TRACKER_FIELDS, ...fields });
+
+  it('prints one labelled line per filled field, in report order', () => {
+    const md = composeTrackerMarkdown(tracker({
+      detection: 'Login stuck on a spinner, reported by a user.',
+      rootCauseIdentified: 'A firewall rule challenged the login request.',
+      outcome: '0 login failures since 14:20 SGT.',
+    }));
+    expect(md).toContain('## Tracker');
+    expect(md).toContain('**Detection / Symptoms:** Login stuck on a spinner, reported by a user.');
+    expect(md).toContain('**Root Cause Identified:** A firewall rule challenged the login request.');
+    expect(md).toContain('**Measurable Outcome:** 0 login failures since 14:20 SGT.');
+    expect(md.indexOf('Detection / Symptoms')).toBeLessThan(md.indexOf('Root Cause Identified'));
+    expect(md.indexOf('Root Cause Identified')).toBeLessThan(md.indexOf('Measurable Outcome'));
+  });
+
+  // A blank field is left out rather than printed as an empty label.
+  it('omits blank fields', () => {
+    const md = composeTrackerMarkdown(tracker({ detection: 'Seen in the login flow.' }));
+    expect(md).toContain('**Detection / Symptoms:**');
+    expect(md).not.toContain('**Corrective Action Taken:**');
+    expect(md).not.toContain('**Measurable Outcome:**');
+  });
+
+  it('returns nothing when the tracker is untouched', () => {
+    expect(composeTrackerMarkdown(tracker())).toBe('');
+    expect(composeTrackerMarkdown(tracker({ outcome: '   ' }))).toBe('');
+  });
+
+  it('reports emptiness from the fields alone', () => {
+    expect(isTrackerEmpty(tracker())).toBe(true);
+    expect(isTrackerEmpty(tracker({ correctiveAction: '  ' }))).toBe(true);
+    expect(isTrackerEmpty(tracker({ correctiveAction: 'Removed the rule.' }))).toBe(false);
+  });
+});
+
+describe('composeRcaMarkdown with a tracker', () => {
+  const fields = { ...EMPTY_RCA_FIELDS, title: 'MEDU Downtime', status: '<p>Resolved.</p>' };
+
+  it('appends the tracker after the last section', () => {
+    const md = composeRcaMarkdown(fields, '', { ...EMPTY_TRACKER_FIELDS, detection: 'Reported by a user.' });
+    expect(md).toContain('## Tracker');
+    expect(md.indexOf('## 7. Current Status')).toBeLessThan(md.indexOf('## Tracker'));
+  });
+
+  it('omits the tracker heading when nothing is tracked', () => {
+    expect(composeRcaMarkdown(fields, '', { ...EMPTY_TRACKER_FIELDS })).not.toContain('Tracker');
+    expect(composeRcaMarkdown(fields)).not.toContain('Tracker');
+  });
+});
+
+// A generated report now closes with a Tracker block, and its five lines have to come back
+// into the form. Parsed on its own rather than through parseRcaFields: the heading carries
+// no section number, so scanning the whole document would also match a label the engineer
+// happened to quote inside a section.
+describe('parseTrackerFields', () => {
+  const report = [
+    '## 7. Current Status', 'Resolved and being watched.', '',
+    '## Tracker', '',
+    '**Detection / Symptoms:** Login stuck on a spinner, reported by a user.  ',
+    '**Root Cause Identified:** Bot Fight Mode challenged the auth request.  ',
+    '**Corrective Action Taken:** Rule disabled at 14:20 SGT.  ',
+    '**Preventive / Improvement Action:** Exempt /auth from the challenge.  ',
+    '**Measurable Outcome:** 0 login failures since 14:20 SGT.  ',
+  ].join('\n');
+
+  it('pulls every field out of the Tracker block', () => {
+    expect(parseTrackerFields(report)).toEqual({
+      detection: 'Login stuck on a spinner, reported by a user.',
+      rootCauseIdentified: 'Bot Fight Mode challenged the auth request.',
+      correctiveAction: 'Rule disabled at 14:20 SGT.',
+      preventiveAction: 'Exempt /auth from the challenge.',
+      outcome: '0 login failures since 14:20 SGT.',
+    });
+  });
+
+  it('round-trips what composeTrackerMarkdown writes', () => {
+    const fields = { ...EMPTY_TRACKER_FIELDS, detection: 'Seen in the login flow.', outcome: 'Back to 400/day.' };
+    expect(parseTrackerFields(composeTrackerMarkdown(fields))).toEqual({
+      detection: 'Seen in the login flow.',
+      outcome: 'Back to 400/day.',
+    });
+  });
+
+  it('reads the labels without bold markers', () => {
+    expect(parseTrackerFields('## Tracker\n\nDetection / Symptoms: Reported by a user.').detection)
+      .toBe('Reported by a user.');
+  });
+
+  it('ignores a label quoted outside the Tracker block', () => {
+    const md = '## 1. Background\n**Measurable Outcome:** not a tracker line.\n\n## Tracker\n\n**Detection / Symptoms:** Real one.';
+    const out = parseTrackerFields(md);
+    expect(out.detection).toBe('Real one.');
+    expect(out.outcome).toBeUndefined();
+  });
+
+  it('stops at the next heading rather than swallowing it', () => {
+    const md = '## Tracker\n\n**Detection / Symptoms:** First.\n\n## Appendix\n\n**Measurable Outcome:** Later.';
+    expect(parseTrackerFields(md).outcome).toBeUndefined();
+  });
+
+  it('returns nothing for a report with no Tracker block, or no report at all', () => {
+    expect(parseTrackerFields('## 7. Current Status\nResolved.')).toEqual({});
+    expect(parseTrackerFields('')).toEqual({});
   });
 });

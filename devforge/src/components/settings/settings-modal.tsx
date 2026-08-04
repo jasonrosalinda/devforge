@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { useSettings } from '@/context/settings-context';
 import type { AppSettings, AzureAppEntry } from '@/types/settings.types';
+import { DEFAULT_SLO_MS } from '@/types/settings.types';
 import { Eye, EyeOff } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -34,6 +35,14 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
   const [showAtlassianToken, setShowAtlassianToken] = useState(false);
 const [newMonitorId, setNewMonitorId] = useState('');
+  const [newPlatformUrl, setNewPlatformUrl] = useState('');
+
+  function addPlatformUrl() {
+    const url = newPlatformUrl.trim();
+    if (!url) return;
+    setEditingApp(a => (a ? { ...a, platformUrls: [...(a.platformUrls ?? []), url] } : null));
+    setNewPlatformUrl('');
+  }
 
   useEffect(() => {
     if (open) setDraft(settings);
@@ -62,6 +71,8 @@ const [newMonitorId, setNewMonitorId] = useState('');
   function cancelEditApp() {
     setEditingApp(null);
     setEditingIndex(null);
+    setNewPlatformUrl('');
+    setNewMonitorId('');
   }
 
   function commitApp() {
@@ -75,6 +86,8 @@ const [newMonitorId, setNewMonitorId] = useState('');
     setDraft(d => ({ ...d, azure: { ...d.azure, apps } }));
     setEditingApp(null);
     setEditingIndex(null);
+    setNewPlatformUrl('');
+    setNewMonitorId('');
   }
 
   function removeApp(idx: number) {
@@ -132,6 +145,51 @@ const [newMonitorId, setNewMonitorId] = useState('');
             {/* App form (add/edit) */}
             {editingApp && (
               <div className="border rounded-lg p-3 flex flex-col gap-3 bg-muted/30">
+
+                {/* Platform name — what the service is called to a reader. Left blank
+                    it falls back to the resource group everywhere it is displayed, so
+                    settings written by an older build keep working untouched. */}
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs">Name</Label>
+                  <Input
+                    value={editingApp.platformName ?? ''}
+                    onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.platformName = v; else delete n.platformName; return n; }); }}
+                    placeholder={editingApp.resourceGroup || 'my-rg'}
+                    className="text-xs"
+                  />
+                  <span className="text-[10px] text-muted-foreground">Platform name shown on cards and reports. Defaults to the resource group.</span>
+                </div>
+
+                {/* Platform URLs */}
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs">Urls <span className="text-muted-foreground">(optional)</span></Label>
+                  {(editingApp.platformUrls ?? []).map((url, idx) => (
+                    <div key={idx} className="flex items-center gap-1">
+                      <span className="text-xs font-mono flex-1 px-2 py-1 rounded border border-border bg-muted/30 truncate" title={url}>{url}</span>
+                      <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive flex-shrink-0"
+                        onClick={() => setEditingApp(a => { if (!a) return null; const urls = (a.platformUrls ?? []).filter((_, i) => i !== idx); const n = { ...a }; if (urls.length) n.platformUrls = urls; else delete n.platformUrls; return n; })}>
+                        <Trash2 className="w-3 h-3" />
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="flex gap-1">
+                    <Input
+                      value={newPlatformUrl}
+                      onChange={e => setNewPlatformUrl(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addPlatformUrl(); } }}
+                      placeholder="https://mims-cpd.com"
+                      className="text-xs font-mono h-7"
+                    />
+                    <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0"
+                      disabled={!newPlatformUrl.trim()}
+                      onClick={addPlatformUrl}>
+                      <Plus className="w-3 h-3" />
+                    </Button>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground">Public URLs for this platform — used as "Services Affected" in the RCA report.</span>
+                </div>
+
+                <Separator />
 
                 {/* Shared: Resource Group */}
                 <div className="flex flex-col gap-1">
@@ -301,6 +359,24 @@ const [newMonitorId, setNewMonitorId] = useState('');
 
                 <Separator />
 
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Latency objective <span className="normal-case font-normal">(optional)</span></span>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Target (ms)</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={editingApp.sloMs ?? ''}
+                      onChange={e => { const v = Number(e.target.value); setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v > 0) n.sloMs = v; else delete n.sloMs; return n; }); }}
+                      placeholder={String(DEFAULT_SLO_MS)}
+                      className="text-xs"
+                    />
+                    <span className="text-[10px] text-muted-foreground">A successful response slower than this counts as a policy failure in the Errors signal. Defaults to {DEFAULT_SLO_MS}ms.</span>
+                  </div>
+                </div>
+
+                <Separator />
+
                 {/* UptimeRobot */}
                 <div className="flex flex-col gap-2">
                   <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">UptimeRobot Monitor IDs <span className="normal-case font-normal">(optional)</span></span>
@@ -353,10 +429,13 @@ const [newMonitorId, setNewMonitorId] = useState('');
             {draft.azure.apps.map((app, idx) => (
               <div key={idx} className="flex items-center justify-between border rounded-md px-3 py-2 text-xs">
                 <div className="flex flex-col gap-0.5">
-                  <span className="font-medium">{app.resourceGroup || app.name}</span>
+                  <span className="font-medium">{app.platformName || app.resourceGroup || app.name}</span>
                   <span className="text-muted-foreground">{app.type === 'appservice' ? 'App Service' : 'Container App'} · {app.name}{app.apiName && ` · ${app.apiName}`}</span>
                   {app.dbName && (
                     <span className="text-muted-foreground">DB: {app.dbName}{app.dbServerName ? ` @ ${app.dbServerName}` : ''}</span>
+                  )}
+                  {(app.platformUrls?.length ?? 0) > 0 && (
+                    <span className="text-muted-foreground truncate" title={app.platformUrls!.join(', ')}>{app.platformUrls!.join(', ')}</span>
                   )}
                 </div>
                 <div className="flex gap-1">

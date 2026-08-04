@@ -3,87 +3,28 @@ import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSea
 import { marked } from 'marked';
 import { toast } from 'sonner';
 import { RcaDialog, type RcaStatus } from './rcaDialog';
+import { RcaSection } from './rcaSection';
 import {
-  buildRcaPrintHtml, formatSgt, formatSgtRange, splitQuickSummary,
+  buildRcaPrintHtml, buildRcaWordHtml, formatSgt, formatSgtRange, splitQuickSummary,
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { CombinedChart, SeriesChart, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
+import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
 import { AppRemarks, buildRemarks } from './azureAppRemarks';
+import { SnatPortsRows } from './snatPortSection';
+import { RestartRows } from './restartSection';
+import { PerformanceRows } from './performanceSection';
+import { UserRows } from './userSection';
+import { SkeletonBlock, ListSkeletonRow } from './loadingSkeleton';
+import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { useIpReputation } from '@/hooks/useIpReputation';
-import type { IpReputation } from '@/lib/ipapiIs';
 
-const IP_REP_FLAGS: Array<{ key: keyof IpReputation; label: string; color: string }> = [
-  { key: 'isCrawler',    label: 'crawler',    color: '#f85149' },
-  { key: 'isAbuser',     label: 'abuser',     color: '#f85149' },
-  { key: 'isTor',        label: 'tor',        color: '#f85149' },
-  { key: 'isProxy',      label: 'proxy',      color: '#f97316' },
-  { key: 'isVpn',        label: 'vpn',        color: '#f97316' },
-  { key: 'isDatacenter', label: 'datacenter', color: '#f97316' },
-  { key: 'isBogon',      label: 'bogon',      color: '#8b949e' },
-  { key: 'isMobile',     label: 'mobile',     color: '#58a6ff' },
-  { key: 'isSatellite',  label: 'satellite',  color: '#58a6ff' },
-];
-
-function IpRepBadges({ rep }: { rep: IpReputation | undefined }) {
-  if (!rep) return null;
-  if (rep.error) return <span title={`ipapi.is error: ${rep.error}`} style={{ marginLeft: 5, color: '#d29922', fontWeight: 600 }}>⚠ ipapi</span>;
-  const active = IP_REP_FLAGS.filter(f => rep[f.key]);
-  if (!active.length) return <span style={{ marginLeft: 5, color: '#3fb950', fontWeight: 600 }}>● clean</span>;
-  return (
-    <>
-      {active.map(f => (
-        <span
-          key={f.label}
-          title={f.key === 'isCrawler' && rep.crawlerName ? `crawler: ${rep.crawlerName}` : rep.companyName ?? undefined}
-          style={{
-            marginLeft: 4, fontSize: 9, fontWeight: 600, color: f.color,
-            border: `1px solid ${f.color}66`, background: `${f.color}22`,
-            borderRadius: 3, padding: '0 4px',
-          }}
-        >
-          {f.label}
-        </span>
-      ))}
-    </>
-  );
-}
-
-// No "All": the top-dependency query ranks the top 10 per classification, so a
-// combined view is the union of two independent rankings rather than a real global
-// top-N. Internal and third-party are the two meaningful lists.
-const DEPS_FILTERS = [
-  { key: 'internal',   label: 'Internal',    color: '#3fb950' },
-  { key: 'thirdParty', label: 'Third-Party', color: '#d29922' },
-  { key: 'assets',     label: 'Assets',      color: '#8b9ab3' },
-] as const;
-type DepsFilter = typeof DEPS_FILTERS[number]['key'];
-
-function DepsFilterPills({ value, onChange }: { value: DepsFilter; onChange: (v: DepsFilter) => void }) {
-  return (
-    <div className="flex gap-0.5" style={{ marginTop: 3 }}>
-      {DEPS_FILTERS.map(f => (
-        <button
-          key={f.key}
-          onClick={e => { e.stopPropagation(); onChange(f.key); }}
-          style={{
-            background: value === f.key ? `${f.color}22` : 'none',
-            border: `1px solid ${value === f.key ? `${f.color}66` : 'transparent'}`,
-            color: value === f.key ? f.color : 'var(--muted-foreground)',
-            borderRadius: 4, padding: '1px 6px', fontSize: 9,
-            cursor: 'pointer', fontWeight: value === f.key ? 600 : 400,
-          }}
-        >{f.label}</button>
-      ))}
-    </div>
-  );
-}
 
 // ─── Exception tabs: Unclassified / Timeout / Socket / OOM ───────────────────
 
@@ -101,7 +42,6 @@ type ExcTab = typeof EXC_TABS[number]['key'];
 
 const SOCKET_ACCENT  = '#06b6d4';
 const TIMEOUT_ACCENT = '#d29922';
-const OOM_ACCENT     = '#a371f7';
 
 export const getMeaningfulFrame = (raw: string) => {
   try {
@@ -218,18 +158,6 @@ function MiniBar({ pct, color }: { pct: number; color: string }) {
   );
 }
 
-/** What each timeout-class result code means, so a row is self-explanatory. */
-const RESULT_CODE_HELP: Record<string, string> = {
-  '408':      '408 Request Timeout — the server gave up waiting for the request.',
-  '504':      '504 Gateway Timeout — an upstream proxy timed out waiting for the origin.',
-  '524':      '524 — Cloudflare timed out waiting for the origin to respond.',
-  'Canceled': 'The .NET HttpClient deadline elapsed and cancelled the call. The duration is the configured timeout.',
-  '-2':       'SQL Server timeout error code — the command exceeded CommandTimeout.',
-};
-
-const RESULT_CODE_COLOR = (code: string) => (code === '-2' || code === '524' ? '#f85149' : '#d29922');
-
-
 /** Durations in the largest unit that keeps the number readable, so a 19,464ms P99
  *  reads as 19.5s and a 2,128,617ms Cloudflare timeout as 35.5m rather than a wall
  *  of digits. Input is always milliseconds. */
@@ -255,16 +183,6 @@ const fmtPct = (n: number, total: number) => {
   if (p === 0) return '0%';
   return p < 0.1 ? '<0.1%' : `${p.toFixed(1)}%`;
 };
-
-/** Sub-tab pill colours for the Requests breakdown, reused by the summary row so
- *  the 5xx / 4xx figures match the tab you click to drill into them. */
-const HTTP_4XX_COLOR = '#f97316';
-const HTTP_5XX_COLOR = '#f85149';
-
-/** Same idea for the Dependencies breakdown pills (Top / Failed / Timeout Deps). */
-const DEP_TOTAL_COLOR   = '#58a6ff';
-const DEP_FAILED_COLOR  = '#f85149';
-const DEP_TIMEOUT_COLOR = '#f97316';
 
 /** Names the layer that timed out, from the exception type. Drives the fix hint and
  *  the section heading — when every record shares one layer the heading says which,
@@ -818,6 +736,19 @@ interface AzureAppCardProps {
   detailsLoading?: boolean;
   detailsLoaded?: boolean;
   onRequestDetails?: () => void;
+  snatLoading?: boolean;
+  /** The restart detector round trip is in flight. Fired with the initial load, so the
+   *  row must distinguish 'not known yet' from 'no restarts'. */
+  restartsLoading?: boolean;
+  /** Restart detector results for this app. Passed in rather than read off `metrics`: the
+   *  hook keeps them in their own map so a fast cached result cannot be dropped. */
+  restarts?: RestartResult | null;
+  apiRestarts?: RestartResult | null;
+  /** Per-endpoint dependency lookups for this card, keyed by `${site}|${endpoint}`. */
+  endpointDeps?: Record<string, EndpointDepsState>;
+  onRequestEndpointDeps?: ((site: 'fe' | 'api', endpoint: string) => void) | undefined;
+  onRequestSnat?: () => void;
+  onRequestRestarts?: () => void;
   azureSettings: AzureSettings;
   uptimeRobotApiKey?: string | undefined;
   uptimeRobotMonitorIds?: string[] | undefined;
@@ -826,162 +757,91 @@ interface AzureAppCardProps {
 }
 
 
-interface SnatResult {
-  score: number; label: string; color: string;
-  socketScore: number; depFailScore: number; depTimeoutScore: number;
-  depP99Score: number; connGrowthScore: number; http5xxScore: number;
-  connGrowth: number;
-  baseConfidence: number; contradictionFactor: number;
-  contradictionReasons: string[]; adjustedConfidence: number;
-  hotDepFactor: number; retryStormFactor: number; depCallRatio: number;
-}
-
-function snatScore(opts: {
-  socketExceptions: number;
-  dependencyFailureRate: number;
-  dependencyTimeouts: number;
-  dependencyP99Ms: number;
-  connectionBaseline: number;
-  connectionCurrent: number;
-  http5xxRate: number;
-  cpuAvg: number;
-  memoryAvg: number;
-  topDepTrafficPct: number;
-  threadPoolStarvation: boolean;
-  totalDependencies: number;
-  totalRequests: number;
-}): SnatResult {
-  const { socketExceptions, dependencyFailureRate, dependencyTimeouts,
-          dependencyP99Ms, connectionBaseline, connectionCurrent,
-          http5xxRate, cpuAvg, memoryAvg, topDepTrafficPct, threadPoolStarvation,
-          totalDependencies, totalRequests } = opts;
-
-  const socketScore     = Math.min(socketExceptions / 50, 1.0);
-  const depFailScore    = Math.min(dependencyFailureRate / 20, 1.0);
-  // Divisor 400, not the original 25: the timeout-class result-code filter now catches
-  // Cloudflare 524s, HttpClient cancellations and SQL -2, and the count is corrected for
-  // ingestion sampling, so real apps land in the hundreds. At 25 every one of them
-  // clamped to 1.0 and the contributor could not discriminate at all.
-  const depTimeoutScore = Math.min(dependencyTimeouts / 400, 1.0);
-  const depP99Score     = Math.min(dependencyP99Ms / 5000, 1.0);
-  const connGrowth      = Math.max(connectionCurrent - connectionBaseline, 0);
-  const connGrowthScore = Math.min(connGrowth / 64, 1.0);
-  const http5xxScore    = Math.min(http5xxRate / 5, 1.0);
-
-  // Weights sum to 1.00. socketScore now counts socket-layer exceptions only
-  // (SOCKET_MATCH); it previously used a filter that also matched any "timeout"
-  // message, double-counting evidence already scored by depTimeoutScore. Weight
-  // moved from socket (0.30 → 0.20) to dependency timeouts (0.20 → 0.30) so
-  // timeout evidence keeps its proportional influence on the score.
-  const baseConfidence = 100 * (
-    0.20 * socketScore +
-    0.25 * depFailScore +
-    0.30 * depTimeoutScore +
-    0.15 * depP99Score +
-    0.05 * connGrowthScore +
-    0.05 * http5xxScore
-  );
-
-  let contradictionFactor = 1.0;
-  const contradictionReasons: string[] = [];
-  if (cpuAvg >= 0 && cpuAvg > 85) { contradictionFactor *= 0.7; contradictionReasons.push(`High CPU (${cpuAvg.toFixed(0)}%) ×0.7`); }
-  if (memoryAvg >= 0 && memoryAvg > 90) { contradictionFactor *= 0.8; contradictionReasons.push(`High Memory (${memoryAvg.toFixed(0)}%) ×0.8`); }
-  if (threadPoolStarvation) { contradictionFactor *= 0.6; contradictionReasons.push('Thread Pool Starvation ×0.6'); }
-  const adjustedConfidence = baseConfidence * contradictionFactor;
-
-  const hotDepFactor  = 1 + Math.min(topDepTrafficPct / 100, 0.3);
-  const depCallRatio  = totalRequests > 0 ? totalDependencies / totalRequests : 0;
-  const retryStormFactor = 1 + Math.min(Math.max(depCallRatio - 3, 0) / 15, 0.25);
-  const score = Math.min(adjustedConfidence * hotDepFactor * retryStormFactor, 100);
-
-  const label = score >= 81 ? 'Critical' : score >= 61 ? 'High' : score >= 41 ? 'Medium' : score >= 21 ? 'Low' : 'Healthy';
-  const color = score >= 81 ? '#f85149' : score >= 61 ? '#e6773d' : score >= 41 ? '#d29922' : score >= 21 ? '#58a6ff' : '#3fb950';
-
-  return {
-    score, label, color,
-    socketScore, depFailScore, depTimeoutScore, depP99Score, connGrowthScore, http5xxScore,
-    connGrowth, baseConfidence, contradictionFactor, contradictionReasons, adjustedConfidence,
-    hotDepFactor, retryStormFactor, depCallRatio,
-  };
-}
-
-
 const AI_STATUS_COLORS = { healthy: '#3fb950', warning: '#d29922', critical: '#f85149' } as const;
 
-/** The CPI verdict, shown on the collapsed row so the diagnosis is visible without
- *  expanding. Score bands mirror snatScore's label thresholds. */
-function snatVerdict(score: number, socketExc: number): { text: string; color: string; bold: boolean } | null {
-  if (score >= 81 && socketExc > 0)  return { text: '🔴 Probable SNAT Port Exhaustion — socket-layer exceptions detected with critical score', color: '#f85149', bold: true };
-  if (score >= 61 && socketExc > 0)  return { text: '⚠ SNAT port pressure detected — monitor socket exception trend', color: '#e6773d', bold: false };
-  if (score >= 81 && socketExc === 0) return { text: '🔴 Critical SNAT risk — check network connectivity and dependency health', color: '#f85149', bold: false };
-  return null;
-}
+/**
+ * Wrapped in memo because the page holds every card's async state in one place: a restart
+ * summary or a dependency lookup landing for ONE app re-rendered all of them, and each
+ * card is a ~200px multi-series chart plus several tables. The page passes stable
+ * callbacks and a stable `endpointDeps` slice so this actually bites.
+ */
+export const AzureAppCard = React.memo(AzureAppCardInner);
 
-const SNAT_FACTOR_COLORS = {
-  socket:  '#06b6d4',
-  depFail: '#ec4899',
-  depTO:   '#a855f7',
-  depP99:  '#fbbf24',
-  conn:    '#4ade80',
-  http5xx: '#ef4444',
-} as const;
-
-const SNAT_FACTOR_TIPS = {
-  socket:  'Socket Exceptions: transport-layer failures only — SocketException, ENOBUFS, "No buffer space available", connection refused, ETIMEDOUT, SNAT. No connection was established. Application timeouts are excluded (they are scored by Dependencies Timeouts). Weight 0.20. Source: requestInsights.insight.socketLayerExceptions',
-  depFail: 'Dependencies Failure Rate: percentage of failed dependency calls. Source: App Insights dependencies where success == false / totalDependencies × 100',
-  depTO:   'Dependencies Timeouts: dependency calls returning a genuine timeout result code — 408 Request Timeout, 504 Gateway Timeout, 524 (Cloudflare origin timeout), Canceled (HttpClient deadline elapsed), and SQL -2 (command timeout). 500/502/503 are server errors, not timeouts, and are excluded. Carries the timeout evidence that used to be double-counted inside the socket signal — weight 0.30. Source: requestInsights.dependencyTimeouts',
-  depP99:  'Dependencies P99: 99th-percentile dependency call duration in ms. Source: App Insights percentile(duration, 99) on dependencies',
-  conn:    'Connection Growth: increase in active TCP connections (second-half avg − first-half avg). Source: Azure Monitor AppConnections metric',
-  http5xx: 'HTTP 5xx Rate: percentage of requests returning 5xx status. Source: App Insights requests where resultCode startswith "5" / totalRequests × 100',
-} as const;
-
-function SkeletonBlock({ className }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-muted ${className ?? ''}`} />;
-}
-
-export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
+function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, snatLoading = false, onRequestSnat, restartsLoading = false, restarts, apiRestarts, onRequestRestarts, endpointDeps = {}, onRequestEndpointDeps, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
   const { elementRef: cardRef, isCopying } = useCopyElementAsImage<HTMLDivElement>({
-    fileNamePrefix: `azure-${appKey}-${Date.now()}`,
+    // No timestamp here: the hook appends its own, and Date.now() in a prop gave the
+    // copy callback a new identity on every single render.
+    fileNamePrefix: `azure-${appKey}`,
     backgroundColor: '#09090b',
   });
 
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
-  const highFreqIps = [
+  // High-frequency bursts plus the Users section's top clients. The Users rows show the
+  // same reputation badges, and the hook only resolves addresses it is given — seeding it
+  // from bursts alone left every top-client row permanently unbadged.
+  const lookupIps = [
     ...(metrics.requestInsights?.highFreq ?? []),
     ...(metrics.apiRequestInsights?.highFreq ?? []),
-  ].map(u => u.ip);
-  const ipReputations = useIpReputation(highFreqIps);
+  ].map(u => u.ip).concat(
+    (metrics.requestInsights?.userInsights?.topIps ?? []).map(c => c.ip),
+    (metrics.apiRequestInsights?.userInsights?.topIps ?? []).map(c => c.ip),
+  );
+  const ipReputations = useIpReputation(lookupIps);
   const [urExpanded, setUrExpanded] = useState(false);
-  const [requestsExpanded, setRequestsExpanded] = useState(false);
-  const [depsExpanded, setDepsExpanded] = useState(false);
   const [usersExpanded, setUsersExpanded] = useState(false);
-  const [connExpanded, setConnExpanded] = useState(false);
-  const [connAPIExpanded, setConnAPIExpanded] = useState(false);
+  const [usersAPIExpanded, setUsersAPIExpanded] = useState(false);
+  // Every chart on this card shares one hover group, so a spike found in the
+  // Response or Instances chart lines up against CPU/memory without eyeballing
+  // the x-axis. Keyed per card — two cards on screen must not move together.
+  const hoverSyncId = `card-${appKey}`;
+  const [hiddenMetrics, setHiddenMetrics] = useState<Set<string>>(new Set());
+  const [snatPortsExpanded, setSnatPortsExpanded] = useState(false);
+  const [snatApiPortsExpanded, setSnatApiPortsExpanded] = useState(false);
+  const [restartsExpanded, setRestartsExpanded] = useState(false);
+  const [restartsAPIExpanded, setRestartsAPIExpanded] = useState(false);
+  // Mirrors the panel's own selection so the card knows which endpoint's dependency
+  // lookup to hand back down. Held here rather than lifted out of the panel entirely:
+  // the panel owns the selection, this is only the echo needed to address the cache.
+  const [perfFeSelected, setPerfFeSelected] = useState('');
+  const [perfApiSelected, setPerfApiSelected] = useState('');
+  const [perfExpanded, setPerfExpanded] = useState(false);
+  // Stable identities: the panel asks for its selection from an effect keyed on the
+  // callback, so an inline arrow would re-fire it on every render of the card.
+  const requestFeDeps = useCallback((ep: string) => {
+    setPerfFeSelected(ep);
+    onRequestEndpointDeps?.('fe', ep);
+  }, [onRequestEndpointDeps]);
+  const requestApiDeps = useCallback((ep: string) => {
+    setPerfApiSelected(ep);
+    onRequestEndpointDeps?.('api', ep);
+  }, [onRequestEndpointDeps]);
+  const [perfAPIExpanded, setPerfAPIExpanded] = useState(false);
   const [errorsExpanded, setErrorsExpanded] = useState(false);
   const [errTab, setErrTab] = useState<ExcTab>('generic');
   const [errAPITab, setErrAPITab] = useState<ExcTab>('generic');
   const [availExpanded, setAvailExpanded] = useState(false);
-  const [legendOpen, setLegendOpen] = useState(false);
+  // Section-level collapse for the FE / API / Remarks blocks. FE and API open by
+  // default — side by side they fit without crowding the card, and they carry the
+  // figures a card is opened to read; Remarks stays closed.
+  const [feSectionOpen, setFeSectionOpen] = useState(true);
+  const [apiSectionOpen, setApiSectionOpen] = useState(true);
+  const [remarksOpen, setRemarksOpen] = useState(false);
+  // Whole-card collapse. Open by default — a single app should still land fully
+  // expanded; this exists so a multi-app fetch can be folded down to one line each.
+  const [cardCollapsed, setCardCollapsed] = useState(false);
+  const [rcaSectionOpen, setRcaSectionOpen] = useState(false);
+  const [rcaDraft, setRcaDraft] = useState('');
   const [visibleBlocks, setVisibleBlocks] = useState({
-    remarks: true, cpu: true, memory: true, database: true, response: true, users: true, requests: true,
-    dependencies: true, exceptions: true, instances: true, uptimerobot: true,
-    frontend: true, api: true, snatRisk: true,
+    remarks: true, cpu: true, memory: true, database: true, users: true,
+    exceptions: true, instances: true, uptimerobot: true, snat: true,
+    restarts: true, performance: true,
+    frontend: true, api: true,
   });
   const toggleBlock = (key: keyof typeof visibleBlocks) =>
     setVisibleBlocks(prev => ({ ...prev, [key]: !prev[key] }));
-  const [requestsTab, setRequestsTab] = useState<'requests' | 'highfreq' | 'http4xx' | 'http5xx' | 'bots'>('requests');
-  const [requestsAPITab, setRequestsAPITab] = useState<'requests' | 'highfreq' | 'http4xx' | 'http5xx' | 'bots'>('requests');
-  const [requestsAPIExpanded, setRequestsAPIExpanded] = useState(false);
   const [selectedErrType, setSelectedErrType] = useState<string | null>(null);
   const [errAPIExpanded, setErrAPIExpanded] = useState(false);
   const [selectedErrAPIType, setSelectedErrAPIType] = useState<string | null>(null);
-  const [snatExpanded, setSnatExpanded] = useState(false);
-  const [snatAPIExpanded, setSnatAPIExpanded] = useState(false);
-  const [depsTab, setDepsTab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
-  const [depsFilter, setDepsFilter] = useState<DepsFilter>('internal');
-  const [depsAPITab, setDepsAPITab] = useState<'topDeps' | 'failedDeps' | 'timeoutDeps'>('topDeps');
-  const [depsAPIFilter, setDepsAPIFilter] = useState<DepsFilter>('internal');
-  const [depsAPIExpanded, setDepsAPIExpanded] = useState(false);
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
   const [rcaOpen, setRcaOpen] = useState(false);
@@ -992,15 +852,15 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
 
   useEffect(() => {
     setUrExpanded(false);
-    setRequestsExpanded(false);
-    setDepsExpanded(false);
     setErrorsExpanded(false);
     setAvailExpanded(false);
-    setRequestsAPIExpanded(false);
     setErrAPIExpanded(false);
-    setSnatExpanded(false);
-    setSnatAPIExpanded(false);
-    setDepsAPIExpanded(false);
+    setPerfExpanded(false);
+    setPerfAPIExpanded(false);
+    setUsersExpanded(false);
+    setUsersAPIExpanded(false);
+    setSnatPortsExpanded(false);
+    setSnatApiPortsExpanded(false);
     setSelectedErrType(null);
     setSelectedErrAPIType(null);
     setAiRemark(null);
@@ -1076,7 +936,20 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     setRcaStages([]);
   }, [rcaStatus]);
 
-  const handleRunRca = useCallback(async (investigationNotes: string) => {
+  const handleRunRca = useCallback(async (
+    investigationNotes: string,
+    // The dialog keeps the engineering report it has always produced; the card's
+    // RCA section asks for the seven-section business layout it renders as a form.
+    format: 'engineering' | 'business' = 'engineering',
+    // Facts the card already measured or has configured, so the model reproduces
+    // them instead of deriving its own (a wider window, a guessed platform name).
+    given: {
+      incidentName?: string;
+      incidentPeriod?: string;
+      servicesAffected?: string;
+      reportTitle?: string;
+    } = {},
+  ) => {
     setRcaStatus('running');
     setRcaText('');
     setRcaError(null);
@@ -1092,7 +965,9 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       if (reset) setRcaText('');
     });
     try {
-      const result = await window.electronAPI.incidentReport.rca({ ...buildIncidentPayload(), investigationNotes });
+      const result = await window.electronAPI.incidentReport.rca({
+        ...buildIncidentPayload(), investigationNotes, format, ...given,
+      });
       if (result.success && result.rca) {
         setRcaText(result.rca);
         setRcaStatus('done');
@@ -1109,17 +984,21 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     }
   }, [appKey, buildIncidentPayload]);
 
+  // The card's RCA section is an editable form; its composed markdown is what the
+  // exports and the Teams copy must carry, so edits are never silently dropped.
+  const rcaOutput = rcaDraft.trim() ? rcaDraft : rcaText;
+
   const exportRca = useCallback(async () => {
     try {
       const { startMs, endMs } = buildIncidentPayload();
-      const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown: rcaText });
+      const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown: rcaOutput });
       if (!result.success) throw new Error(result.error ?? 'Save failed');
-      await navigator.clipboard.writeText(rcaText);
+      await navigator.clipboard.writeText(rcaOutput);
       toast.success('RCA saved & markdown copied');
     } catch (e: any) {
       toast.error('Export failed', { description: e?.message });
     }
-  }, [appKey, buildIncidentPayload, rcaText]);
+  }, [appKey, buildIncidentPayload, rcaOutput]);
 
   const exportRcaPdf = useCallback(async () => {
     try {
@@ -1127,7 +1006,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       // HTML is built here rather than in main: `marked` and the print stylesheet
       // both live on the renderer side, and this keeps the printed report in step
       // with what the dialog shows.
-      const html = buildRcaPrintHtml(rcaText, {
+      const html = buildRcaPrintHtml(rcaOutput, {
         appName: appKey,
         window: formatSgtRange(startMs, endMs),
         generated: formatSgt(Date.now()),
@@ -1138,13 +1017,29 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     } catch (e: any) {
       toast.error('PDF export failed', { description: e?.message });
     }
-  }, [appKey, buildIncidentPayload, rcaText]);
+  }, [appKey, buildIncidentPayload, rcaOutput]);
+
+  const exportRcaWord = useCallback(async () => {
+    try {
+      const { startMs, endMs } = buildIncidentPayload();
+      const html = buildRcaWordHtml(rcaOutput, {
+        appName: appKey,
+        window: formatSgtRange(startMs, endMs),
+        generated: formatSgt(Date.now()),
+      });
+      const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html });
+      if (!result.success) throw new Error(result.error ?? 'Word export failed');
+      toast.success('RCA Word document saved');
+    } catch (e: any) {
+      toast.error('Word export failed', { description: e?.message });
+    }
+  }, [appKey, buildIncidentPayload, rcaOutput]);
 
   // Just the plain-English summary, formatted for a Teams chat — the part that
   // gets shared with non-engineers, without the full report attached.
   const copySummaryForTeams = useCallback(async () => {
     try {
-      const { summary } = splitQuickSummary(rcaText);
+      const { summary } = splitQuickSummary(rcaOutput);
       if (!summary) throw new Error('This report has no Quick Summary section.');
       const { startMs, endMs } = buildIncidentPayload();
       const meta = { appName: appKey, window: formatSgtRange(startMs, endMs) };
@@ -1158,30 +1053,41 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     } catch (e: any) {
       toast.error('Copy failed', { description: e?.message });
     }
-  }, [appKey, buildIncidentPayload, rcaText]);
+  }, [appKey, buildIncidentPayload, rcaOutput]);
 
   const copyRcaForTeams = useCallback(async () => {
     try {
-      const htmlBody = marked.parse(rcaText, { async: false }) as string;
+      const htmlBody = marked.parse(rcaOutput, { async: false }) as string;
       await navigator.clipboard.write([
         new ClipboardItem({
           'text/html':  new Blob([htmlBody], { type: 'text/html' }),
-          'text/plain': new Blob([rcaText], { type: 'text/plain' }),
+          'text/plain': new Blob([rcaOutput], { type: 'text/plain' }),
         }),
       ]);
       toast.success('Copied for Teams');
     } catch (e: any) {
       toast.error('Copy failed', { description: e?.message });
     }
-  }, [rcaText]);
+  }, [rcaOutput]);
 
-  // Eagerly fetch details when CPI data is available (top dependency % needed for accurate score)
+  // Eagerly fetch details when the request insights are available (top dependency % needs them)
   useEffect(() => {
     if (!metrics.appInsightsConfigured || !metrics.requestInsights || metrics.requestInsights.error) return;
     if (detailsLoaded || detailsLoading) return;
     onRequestDetails?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metrics.appInsightsConfigured, !!metrics.requestInsights]);
+
+  // SNAT charts are fetched as soon as the card has metrics rather than on expand:
+  // the collapsed row carries the pending and failed totals, and those have to be
+  // there when the card is generated — including in an exported image, which never
+  // gets a click. The hook de-duplicates, so a later expand costs nothing.
+  useEffect(() => {
+    if (metrics.type !== 'appservice') return;
+    if (loading || metrics.snat !== undefined) return;
+    onRequestSnat?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appKey, metrics.type, loading, metrics.snat === undefined]);
 
   // PT1M data fetched separately for the incidents panel — avoids dashboard-interval gaps
   const [incidentDetailMetrics, setIncidentDetailMetrics] = useState<AppMetrics | null>(null);
@@ -1207,7 +1113,11 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
         memory: { avg: metrics.memory.avg, p99: metrics.memory.p99, max: metrics.memory.max, unit: metrics.memUnit },
         dbCpu: (metrics.dbCpu?.series?.length ?? 0) > 0 ? { avg: metrics.dbCpu!.avg, p99: metrics.dbCpu!.p99, max: metrics.dbCpu!.max, unit: '%' } : null,
         dbMemory: (metrics.dbMemory?.series?.length ?? 0) > 0 ? { avg: metrics.dbMemory!.avg, p99: metrics.dbMemory!.p99, max: metrics.dbMemory!.max, unit: '%' } : null,
-        responseTimeSec: metrics.responseTime ? { avg: metrics.responseTime.avg, p99: metrics.responseTime.p99 ?? null, max: metrics.responseTime.max } : null,
+        responseTimeSec: (() => {
+          // Same figures the Response row shows, converted to seconds for the prompt.
+          const sp = metrics.requestInsights?.responseInsights?.spread;
+          return sp ? { avg: sp.avgMs / 1000, p99: sp.p99 / 1000, max: sp.maxMs / 1000 } : null;
+        })(),
         availabilityPct: metrics.availability?.pct ?? null,
         requestsTotal: metrics.requests?.total ?? null,
         failedRequestsTotal: metrics.failedRequests?.total ?? null,
@@ -1233,6 +1143,15 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     const card = cardRef.current;
     if (!card || isCopying || isTeamsCopying) return;
     setIsTeamsCopying(true);
+
+    // A collapsed card has no chart in the DOM to screenshot. Expand and let two
+    // frames pass — one to commit the re-render, one for Recharts to size and paint
+    // into its new container — before querying for it. Left expanded afterwards, so
+    // what was copied is what's on screen.
+    if (cardCollapsed) {
+      setCardCollapsed(false);
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    }
 
     const chartEl = (card.querySelector('[data-teams-chart]') as HTMLElement | null) ?? card;
 
@@ -1385,6 +1304,18 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     }))
   );
 
+  // The RCA's Incident Period is the outage itself, not the chart window: first
+  // downtime start → last downtime end. UptimeRobot is the reference — it watches
+  // from outside Azure — with Azure's own detected downtime as the fallback when no
+  // monitor is configured for this app.
+  const incidentIntervals = urDowntimeIntervals.length > 0 ? urDowntimeIntervals : downtimeIntervals;
+  const incidentPeriod = incidentIntervals.length > 0
+    ? formatSgtRange(
+        Math.min(...incidentIntervals.map(i => i.start)),
+        Math.max(...incidentIntervals.map(i => i.end)),
+      )
+    : '';
+
   // Map instance name → palette color matching chart line order
   const instanceColorMap = new Map<string, string>(
     (metrics.instanceHealthSeries ?? []).map((inst, i): [string, string] => [inst.name, INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3'])
@@ -1398,10 +1329,18 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
   const typeLabel = metrics.type === 'appservice' ? 'App Service' : 'Container App';
   const appConfig = (azureSettings as any)?.apps?.find((a: any) => a.name === appKey) ?? null;
   const resourceGroup = appConfig?.resourceGroup ?? null;
+  // Platform name is optional in settings — older configs have only the resource
+  // group, so that stays the fallback everywhere the platform is named.
+  const platformName = appConfig?.platformName || resourceGroup || metrics.label;
+  const platformUrls: string[] = appConfig?.platformUrls ?? [];
   const hasApi = !!(appConfig?.apiName);
   const hasDb = !!(appConfig?.dbName);
   const feHasInsights = !!(appConfig?.appInsightsAppId);
   const apiHasInsights = !!(appConfig?.apiInsightsAppId);
+  // FE and API render as a two-column pair, but only when both are actually
+  // there — a lone block still gets the full card width.
+  const showFeBlock  = feHasInsights && visibleBlocks.frontend;
+  const showApiBlock = hasApi && visibleBlocks.api;
 
   const SGT = { timeZone: 'Asia/Singapore' } as const;
   const fmtShort = (d: Date) => d.toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT';
@@ -1518,18 +1457,6 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       })}</>
   );
 
-  const feConPts = metrics.connections?.series ?? [];
-  const feConMid = Math.floor(feConPts.length / 2);
-  const feConHalfAvg = (arr: typeof feConPts) => arr.length ? arr.reduce((s, p) => s + p.v, 0) / arr.length : 0;
-  const feConA1 = feConHalfAvg(feConPts.slice(0, feConMid));
-  const feConA2 = feConHalfAvg(feConPts.slice(feConMid));
-
-  const apiConPts = metrics.apiConnections?.series ?? [];
-  const apiConMid = Math.floor(apiConPts.length / 2);
-  const apiConHalfAvg = (arr: typeof apiConPts) => arr.length ? arr.reduce((s, p) => s + p.v, 0) / arr.length : 0;
-  const apiConA1 = apiConHalfAvg(apiConPts.slice(0, apiConMid));
-  const apiConA2 = apiConHalfAvg(apiConPts.slice(apiConMid));
-
   return (
     <>
     <div ref={cardRef} className="p-3">
@@ -1539,17 +1466,33 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     >
       {/* Header */}
       <div className="flex items-center justify-between px-4 pt-4 pb-2 gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
+        <div
+          className="flex items-center gap-2 flex-wrap cursor-pointer"
+          onClick={() => setCardCollapsed(v => !v)}
+          title={cardCollapsed ? `Expand ${platformName}` : `Collapse ${platformName}`}
+        >
           <span className="relative inline-flex items-center justify-center w-3 h-3 flex-shrink-0">
             {status === 'healthy' && !isCopying && (
               <span className="absolute inline-flex w-full h-full rounded-full animate-ping opacity-60" style={{ backgroundColor: statusColor }} />
             )}
             <span className="relative inline-flex w-2.5 h-2.5 rounded-full" style={{ backgroundColor: statusColor }} />
           </span>
-          <h2 className="font-bold text-base m-0">{resourceGroup || metrics.label}</h2>
+          <h2 className="font-bold text-base m-0">{platformName}</h2>
+          {cardCollapsed
+            ? <ChevronRight size={13} className="text-muted-foreground flex-shrink-0" />
+            : <ChevronDown size={13} className="text-muted-foreground flex-shrink-0" />}
           <span className="text-xs text-muted-foreground">
             {typeLabel}{planMeta ? ` · ${planMeta}` : ''}
           </span>
+          {/* Collapsed, the header is the only thing left, so it has to carry the two
+              figures that decide whether the card is worth opening. */}
+          {cardCollapsed && (
+            <span className="text-xs">
+              <span style={{ color: CHART_COLORS.cpuMax }}>CPU {(+metrics.cpu.max).toFixed(2)}%</span>
+              <span className="text-muted-foreground"> · </span>
+              <span style={{ color: CHART_COLORS.memMax }}>Mem {(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</span>
+            </span>
+          )}
           {([
             { tag: 'Frontend',  show: true,   ai: feHasInsights },
             { tag: 'API', show: hasApi,  ai: apiHasInsights },
@@ -1582,16 +1525,15 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 { key: 'cpu',          label: 'CPU' },
                 { key: 'memory',       label: 'Memory' },
                 { key: 'database',     label: 'Database' },
-                { key: 'response',     label: 'Response' },
                 { key: 'users',        label: 'Users' },
-                { key: 'requests',     label: 'Requests' },
-                { key: 'dependencies', label: 'Dependencies' },
+                { key: 'performance',  label: 'Performance' },
                 { key: 'exceptions',   label: 'Exceptions' },
                 { key: 'instances',    label: 'Instances' },
                 { key: 'uptimerobot',  label: 'UptimeRobot' },
+                { key: 'snat',         label: 'SNAT Ports' },
+                { key: 'restarts',     label: 'Restarts' },
                 { key: 'frontend',     label: 'Frontend' },
                 { key: 'api',          label: 'API' },
-                { key: 'snatRisk',     label: 'CPI' },
               ] as const).map(({ key, label }) => (
                 <DropdownMenuCheckboxItem
                   key={key}
@@ -1626,7 +1568,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
             onClick={openRcaDialog}
-            title={rcaStatus === 'running' ? 'RCA analysis running…' : 'RCA Report — add investigation notes, then generate'}
+            title={rcaStatus === 'running' ? 'Downtime RCA analysis running…' : 'Downtime RCA Report (AI) — add investigation notes, then generate'}
             data-html2canvas-ignore="true"
           >
             <ScanSearch
@@ -1652,6 +1594,12 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
         </div>
       </div>
 
+      {/* Everything below the header. Unmounted rather than hidden when collapsed —
+          hiding would keep every Recharts container alive, which is most of the cost
+          of a card and the whole reason to collapse several of them. copyForTeams
+          re-expands before capturing, since it reads [data-teams-chart] out of the DOM. */}
+      {!cardCollapsed && (
+      <>
       {/* Error */}
       {metrics.error && (
         <div className="mx-4 mb-2 px-3 py-2 rounded-md text-xs border border-destructive/30 bg-destructive/10 text-destructive">
@@ -1678,7 +1626,54 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
           availabilitySeries={undefined}
           instanceHealthSeries={null}
           apiInstanceHealthSeries={null}
+          hiddenMetrics={hiddenMetrics}
+          syncId={hoverSyncId}
           loading={false}
+        />
+        {/* The CPU / Memory / DB figures live here rather than in the table below:
+            they belong to the lines directly above them, and clicking one drops
+            that metric out of the plot. */}
+        <MetricLegend
+          hidden={hiddenMetrics}
+          onToggle={key => setHiddenMetrics(prev => {
+            const next = new Set(prev);
+            if (!next.delete(key)) next.add(key);
+            return next;
+          })}
+          items={[
+            ...(visibleBlocks.cpu ? [{
+              key: 'cpu', label: 'CPU',
+              values: [
+                { text: `${(+metrics.cpu.avg).toFixed(2)}%`, color: CHART_COLORS.cpuAvg },
+                { text: `${(+metrics.cpu.p99).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
+                { text: `${(+metrics.cpu.max).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
+              ],
+            }] : []),
+            ...(visibleBlocks.memory ? [{
+              key: 'memory', label: 'Memory',
+              values: [
+                { text: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memAvg },
+                { text: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
+                { text: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
+              ],
+            }] : []),
+            ...(visibleBlocks.database && (metrics.dbCpu?.series?.length ?? 0) > 0 ? [{
+              key: 'dbCpu', label: 'DB CPU',
+              values: [
+                { text: `${(+metrics.dbCpu!.avg).toFixed(2)}%`, color: CHART_COLORS.dbCpuAvg },
+                { text: `${(+metrics.dbCpu!.p99).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
+                { text: `${(+metrics.dbCpu!.max).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
+              ],
+            }] : []),
+            ...(visibleBlocks.database && (metrics.dbMemory?.series?.length ?? 0) > 0 ? [{
+              key: 'dbMemory', label: 'DB Memory',
+              values: [
+                { text: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, color: CHART_COLORS.dbMemAvg },
+                { text: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
+                { text: `${(+metrics.dbMemory!.max).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
+              ],
+            }] : []),
+          ]}
         />
       </div>
 
@@ -1688,81 +1683,15 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
         <div className="flex flex-col gap-2">
           <div className="rounded-md border border-border overflow-hidden">
           <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1" style={{ tableLayout: 'fixed' }}><colgroup><col style={{ width: '40%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /></colgroup>
-            <thead>
-              <tr className="text-muted-foreground font-bold">
-                <td />
-                <td className="text-right">Average</td>
-                <td className="text-right">P99</td>
-                <td className="text-right">Max</td>
-              </tr>
-            </thead>
+            {/* No column header: the rows left here no longer share one set of three
+                figures — Instances lists per-instance health, UptimeRobot reports
+                incidents and uptime — so Average / P99 / Max labelled none of them. The
+                colgroup widths still line up with the FE / API blocks below. */}
             <tbody>
-            {visibleBlocks.cpu && (
-              <tr>
-                <td className="text-muted-foreground font-bold" title="CPU: average and max CPU utilization of the App Service instance(s), sourced from Azure Monitor CpuPercentage metric. High sustained CPU may indicate compute saturation unrelated to SNAT.">CPU</td>
-                <td className="text-right" style={{ color: CHART_COLORS.cpuAvg }}>{(+metrics.cpu.avg).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.p99).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.cpuMax }}>{(+metrics.cpu.max).toFixed(2)}%</td>
-              </tr>
-            )}
-            {visibleBlocks.memory && (
-              <tr>
-                <td className="text-muted-foreground font-bold" title="Memory: average and max memory utilization of the App Service instance(s), sourced from Azure Monitor MemoryPercentage metric. High memory may cause GC pressure and connection pool exhaustion.">Memory</td>
-                <td className="text-right" style={{ color: CHART_COLORS.memAvg }}>{(+metrics.memory.avg).toFixed(2)}{metrics.memUnit}</td>
-                <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.p99).toFixed(2)}{metrics.memUnit}</td>
-                <td className="text-right" style={{ color: CHART_COLORS.memMax }}>{(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</td>
-              </tr>
-            )}
-            {visibleBlocks.response && metrics.responseTime != null && (
-              <tr>
-                <td className="text-muted-foreground font-bold" title="Response Time: average and P99 server-side request duration in seconds, sourced from App Insights request telemetry. Elevated P99 often correlates with SNAT port wait or slow downstream dependencies.">Response</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.avg * 1000)}</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.p99 != null ? metrics.responseTime.p99 * 1000 : null)}</td>
-                <td className="text-right" style={{ color: '#58a6ff' }}>{fmtDuration(metrics.responseTime.max * 1000)}</td>
-              </tr>
-            )}
-            {visibleBlocks.users && metrics.users != null && (() => {
-              const fmtSgt = (t: string) => new Date(t).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-              const series = metrics.users.series ?? [];
-              const firstPoint = series[0];
-              const lastPoint = series[series.length - 1];
-              const maxPoint = series.reduce<typeof series[number] | null>((best, p) => (best == null || p.m > best.m ? p : best), null);
-              const p99Val = metrics.users.p99;
-              const p99Point = series.reduce<typeof series[number] | null>((best, p) => (best == null || Math.abs(p.v - p99Val) < Math.abs(best.v - p99Val) ? p : best), null);
-              const hasSeries = series.length > 1;
-              return (
-                <>
-                  <tr
-                    style={{ cursor: hasSeries ? 'pointer' : 'default' }}
-                    onClick={() => hasSeries && setUsersExpanded(v => !v)}
-                    onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold" title="Users: distinct client IPs seen in requests per time bucket, sourced from App Insights (Frontend only). Average/P99/Max are computed across buckets, not across individual requests.">
-                      Users
-                      {hasSeries && (usersExpanded
-                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                      )}
-                    </td>
-                    <td className="text-right" style={{ color: '#a371f7' }} title={firstPoint && lastPoint ? `Across ${series.length} time buckets from ${fmtSgt(firstPoint.t)} to ${fmtSgt(lastPoint.t)} SGT` : undefined}>{metrics.users.avg}</td>
-                    <td className="text-right" style={{ color: '#a371f7' }} title={p99Point ? `Closest bucket at ${fmtSgt(p99Point.t)} SGT (${p99Point.v} users)` : undefined}>{metrics.users.p99}</td>
-                    <td className="text-right" style={{ color: '#a371f7' }} title={maxPoint ? `Peak at ${fmtSgt(maxPoint.t)} SGT` : undefined}>{metrics.users.max}</td>
-                  </tr>
-                  {usersExpanded && hasSeries && (
-                    <tr>
-                      <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
-                        <SeriesChart series={series} color="#a371f7" name="Users" height={130} />
-                        <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
-                          Distinct client IPs per time bucket — one value per bucket, so the Average / P99 / Max above are computed across buckets, not within them.
-                          {maxPoint ? ` Peak ${maxPoint.m.toLocaleString()} at ${fmtSgt(maxPoint.t)} SGT.` : ''}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </>
-              );
-            })()}
+            {/* The app-level Users row lived here. It came from a frontend-only query, so
+                an app's API had no user figures anywhere on the card — it is now a Users
+                row inside each of the FE and API sections below, per App Insights
+                resource, carrying the busiest addresses and agents alongside the line. */}
             {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
               const feInstances = metrics.instances ?? [];
               const apiInstances = metrics.apiInstances ?? [];
@@ -1851,36 +1780,34 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     onMouseEnter={e => hasInstances && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
-                    {/* Merged: the old empty cells only drew column dividers across an
-                        otherwise blank row. One cell carries the label plus each
-                        instance's latest health, so the collapsed row still says which
-                        instances exist and how they are doing right now. */}
-                    <td colSpan={4}>
-                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px 10px' }}>
-                        <span className="text-muted-foreground font-bold">
-                          <span title="Instances: individual App Service instances (scale-out units). Each instance has its own SNAT port allocation — more instances means more total SNAT ports available. Health % is request-derived per instance: (requests − 5xx) / requests.">Instances</span>
-                          {hasInstances && (availExpanded
-                            ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                            : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
-                        </span>
-                        {rows.length > 0 && (
-                          <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px 12px' }}>
-                            {rows.map(r => (
-                              <span key={r.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10 }} title={`${r.name} — latest health`}>
-                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: r.color, flexShrink: 0 }} />
-                                <span style={{ color: r.color }}>{r.shortName}</span>
-                                <span className="tabular-nums" style={{ color: hc(r.latest) }}>
-                                  {r.latest != null ? `${r.latest.toFixed(2)}%` : '—'}
-                                </span>
-                                {!r.stillActive && r.lifecycle && (
-                                  <span style={{ color: '#d29922', fontSize: 9 }} title="Stopped reporting before the window ended.">stopped</span>
-                                )}
-                              </span>
-                            ))}
-                          </span>
-                        )}
-                      </div>
+                    {/* The instances are dealt into the three figure columns rather than
+                        wrapped as one long line: on a plan with eight workers that line
+                        ran past the table and lined up with nothing. Filled row-major, so
+                        they still read left to right. */}
+                    <td className="text-muted-foreground font-bold">
+                      <span title="Instances: individual App Service instances (scale-out units). Each instance has its own SNAT port allocation — more instances means more total SNAT ports available. Health % is request-derived per instance: (requests − 5xx) / requests.">Instances</span>
+                      {hasInstances && (availExpanded
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
+                    {[0, 1, 2].map(col => (
+                      <td key={col} style={{ verticalAlign: 'top' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                          {rows.filter((_, i) => i % 3 === col).map(r => (
+                            <span key={r.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, maxWidth: '100%' }} title={`${r.name} — latest health`}>
+                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: r.color, flexShrink: 0 }} />
+                              <span style={{ color: r.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.shortName}</span>
+                              <span className="tabular-nums" style={{ color: hc(r.latest), flexShrink: 0 }}>
+                                {r.latest != null ? `${r.latest.toFixed(2)}%` : '—'}
+                              </span>
+                              {!r.stillActive && r.lifecycle && (
+                                <span style={{ color: '#d29922', fontSize: 9, flexShrink: 0 }} title="Stopped reporting before the window ended.">stopped</span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    ))}
                   </tr>
                   {availExpanded && rows.length > 0 && (
                     <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
@@ -1893,6 +1820,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                             instances={rows.map(r => ({ name: r.name, label: r.label, series: r.points }))}
                             colors={rows.map(r => r.color)}
                             height={150}
+                            syncId={hoverSyncId}
                           />
                           {/* Legend doubles as the readout the removed rows carried:
                               colour, name, role, avg, min, and lifecycle range. */}
@@ -2071,9 +1999,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                                       const reqBefore  = sumInRangeUr(reqSeries,  ivStart - PRE, PRE_END);
                                       const reqDuring  = sumDuringUr(reqSeries,  ivStart, ivEnd);
                                       const reqAfter   = sumInRangeUr(reqSeries,  ivEnd, ivEnd + PRE);
-                                      const failBefore = sumInRangeUr(failSeries, ivStart - PRE, PRE_END);
                                       const failDuring = sumDuringUr(failSeries, ivStart, ivEnd);
-                                      const failAfter  = sumInRangeUr(failSeries, ivEnd, ivEnd + PRE);
                                       const duringMin = Math.max(1, (ivEnd - ivStart) / 60000);
                                       const reqBeforeRPM = reqBefore > 0 ? Math.round(reqBefore / 4 * 10) / 10 : 0;
                                       const reqDuringRPM = reqDuring > 0 ? Math.round(reqDuring / duringMin * 10) / 10 : 0;
@@ -2139,428 +2065,79 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 </>
               );
             })()}
-            </tbody>
-          </table>
-          </div>
-
-          {visibleBlocks.database && ((metrics.dbCpu?.series?.length ?? 0) > 0 || (metrics.dbMemory?.series?.length ?? 0) > 0) && (
-          <div className="rounded-md border border-border overflow-hidden">
-          <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1" style={{ tableLayout: 'fixed' }}><colgroup><col style={{ width: '40%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /></colgroup>
-            <thead>
-              <tr className="text-muted-foreground font-bold">
-                <td>Database</td>
-                <td className="text-right">Average</td>
-                <td className="text-right">P99</td>
-                <td className="text-right">Max</td>
-              </tr>
-            </thead>
-            <tbody>
-            {(metrics.dbCpu?.series?.length ?? 0) > 0 && (
-              <tr>
-                <td className="text-muted-foreground font-bold" title="DB CPU: average and max CPU utilization of the Azure SQL database (vCore/serverless), sourced from Azure Monitor cpu_percent metric.">CPU</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbCpuAvg }}>{(+metrics.dbCpu!.avg).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbCpuMax }}>{(+metrics.dbCpu!.p99).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbCpuMax }}>{(+metrics.dbCpu!.max).toFixed(2)}%</td>
-              </tr>
-            )}
-            {(metrics.dbMemory?.series?.length ?? 0) > 0 && (
-              <tr>
-                <td className="text-muted-foreground font-bold" title="DB Memory: average and max memory utilization of the Azure SQL instance, sourced from Azure Monitor sql_instance_memory_percent metric.">Memory</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbMemAvg }}>{(+metrics.dbMemory!.avg).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbMemMax }}>{(+metrics.dbMemory!.p99).toFixed(2)}%</td>
-                <td className="text-right" style={{ color: CHART_COLORS.dbMemMax }}>{(+metrics.dbMemory!.max).toFixed(2)}%</td>
-              </tr>
+            {/* SNAT ports are allocated per worker instance on the App Service plan.
+                When FE and API share that plan both sites report the same numbers, so
+                the section belongs to the app as a whole and sits here; on separate
+                plans each site gets its own row inside its own block instead. */}
+            {visibleBlocks.snat && metrics.type === 'appservice' && metrics.apiSharesPlan === true && (
+              <SnatPortsRows
+                syncId={hoverSyncId}
+                snat={metrics.snat}
+                loading={snatLoading}
+                expanded={snatPortsExpanded}
+                onToggle={() => setSnatPortsExpanded(v => { if (!v) onRequestSnat?.(); return !v; })}
+              />
             )}
             </tbody>
           </table>
           </div>
-          )}
 
-          {(feHasInsights || metrics.connections != null) && visibleBlocks.frontend && (
-          <div className="rounded-md border border-border overflow-hidden">
+          {(showFeBlock || showApiBlock) && (
+          <div className={`grid gap-2 items-start ${showFeBlock && showApiBlock ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          {showFeBlock && (
+          <div className="rounded-md border border-border overflow-hidden min-w-0">
           <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1" style={{ tableLayout: 'fixed' }}><colgroup><col style={{ width: '40%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /></colgroup>
             <thead>
-              <tr className="text-muted-foreground font-bold">
-                <td>Frontend</td>
-                <td></td>
-                <td className="text-right">P99</td>
-                <td className="text-right">Max</td>
+              <tr
+                className="text-muted-foreground font-bold"
+                style={{ cursor: 'pointer' }}
+                onClick={() => setFeSectionOpen(v => !v)}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                title={feSectionOpen ? 'Collapse FE' : 'Expand FE'}
+              >
+                {/* One merged cell: the header carries only the label, so splitting it
+                    across the four metric columns would just draw empty dividers. */}
+                <td colSpan={4}>
+                  FE{feSectionOpen
+                    ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                    : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                </td>
               </tr>
             </thead>
+            {feSectionOpen && (
             <tbody>
-            {visibleBlocks.requests && metrics.requests != null && (
-              <>
-                <tr
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => { setRequestsExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; }); }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <td className="text-muted-foreground font-bold">
-                    <span title="Requests: total HTTP requests received by the app within the selected time range, sourced from App Insights. Includes total count, failure count (non-2xx/3xx), and failure rate. Expand to see top URLs, slow endpoints, and error breakdowns.">Requests</span>{requestsExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
-                  </td>
-                  {(() => {
-                    const ai = metrics.requestInsights;
-                    const total4xx = ai?.total4xx ?? (metrics.http4xxSeries ?? []).reduce((a, p) => a + (p.count ?? 0), 0);
-                    const total5xx = ai?.total5xx ?? (metrics.failedRequestsSeries ?? []).reduce((a, p) => a + (p.count ?? 0), 0);
-                    const reqTotal = ai?.insight?.totalRequests ?? metrics.requests?.total ?? 0;
-                    const errTotal = total4xx + total5xx;
-                    const pct = reqTotal > 0 ? (errTotal / reqTotal * 100) : 0;
-                    const feSeries = metrics.failedRequestsSeries ?? [];
-                    const feMid = Math.floor(feSeries.length / 2);
-                    const feAvg = (arr: typeof feSeries) => arr.length ? arr.reduce((s, p) => s + (p.count ?? 0), 0) / arr.length : 0;
-                    const fe1 = feAvg(feSeries.slice(0, feMid)); const fe2 = feAvg(feSeries.slice(feMid));
-                    const isSpiking5xx = feSeries.length >= 2 && fe2 >= 1 && fe2 > fe1 * 1.05;
-                    return (
-                      <>
-                        <td className="text-right tabular-nums text-muted-foreground">—</td>
-                        <td className="text-right" style={{ color: '#58a6ff' }}>
-                          {fmtDuration(ai?.insight?.requestP99)}
-                        </td>
-                        {/* 5xx (% of total) / 4xx (% of total) / total — the 5xx count
-                            moved here from its own cell so all three read together. */}
-                        <td
-                          className="text-right"
-                          style={{ whiteSpace: 'nowrap' }}
-                          title={`${total5xx.toLocaleString()} server errors (5xx) and ${total4xx.toLocaleString()} client errors (4xx) out of ${reqTotal.toLocaleString()} requests — ${pct.toFixed(2)}% failed overall.${isSpiking5xx ? ' 5xx rate is rising across the window.' : ''}`}
-                        >
-                          {errTotal > 0
-                            ? <>
-                                <span style={{ color: total5xx > 0 ? HTTP_5XX_COLOR : '#484f58', fontSize: 10, fontWeight: isSpiking5xx ? 700 : 400 }}>{total5xx.toLocaleString()} ({fmtPct(total5xx, reqTotal)})</span>
-                                <span style={{ color: '#484f58' }}> / </span>
-                                <span style={{ color: total4xx > 0 ? HTTP_4XX_COLOR : '#484f58', fontSize: 10 }}>{total4xx.toLocaleString()} ({fmtPct(total4xx, reqTotal)})</span>
-                                <span style={{ color: '#484f58' }}> / </span>
-                                <span style={{ color: '#58a6ff' }}>{reqTotal.toLocaleString()}</span>
-                              </>
-                            : <span style={{ color: '#3fb950' }}>{reqTotal.toLocaleString()}</span>
-                          }
-                        </td>
-                      </>
-                    );
-                  })()}
-                </tr>
-                {requestsExpanded && (
-                  <>
-                    <tr>
-                      <td colSpan={4} className="pb-1">
-                        {detailsLoading && !detailsLoaded
-                          ? <span className="text-[10px] text-muted-foreground italic">Loading details…</span>
-                          : !metrics.requestInsights
-                          ? <span className="text-[10px] text-muted-foreground italic">Requires App Insights Application ID in settings</span>
-                          : metrics.requestInsights.error
-                            ? <span className="text-[10px] text-destructive">{metrics.requestInsights.error}</span>
-                            : (() => {
-                              const ri = metrics.requestInsights;
-                              return (
-                                <div className="flex flex-col gap-1 pt-1">
-                                  {/* Tab buttons */}
-                                  <div className="flex gap-0.5 flex-wrap">
-                                    {(['requests', 'highfreq', 'http4xx', 'http5xx', 'bots'] as const).map(t => {
-                                      const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Top', bots: 'User Agents' };
-                                      const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
-                                      const c = colors[t];
-                                      return (
-                                        <button
-                                          key={t}
-                                          onClick={() => setRequestsTab(t)}
-                                          style={{
-                                            background: requestsTab === t ? `${c}22` : 'none',
-                                            border: `1px solid ${requestsTab === t ? `${c}66` : 'transparent'}`,
-                                            color: requestsTab === t ? c : 'var(--muted-foreground)',
-                                            borderRadius: 4, padding: '1px 6px', fontSize: 9,
-                                            cursor: 'pointer', fontWeight: requestsTab === t ? 600 : 400,
-                                          }}
-                                        >{labels[t]}</button>
-                                      );
-                                    })}
-                                  </div>
-
-                                  {/* Requests tab */}
-                                  {requestsTab === 'requests' && (
-                                    !Array.isArray(ri.urls) || ri.urls.length === 0
-                                      ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
-                                      : <div className="flex flex-col gap-0.5">
-                                        {ri.urls.map((u, i) => (
-                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                  )}
-
-                                  {/* High Frequency tab */}
-                                  {requestsTab === 'highfreq' && (
-                                    !Array.isArray(ri.highFreq) || ri.highFreq.length === 0
-                                      ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
-                                      : <div className="flex flex-col gap-0.5">
-                                        {ri.highFreq.map((u, i) => {
-                                          const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-                                          const start = new Date(u.timestamp);
-                                          const end = new Date(start.getTime() + 10 * 60 * 1000);
-                                          const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
-                                          const textColor = isDowntime ? '#c0392b' : undefined;
-                                          const rep = ipReputations[u.ip];
-                                          return (
-                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                              <div className="flex flex-col min-w-0 flex-1">
-                                                <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
-                                                  {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
-                                                  <IpRepBadges rep={rep} />
-                                                </span>
-                                                <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
-                                              </div>
-                                              <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                  )}
-
-                                  {/* HTTP 4xx tab */}
-                                  {requestsTab === 'http4xx' && (
-                                    !Array.isArray(ri.failed4xxUrls) || ri.failed4xxUrls.length === 0
-                                      ? <span className="text-[10px] text-muted-foreground italic">No HTTP 4xx data</span>
-                                      : <div className="flex flex-col gap-0.5">
-                                        {ri.failed4xxUrls.map((u, i) => (
-                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#f97316' }}>{u.count.toLocaleString()}</span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                  )}
-
-                                  {/* HTTP 5xx tab */}
-                                  {requestsTab === 'http5xx' && (
-                                    Array.isArray(ri.failed5xxUrls) && ri.failed5xxUrls.length > 0
-                                      ? <div className="flex flex-col gap-0.5">
-                                        {ri.failed5xxUrls.map((u, i) => (
-                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.count.toLocaleString()}</span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                      : (() => {
-                                          const armPts = (metrics.failedRequestsSeries ?? []).filter(p => (p.count ?? 0) > 0).sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
-                                          if (!armPts.length) return <span className="text-[10px] text-muted-foreground italic">No HTTP 5xx data</span>;
-                                          return (
-                                            <div className="flex flex-col gap-0.5">
-                                              <span className="text-[10px] text-muted-foreground italic mb-1">URL breakdown unavailable — ARM 5xx spikes:</span>
-                                              {armPts.slice(0, 10).map((p, i) => (
-                                                <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                                  <span className="flex-shrink-0 tabular-nums" style={{ color: 'var(--muted-foreground)' }}>{new Date(p.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-                                                  <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{(p.count ?? 0).toLocaleString()} errors</span>
-                                                </div>
-                                              ))}
-                                            </div>
-                                          );
-                                        })()
-                                  )}
-
-                                  {/* Bots tab */}
-                                  {requestsTab === 'bots' && (
-                                    !Array.isArray(ri.bots) || ri.bots.length === 0
-                                      ? <span className="text-[10px] text-muted-foreground italic">No bot traffic detected</span>
-                                      : <div className="flex flex-col gap-0.5">
-                                        {ri.bots.slice(0, 10).map((b, i) => (
-                                          <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                            <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={b.userAgent}>{b.userAgent}</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#3fb950' }}>{b.rpm} rpm</span>
-                                            <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{b.count.toLocaleString()}</span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                  )}
-                                </div>
-                              );
-                            })()
-                        }
-                      </td>
-                    </tr>
-                  </>
-                )}
-              </>
+            {/* Latency and errors per endpoint. Gated only on the toggle, matching Users:
+                both are App Insights payloads that arrive with the lazy details fetch, and
+                the ARM Requests metric this used to be gated on is a different source. */}
+            {visibleBlocks.performance && (
+              <PerformanceRows
+                perf={metrics.requestInsights?.performance}
+                expanded={perfExpanded}
+                onToggle={() => setPerfExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                fmtMs={fmtDuration}
+                fmtPct={fmtPct}
+                syncId={hoverSyncId}
+                deps={endpointDeps[`fe|${perfFeSelected}`]}
+                onRequestDeps={requestFeDeps}
+                loading={detailsLoading && !detailsLoaded}
+                error={metrics.requestInsights?.error}
+                unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
+              />
             )}
-            {metrics.connections != null && (() => {
-              const a1 = feConA1; const a2 = feConA2;
-              const diff = a2 - a1;
-              const threshold = feConHalfAvg(feConPts) * 0.05;
-              const trend = feConPts.length < 2 ? null : diff > threshold ? '↑' : diff < -threshold ? '↓' : '→';
-              const trendColor = trend === '↑' ? '#f85149' : '#3fb950';
-              const hasSeries = feConPts.length > 1;
-              return (
-                <>
-                  <tr
-                    style={{ cursor: hasSeries ? 'pointer' : 'default' }}
-                    onClick={() => hasSeries && setConnExpanded(v => !v)}
-                    onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">
-                      Connections
-                      {hasSeries && (connExpanded
-                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                      )}
-                    </td>
-                    <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                      {trend
-                        ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
-                        : <span className="text-muted-foreground">—</span>}
-                    </td>
-                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.p99)}</td>
-                    <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.connections.max)}</td>
-                  </tr>
-                  {connExpanded && hasSeries && (
-                    <tr>
-                      <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
-                        <SeriesChart series={feConPts} color="#22d3ee" name="Connections" height={130} />
-                        <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
-                          Active outbound TCP connections — solid is the bucket peak, dashed the bucket average.
-                          {' '}Sustained growth with flat traffic is the SNAT / pooling signal the CPI watches for.
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </>
-              );
-            })()}
-            {visibleBlocks.dependencies && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
-              const insight = metrics.requestInsights.insight;
-              if (!insight) return null;
-              const depP99      = insight.dependencyP99 ?? 0;
-              const depTotal    = insight.totalDependencies ?? 0;
-              const depFailRate = insight.dependencyFailureRate ?? 0;
-              const topDeps     = metrics.requestInsights.topDependencies ?? [];
-              const failedDeps  = metrics.failedDependencies ?? [];
-              const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || insight.totalDependencies > 0 || insight.failedDependencies > 0;
-              const filteredTopDeps    = topDeps.filter(d => d.classification === depsFilter);
-              const filteredFailedDeps = failedDeps.filter(d => d.classification === depsFilter);
-              return (
-                <>
-                  <tr
-                    style={{ cursor: hasDetail ? 'pointer' : 'default' }}
-                    onClick={() => hasDetail && setDepsExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                    onMouseEnter={e => hasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold">
-                      <span title="Dependencies: outbound calls made by the app to external services (SQL, HTTP APIs, storage, etc.), tracked by App Insights. Shows total call count, failure count, failure rate, and P99 latency. High failure or timeout rates are key CPI signals.">Dependencies</span>
-                      {hasDetail && (depsExpanded
-                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                      )}
-                    </td>
-                    <td className="text-right tabular-nums text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums" style={{ color: depP99 > 5000 ? '#f85149' : depP99 > 1000 ? '#d29922' : '#58a6ff' }}>
-                      {depP99 > 0 ? fmtDuration(depP99) : '—'}
-                    </td>
-                    {/* failed (% of total) / timeout (% of total) / total — timeouts sit
-                        in the middle because they are a subset of the failures, so the
-                        row reads broadest to most-specific, then the denominator. */}
-                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
-                      {depTotal > 0 ? (() => {
-                        const depTO = (metrics.requestInsights?.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
-                        return insight.failedDependencies > 0 || depTO > 0
-                          ? <span title={`${insight.failedDependencies.toLocaleString()} failed, of which ${depTO.toLocaleString()} timed out, out of ${depTotal.toLocaleString()} dependency calls — ${depFailRate.toFixed(2)}% failure rate.`}>
-                              <span style={{ color: insight.failedDependencies > 0 ? DEP_FAILED_COLOR : '#484f58', fontSize: 10 }}>{insight.failedDependencies.toLocaleString()} ({fmtPct(insight.failedDependencies, depTotal)})</span>
-                              <span style={{ color: '#484f58' }}> / </span>
-                              <span style={{ color: depTO > 0 ? DEP_TIMEOUT_COLOR : '#484f58', fontSize: 10 }}>{depTO.toLocaleString()} ({fmtPct(depTO, depTotal)})</span>
-                              <span style={{ color: '#484f58' }}> / </span>
-                              <span style={{ color: DEP_TOTAL_COLOR }}>{depTotal.toLocaleString()}</span>
-                            </span>
-                          : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>;
-                      })() : '—'}
-                    </td>
-                  </tr>
-                  {depsExpanded && hasDetail && (
-                    <>
-                      {detailsLoading && !detailsLoaded && (
-                        <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
-                      )}
-                      {(!detailsLoading || detailsLoaded) && <tr>
-                        <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
-                          <div className="flex gap-0.5">
-                            {([
-                              { key: 'topDeps',     label: 'Top',     color: '#58a6ff' },
-                              { key: 'failedDeps',  label: 'Failed',  color: '#f85149' },
-                              { key: 'timeoutDeps', label: 'Timeout', color: '#f97316' },
-                            ] as const).map(t => (
-                              <button
-                                key={t.key}
-                                onClick={e => { e.stopPropagation(); setDepsTab(t.key); }}
-                                style={{
-                                  background: depsTab === t.key ? `${t.color}22` : 'none',
-                                  border: `1px solid ${depsTab === t.key ? `${t.color}66` : 'transparent'}`,
-                                  color: depsTab === t.key ? t.color : 'var(--muted-foreground)',
-                                  borderRadius: 4, padding: '1px 6px', fontSize: 9,
-                                  cursor: 'pointer', fontWeight: depsTab === t.key ? 600 : 400,
-                                }}
-                              >{t.label}</button>
-                            ))}
-                          </div>
-                          {depsTab !== 'timeoutDeps' && <DepsFilterPills value={depsFilter} onChange={setDepsFilter} />}
-                        </td>
-                      </tr>}
-                      {detailsLoaded && depsTab === 'topDeps' && (
-                        filteredTopDeps.length === 0
-                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No {depsFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsFilter === 'internal' ? topDeps.some(d => d.classification === 'thirdParty') : topDeps.some(d => d.classification === 'internal')) ? ` — try ${depsFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
-                          : filteredTopDeps.map((d, i) => (
-                            <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
-                                {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
-                              </td>
-                              <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
-                              <td className="text-right tabular-nums">
-                                {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
-                              </td>
-                            </tr>
-                          ))
-                      )}
-                      {detailsLoaded && depsTab === 'timeoutDeps' && (() => {
-                        const tDeps = (metrics.requestInsights.dependencyTimeouts ?? []).slice().sort((a, b) => b.count - a.count).slice(0, 10);
-                        return tDeps.length === 0
-                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No timeout dependencies</td></tr>
-                          : <>{tDeps.map((d, i) => (
-                            <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}`}>{d.name}</td>
-                              <td className="text-right tabular-nums" style={{ color: RESULT_CODE_COLOR(d.resultCode), fontSize: 10 }} title={RESULT_CODE_HELP[d.resultCode] ?? `resultCode ${d.resultCode}`}>{d.resultCode || '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: '#58a6ff' }} title="p95 duration">{d.p95 > 0 ? fmtDuration(d.p95) : '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: '#f97316' }}>{d.count.toLocaleString()}</td>
-                            </tr>
-                          ))}</>;
-                      })()}
-                      {detailsLoaded && depsTab === 'failedDeps' && (
-                        filteredFailedDeps.length === 0
-                          ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed {depsFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsFilter === 'internal' ? failedDeps.some(d => d.classification === 'thirdParty') : failedDeps.some(d => d.classification === 'internal')) ? ` — try ${depsFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
-                          : filteredFailedDeps.slice(0, 10).map((d, i) => (
-                            <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                              <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
-                                {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
-                              </td>
-                              <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                              <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
-                              <td className="text-right tabular-nums">
-                                {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
-                              </td>
-                            </tr>
-                          ))
-                      )}
-                    </>
-                  )}
-                </>
-              );
-            })()}
+            {visibleBlocks.users && (
+              <UserRows
+                users={metrics.requestInsights?.userInsights}
+                userAgents={metrics.requestInsights?.userAgents}
+                ipReputations={ipReputations}
+                expanded={usersExpanded}
+                onToggle={() => setUsersExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                syncId={hoverSyncId}
+                loading={detailsLoading && !detailsLoaded}
+                error={metrics.requestInsights?.error}
+                unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
+              />
+            )}
             {visibleBlocks.exceptions && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
               const errorTypes = metrics.requestInsights.errorTypes ?? [];
               const hasDetail  = errorTypes.length > 0;
@@ -2583,19 +2160,24 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                     onMouseEnter={e => hasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
-                    <td className="text-muted-foreground font-bold">
-                      <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
-                      {hasDetail && (errorsExpanded
-                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                      )}
+                    {/* One cell across the whole row, label and total held apart by flex.
+                        Exceptions reports a single figure, and any second cell — even an
+                        empty one — draws its own bordered box. */}
+                    <td colSpan={4}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground font-bold">
+                          <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
+                          {hasDetail && (errorsExpanded
+                            ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                            : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                          )}
+                        </span>
+                        <span className="tabular-nums" style={{ color: errColor }} title={excCounts.breakdown}>{errorCount.toLocaleString()}</span>
+                      </div>
                     </td>
-                    <td className="text-right tabular-nums text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums text-muted-foreground">—</td>
-                    <td className="text-right tabular-nums" style={{ color: errColor }} title={excCounts.breakdown}>{errorCount.toLocaleString()}</td>
                   </tr>
                   {errorsExpanded && hasDetail && detailsLoading && !detailsLoaded && (
-                    <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
+                    <ListSkeletonRow />
                   )}
                   {errorsExpanded && hasDetail && (!detailsLoading || detailsLoaded) && (
                     <>
@@ -2612,663 +2194,90 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                 </>
               );
             })()}
-            {visibleBlocks.snatRisk && metrics.type !== 'containerapp' && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
-              const snatDetails  = metrics.requestInsights.snatDetails ?? [];
-              const count        = snatDetails.length;
-              const feInsight    = metrics.requestInsights.insight;
-              // Socket-layer only — application timeouts are scored by depTimeouts.
-              const socketExc    = feInsight?.socketLayerExceptions ?? 0;
-              const depFailRate  = feInsight?.dependencyFailureRate ?? 0;
-              const depTimeouts  = (metrics.requestInsights.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
-              const depP99Ms     = feInsight?.dependencyP99         ?? 0;
-              const fe5xx        = metrics.requestInsights.total5xx ?? 0;
-              const feReqTotal   = feInsight?.totalRequests         ?? 0;
-              const fe5xxRate    = feReqTotal > 0 ? (fe5xx / feReqTotal) * 100 : 0;
-              const topDeps      = metrics.requestInsights.topDependencies ?? [];
-              const topDepTrafficPct = (topDeps[0] && feReqTotal > 0) ? (topDeps[0].totalCount / feReqTotal * 100) : 0;
-              const threadPoolStarvation = (metrics.requestInsights.sqlHttpDetails ?? [])
-                .some(d => /thread.?pool|threadabort|starvation/i.test(d.innermostMessage + d.outerMessage));
-              const feCpuAvg = metrics.cpu.avg;
-              const feMemAvg = metrics.memUnit === '%' ? +metrics.memory.avg : -1;
-              const risk = snatScore({
-                socketExceptions: socketExc,
-                dependencyFailureRate: depFailRate,
-                dependencyTimeouts: depTimeouts,
-                dependencyP99Ms: depP99Ms,
-                connectionBaseline: feConA1,
-                connectionCurrent: feConA2,
-                http5xxRate: fe5xxRate,
-                cpuAvg: feCpuAvg,
-                memoryAvg: feMemAvg,
-                topDepTrafficPct,
-                threadPoolStarvation,
-                totalDependencies: feInsight?.totalDependencies ?? 0,
-                totalRequests: feReqTotal,
-              });
-              const subscores = [
-                { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${socketExc}`,                    norm: risk.socketScore,     wt: 20, pts: 20 * risk.socketScore,     normFormulaRaw: `${socketExc}`,                    normFormulaThreshold: '50 exceptions' },
-                { key: 'depFail' as const, label: 'Dependencies Failure',  raw: `${depFailRate.toFixed(1)}%`,      norm: risk.depFailScore,    wt: 25, pts: 25 * risk.depFailScore,    normFormulaRaw: `${depFailRate.toFixed(1)}%`,       normFormulaThreshold: '20% fail rate' },
-                { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${depTimeouts}`,                  norm: risk.depTimeoutScore, wt: 30, pts: 30 * risk.depTimeoutScore, normFormulaRaw: `${depTimeouts}`,                   normFormulaThreshold: '400 timeouts' },
-                { key: 'depP99'  as const, label: 'Dependencies P99',      raw: fmtDuration(depP99Ms),       norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(depP99Ms)}ms`,        normFormulaThreshold: '5000ms P99' },
-                { key: 'conn'    as const, label: 'Connection Growth',     raw: `+${Math.round(risk.connGrowth)}`, norm: risk.connGrowthScore, wt: 5,  pts: 5  * risk.connGrowthScore, normFormulaRaw: `${Math.round(risk.connGrowth)}`,   normFormulaThreshold: '64 new conns' },
-                { key: 'http5xx' as const, label: 'HTTP 5xx Rate',         raw: `${fe5xxRate.toFixed(1)}%`,        norm: risk.http5xxScore,    wt: 5,  pts: 5  * risk.http5xxScore,    normFormulaRaw: `${fe5xxRate.toFixed(1)}%`,         normFormulaThreshold: '5% error rate' },
-              ];
-              return (
-                <>
-                  <tr
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => setSnatExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold">
-                      <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket-layer exceptions (0.20), dependency failure rate (0.25), dependency timeouts (0.30), P99 latency (0.15), connection growth (0.05), and HTTP 5xx rate (0.05) into a normalized 0–100 confidence score.">Connection Pressure Index</span>
-                      {snatExpanded
-                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                      }
-                    </td>
-                    {/* The two spare cells merge into one and carry the verdict that
-                        used to sit inside the expanded panel. */}
-                    {(() => {
-                      const v = snatVerdict(risk.score, socketExc);
-                      return (
-                        <td
-                          colSpan={2}
-                          className={v ? '' : 'text-right tabular-nums text-muted-foreground'}
-                          style={v ? { color: v.color, fontWeight: v.bold ? 700 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}
-                          title={v?.text}
-                        >{v ? v.text : '—'}</td>
-                      );
-                    })()}
-                    {/* Score and band read as one value, in the same cell every other
-                        row puts its headline figure. */}
-                    <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)} - {risk.label}</td>
-                  </tr>
-                  {snatExpanded && (
-                    <tr>
-                      <td colSpan={4} style={{ paddingBottom: 8, paddingTop: 2 }}>
-                        <div style={{ fontSize: 10, paddingLeft: 8, paddingRight: 8 }}>
-                          <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
-                          <div style={{ flex: '0 0 auto', minWidth: 320, display: 'flex', flexDirection: 'column' }}>
-                          {/* Section A: Normalized subscores */}
-                          <div style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 3, marginBottom: 4 }}>
-                            <span>Factor</span><span style={{ textAlign: 'right' }}>Raw Value</span><span style={{ paddingLeft: 8 }}>Formula</span><span style={{ textAlign: 'right' }}>Normalized</span><span style={{ textAlign: 'right' }}>Weight</span><span style={{ textAlign: 'right' }}>Points</span>
-                          </div>
-                          {subscores.map((b, i) => {
-                            const cc = b.pts >= 12 ? '#f85149' : b.pts >= 6 ? '#e6773d' : b.pts > 0 ? '#d29922' : '#3fb950';
-                            return (
-                              <div key={i} style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, marginBottom: 3 }}>
-                                <span style={{ color: SNAT_FACTOR_COLORS[b.key], fontWeight: 600 }} title={SNAT_FACTOR_TIPS[b.key]}>{b.label}</span>
-                                <span style={{ color: '#8b949e', textAlign: 'right' }}>{b.raw}</span>
-                                <span style={{ color: '#6e7681', paddingLeft: 8 }}><em>{b.normFormulaRaw}</em> / <strong>{b.normFormulaThreshold}</strong></span>
-                                <span style={{ color: '#6e7681', textAlign: 'right' }}>{b.norm.toFixed(2)}</span>
-                                <span style={{ color: '#6e7681', textAlign: 'right' }}>{b.wt}%</span>
-                                <span style={{ color: cc, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{b.pts.toFixed(1)}</span>
-                              </div>
-                            );
-                          })}
-                          <div style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, marginTop: 'auto', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-                            <span style={{ color: '#e6edf3', fontWeight: 700 }} title="Base Confidence: weighted sum of the 6 normalized subscores × 100">Base Confidence</span>
-                            <span />
-                            <span />
-                            <span />
-                            <span />
-                            <span style={{ color: '#e6edf3', textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }} title="Base Confidence: Σ (weight × norm_score) × 100">{risk.baseConfidence.toFixed(1)}</span>
-                          </div>
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0, borderLeft: '1px solid rgba(255,255,255,0.08)', paddingLeft: 16 }}>
-                          {/* Section B: Score stages */}
-                          {(() => {
-                            const stagesGrid = '130px 80px 200px 1fr 90px';
-                            const cBase   = '#e6edf3';
-                            const cContra = risk.contradictionFactor < 1 ? '#f97316' : '#3fb950';
-                            const cAdj    = '#818cf8';
-                            const cHotDep = '#fb923c';
-                            const cRetry  = '#14b8a6';
-                            const cFinal  = risk.color;
-                            const tipBase   = 'Base Confidence: weighted sum of the 6 normalized subscores above, scaled to 0–100';
-                            const tipContra = 'Contradiction Factor: penalty applied when high CPU, memory, or thread-pool starvation indicates the issue is NOT SNAT-related';
-                            const tipAdj    = 'Adjusted Confidence: Base Confidence after applying Contradiction Factor';
-                            const tipHot    = 'Hot Dependency Factor: amplifies score when one dependency dominates traffic (likely SNAT bottleneck candidate)';
-                            const tipRetry  = 'Retry Storm Factor: amplifies score when dependency call volume far exceeds request volume (indicates retry loops)';
-                            const tipFinal  = 'Final Score = Adjusted Confidence × Hot Dependency Factor × Retry Storm Factor (capped at 100)';
-                            return (
-                              <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                                <div style={{ display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 3, marginBottom: 4 }}>
-                                  <span>Stage</span><span>Factor</span><span>Formula</span><span>Detail (substituted values → result)</span><span style={{ textAlign: 'right' }}>Value</span>
-                                </div>
-                                {([
-                                  {
-                                    stageColor: cBase,
-                                    stageTip: tipBase,
-                                    stage: 'Base Confidence',
-                                    multiplier: '',
-                                    multiplierColor: '#6e7681',
-                                    formula: '',
-                                    detail: '' as React.ReactNode,
-                                    value: risk.baseConfidence.toFixed(1),
-                                    color: cBase,
-                                  },
-                                  {
-                                    stageColor: cContra,
-                                    stageTip: tipContra,
-                                    stage: 'Contradiction',
-                                    multiplier: `×${risk.contradictionFactor.toFixed(2)}`,
-                                    multiplierColor: cContra,
-                                    formula: 'CPU Avg>85%→×0.7 · Memory Avg>90%→×0.8 · ThreadPool→×0.6',
-                                    detail: (
-                                      <>
-                                        <span style={{ color: CHART_COLORS.cpuAvg }} title="CPU Utilization (avg): comes from Azure Monitor CpuPercentage metric (App Service Performance → CPU Avg line)">CPU Utilization (avg) </span>
-                                        <span style={{ color: feCpuAvg >= 0 ? (feCpuAvg > 85 ? '#f97316' : CHART_COLORS.cpuAvg) : '#6e7681', fontWeight: 600 }} title="CPU Utilization (avg): comes from Azure Monitor CpuPercentage metric">{feCpuAvg >= 0 ? `${feCpuAvg.toFixed(1)}%` : 'N/A'}</span>
-                                        <span style={{ color: feCpuAvg > 85 ? '#f97316' : '#6e7681' }}>{feCpuAvg >= 0 ? (feCpuAvg > 85 ? ' >85% → ×0.7' : ' ≤85% (none)') : ''}</span>
-                                        <span style={{ color: '#6e7681' }}> · </span>
-                                        <span style={{ color: CHART_COLORS.memAvg }} title="Memory Utilization (avg): comes from Azure Monitor MemoryPercentage metric (App Service Performance → Mem Avg line)">Memory Utilization (avg) </span>
-                                        <span style={{ color: feMemAvg >= 0 ? (feMemAvg > 90 ? '#f97316' : CHART_COLORS.memAvg) : '#6e7681', fontWeight: 600 }} title="Memory Utilization (avg): comes from Azure Monitor MemoryPercentage metric">{feMemAvg >= 0 ? `${feMemAvg.toFixed(1)}%` : 'N/A'}</span>
-                                        <span style={{ color: feMemAvg > 90 ? '#f97316' : '#6e7681' }}>{feMemAvg >= 0 ? (feMemAvg > 90 ? ' >90% → ×0.8' : ' ≤90% (none)') : ''}</span>
-                                        <span style={{ color: '#6e7681' }}> · </span>
-                                        <span style={{ color: '#a5b4fc' }} title="Thread Pool Starvation: detected by pattern-matching SNAT/SQL exception messages for ThreadPool/ThreadAbort/Starvation strings">Thread Pool Starvation </span>
-                                        <span style={{ color: threadPoolStarvation ? '#f97316' : '#6e7681', fontWeight: 600 }} title="Thread Pool Starvation indicator">{threadPoolStarvation ? 'detected → ×0.6' : '(none)'}</span>
-                                      </>
-                                    ) as React.ReactNode,
-                                    value: `×${risk.contradictionFactor.toFixed(2)}`,
-                                    color: cContra,
-                                  },
-                                  {
-                                    stageColor: cAdj,
-                                    stageTip: tipAdj,
-                                    stage: 'Adjusted Confidence',
-                                    multiplier: '',
-                                    multiplierColor: '#6e7681',
-                                    formula: 'baseConfidence × contradictionFactor',
-                                    detail: (
-                                      <>
-                                        <span style={{ color: cBase }}>Base Confidence (</span>
-                                        <span style={{ color: cBase, fontWeight: 600 }} title={tipBase}>{risk.baseConfidence.toFixed(1)}</span>
-                                        <span style={{ color: cBase }}>) </span>
-                                        <span style={{ color: '#6e7681' }}>× </span>
-                                        <span style={{ color: cContra }}>Contradiction (</span>
-                                        <span style={{ color: cContra, fontWeight: 600 }} title={tipContra}>{risk.contradictionFactor.toFixed(2)}</span>
-                                        <span style={{ color: cContra }}>)</span>
-                                      </>
-                                    ) as React.ReactNode,
-                                    value: risk.adjustedConfidence.toFixed(1),
-                                    color: cAdj,
-                                  },
-                                  {
-                                    stageColor: cHotDep,
-                                    stageTip: tipHot,
-                                    stage: 'Hot Dependency',
-                                    multiplier: `×${risk.hotDepFactor.toFixed(2)}`,
-                                    multiplierColor: cHotDep,
-                                    formula: '1 + min(topDependency% / 100, 0.30)',
-                                    detail: (topDepTrafficPct > 0
-                                      ? (<>
-                                          <span style={{ color: '#6e7681' }}>1 + min(</span>
-                                          <span style={{ color: cHotDep, fontWeight: 600 }}>{topDepTrafficPct.toFixed(1)}%</span>
-                                          <span style={{ color: '#6e7681' }}> / 100, 0.30) = 1 + {Math.min(topDepTrafficPct / 100, 0.30).toFixed(3)}</span>
-                                        </>)
-                                      : detailsLoading && !detailsLoaded
-                                        ? <span style={{ color: '#6e7681' }}>calculating…</span>
-                                        : 'no dominant dependency → ×1.00') as React.ReactNode,
-                                    value: `×${risk.hotDepFactor.toFixed(2)}`,
-                                    color: cHotDep,
-                                  },
-                                  ...(topDeps[0] ? [{
-                                    stageColor: '#6e7681',
-                                    stageTip: `Top dependency by call volume: ${topDeps[0].name}${topDeps[0].target ? ` → ${topDeps[0].target}` : ''}`,
-                                    stage: '↳ Top Dependency %',
-                                    multiplier: '',
-                                    multiplierColor: '#6e7681',
-                                    formula: '',
-                                    detail: (<>
-                                      <span style={{ color: '#6e7681' }}>({topDeps[0].name} — {topDeps[0].totalCount.toLocaleString()} calls) / {feReqTotal.toLocaleString()} reqs = </span>
-                                      <span style={{ color: cHotDep, fontWeight: 600 }}>{topDepTrafficPct.toFixed(1)}%</span>
-                                    </>) as React.ReactNode,
-                                    value: '',
-                                    color: cHotDep,
-                                  }] : []),
-                                  {
-                                    stageColor: cRetry,
-                                    stageTip: tipRetry,
-                                    stage: 'Retry Storm',
-                                    multiplier: `×${risk.retryStormFactor.toFixed(2)}`,
-                                    multiplierColor: cRetry,
-                                    formula: '1 + min(max(ratio−3, 0) / 15, 0.25)',
-                                    detail: (risk.depCallRatio > 0
-                                      ? (<>
-                                          <span style={{ color: '#6e7681' }}>1 + min(max(</span>
-                                          <span style={{ color: cRetry, fontWeight: 600 }} title="Dependency Amplification Ratio: totalDependencies / totalRequests">{risk.depCallRatio.toFixed(1)}</span>
-                                          <span style={{ color: '#6e7681' }}> − 3, 0) / 15, 0.25) = 1 + min({(Math.max(risk.depCallRatio - 3, 0) / 15).toFixed(3)}, 0.25)</span>
-                                        </>)
-                                      : 'no dependency call data → ×1.00') as React.ReactNode,
-                                    value: `×${risk.retryStormFactor.toFixed(2)}`,
-                                    color: cRetry,
-                                  },
-                                  {
-                                    stageColor: '#6e7681',
-                                    stageTip: `Total dependency calls vs total requests in the selected period`,
-                                    stage: '↳ Dependency Amplification Ratio',
-                                    multiplier: '',
-                                    multiplierColor: '#6e7681',
-                                    formula: '',
-                                    detail: (<><span style={{ color: '#6e7681' }}>{(feInsight?.totalDependencies ?? 0).toLocaleString()} total dependency / {feReqTotal.toLocaleString()} total request = </span><span style={{ color: cRetry, fontWeight: 600 }}>{risk.depCallRatio.toFixed(1)}</span></>) as React.ReactNode,
-                                    value: '',
-                                    color: cRetry,
-                                  },
-                                ] as Array<{ stageColor: string; stageTip: string; stage: string; multiplier: string; multiplierColor: string; formula: string; detail: React.ReactNode; value: string; color: string }>).map((r, i) => (
-                                  <div key={i} style={{ display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, marginBottom: 3, paddingBottom: i === 1 ? 4 : 0, borderBottom: i === 1 ? '1px solid rgba(255,255,255,0.08)' : 'none' }}>
-                                    <span style={{ color: r.stageColor, fontWeight: 600 }} title={r.stageTip}>{r.stage}</span>
-                                    <span style={{ color: r.multiplierColor, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{r.multiplier}</span>
-                                    <span style={{ color: '#8b949e' }}>{r.formula}</span>
-                                    <span style={{ color: '#6e7681' }}>{r.detail}</span>
-                                    <span style={{ color: r.color, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }} title={r.stageTip}>{r.value}</span>
-                                  </div>
-                                ))}
-                                <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', marginTop: 'auto', paddingTop: 4, display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, fontWeight: 700 }}>
-                                  <span style={{ color: detailsLoading && !detailsLoaded ? '#6e7681' : cFinal }} title={tipFinal}>{detailsLoading && !detailsLoaded ? '—' : risk.label}</span>
-                                  <span />
-                                  <span />
-                                  <span />
-                                  <span style={{ color: detailsLoading && !detailsLoaded ? '#6e7681' : cFinal, textAlign: 'right' }} title={tipFinal}>{detailsLoading && !detailsLoaded ? 'calculating…' : `${risk.score.toFixed(1)} / 100`}</span>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                          </div>
-                          </div>
-                          {/* Section C: Severity guide */}
-                          <div style={{ marginTop: 5, textAlign: 'right' }}>
-                            <span style={{ color: '#3fb950' }}>0–20 Healthy</span>
-                            <span style={{ color: '#6e7681' }}> · </span>
-                            <span style={{ color: '#58a6ff' }}>21–40 Low</span>
-                            <span style={{ color: '#6e7681' }}> · </span>
-                            <span style={{ color: '#d29922' }}>41–60 Medium</span>
-                            <span style={{ color: '#6e7681' }}> · </span>
-                            <span style={{ color: '#e6773d' }}>61–80 High</span>
-                            <span style={{ color: '#6e7681' }}> · </span>
-                            <span style={{ color: '#f85149' }}>81–100 Critical</span>
-                          </div>
-                          {/* Section E: SNAT exception details */}
-                          {count > 0 && (
-                            <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
-                              <div style={{ color: '#6e7681', marginBottom: 4, fontWeight: 600 }}>SNAT Exceptions ({count})</div>
-                              {detailsLoading && !detailsLoaded
-                                ? <span style={{ fontStyle: 'italic', color: 'var(--muted-foreground)' }}>Loading…</span>
-                                : snatDetails.slice(0, 20).map((s, i) => (
-                                    <div key={i} style={{ display: 'grid', gridTemplateColumns: '45px 1fr 1fr', gap: 6, color: '#cdd9e5', marginBottom: 2 }}>
-                                      <span style={{ color: '#6e7681' }}>{new Date(s.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-                                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.operation_Name || '—'}</span>
-                                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#f85149' }}>{s.innermostMessage || s.outerMessage || '—'}</span>
-                                    </div>
-                                  ))
-                              }
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </>
-              );
-            })()}
+            {/* Restarts sit below Exceptions: a restart explains a gap the rows above
+                already showed you, and an App Crash here is often the same event the
+                exception list just named — so it reads as the answer to them rather than
+                as a fact on its own. The summary loads with the card; only the event
+                table and the detector's written findings wait for the expand. */}
+            {visibleBlocks.restarts && metrics.type === 'appservice' && (
+              <RestartRows
+                restarts={restarts}
+                loading={restartsLoading}
+                expanded={restartsExpanded}
+                // Expanding re-asks only when the eager fetch left us with nothing. A
+                // successful empty result is remembered by the hook's guard, so this
+                // retries a failed detector call without re-fetching a site that
+                // genuinely has no restart detector.
+                onToggle={() => setRestartsExpanded(v => { if (!v && !restarts) onRequestRestarts?.(); return !v; })}
+                syncId={hoverSyncId}
+              />
+            )}
+            {/* Only when the API is on its own plan (or there is no API) — a shared
+                plan puts one section in the main table instead. */}
+            {visibleBlocks.snat && metrics.type === 'appservice' && metrics.apiSharesPlan !== true && (
+              <SnatPortsRows
+                syncId={hoverSyncId}
+                snat={metrics.snat}
+                loading={snatLoading}
+                expanded={snatPortsExpanded}
+                onToggle={() => setSnatPortsExpanded(v => { if (!v) onRequestSnat?.(); return !v; })}
+              />
+            )}
             </tbody>
+            )}
           </table>
           </div>
           )}
 
-          {hasApi && visibleBlocks.api && (
-          <div className="rounded-md border border-border overflow-hidden">
+          {showApiBlock && (
+          <div className="rounded-md border border-border overflow-hidden min-w-0">
           <table className="w-full border-collapse [&_td]:px-3 [&_td]:py-1" style={{ tableLayout: 'fixed' }}><colgroup><col style={{ width: '40%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /><col style={{ width: '20%' }} /></colgroup>
             <thead>
-              <tr className="text-muted-foreground font-bold">
-                <td>API</td>
-                <td></td>
-                <td className="text-right">P99</td>
-                <td className="text-right">Max</td>
+              <tr
+                className="text-muted-foreground font-bold"
+                style={{ cursor: 'pointer' }}
+                onClick={() => setApiSectionOpen(v => !v)}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                title={apiSectionOpen ? 'Collapse API' : 'Expand API'}
+              >
+                <td colSpan={4}>
+                  API{apiSectionOpen
+                    ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                    : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                </td>
               </tr>
             </thead>
+            {apiSectionOpen && (
             <tbody>
-              {visibleBlocks.requests && apiHasInsights && (
-                <>
-                  <tr
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => { setRequestsAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; }); }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td className="text-muted-foreground font-bold">
-                      Requests{requestsAPIExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
-                    </td>
-                    {(() => {
-                      const ai = metrics.apiRequestInsights;
-                      const total4xx = ai?.total4xx ?? 0;
-                      const total5xx = ai?.total5xx ?? 0;
-                      const reqTotal = ai?.insight?.totalRequests ?? 0;
-                      const errTotal = total4xx + total5xx;
-                      const pct = reqTotal > 0 ? (errTotal / reqTotal * 100) : 0;
-                      return (
-                        <>
-                          <td className="text-right tabular-nums text-muted-foreground">—</td>
-                          <td className="text-right" style={{ color: '#58a6ff' }}>
-                            {fmtDuration(ai?.insight?.requestP99)}
-                          </td>
-                          {/* 5xx (% of total) / 4xx (% of total) / total */}
-                          <td
-                            className="text-right"
-                            style={{ whiteSpace: 'nowrap' }}
-                            title={`${total5xx.toLocaleString()} server errors (5xx) and ${total4xx.toLocaleString()} client errors (4xx) out of ${reqTotal.toLocaleString()} requests — ${pct.toFixed(2)}% failed overall.`}
-                          >
-                            {errTotal > 0
-                              ? <>
-                                  <span style={{ color: total5xx > 0 ? HTTP_5XX_COLOR : '#484f58', fontSize: 10 }}>{total5xx.toLocaleString()} ({fmtPct(total5xx, reqTotal)})</span>
-                                  <span style={{ color: '#484f58' }}> / </span>
-                                  <span style={{ color: total4xx > 0 ? HTTP_4XX_COLOR : '#484f58', fontSize: 10 }}>{total4xx.toLocaleString()} ({fmtPct(total4xx, reqTotal)})</span>
-                                  <span style={{ color: '#484f58' }}> / </span>
-                                  <span style={{ color: '#58a6ff' }}>{reqTotal.toLocaleString()}</span>
-                                </>
-                              : <span style={{ color: '#3fb950' }}>{reqTotal.toLocaleString()}</span>
-                            }
-                          </td>
-                        </>
-                      );
-                    })()}
-                  </tr>
-                  {requestsAPIExpanded && (
-                    <>
-                      <tr>
-                        <td colSpan={4} className="pb-1">
-                          {detailsLoading && !detailsLoaded
-                            ? <span className="text-[10px] text-muted-foreground italic">Loading details…</span>
-                            : !metrics.apiRequestInsights
-                            ? <span className="text-[10px] text-muted-foreground italic">Requires API App Insights Application ID in settings</span>
-                            : metrics.apiRequestInsights.error
-                              ? <span className="text-[10px] text-destructive">{metrics.apiRequestInsights.error}</span>
-                              : (() => {
-                                const ri = metrics.apiRequestInsights;
-                                return (
-                                  <div className="flex flex-col gap-1 pt-1">
-                                    <div className="flex gap-0.5 flex-wrap">
-                                      {(['requests', 'highfreq', 'http4xx', 'http5xx', 'bots'] as const).map(t => {
-                                        const labels: Record<string, string> = { highfreq: 'High Freq', http4xx: 'HTTP 4xx', http5xx: 'HTTP 5xx', requests: 'Top', bots: 'User Agents' };
-                                        const colors: Record<string, string> = { highfreq: '#a371f7', http4xx: '#f97316', http5xx: '#f85149', requests: '#58a6ff', bots: '#3fb950' };
-                                        const c = colors[t];
-                                        return (
-                                          <button
-                                            key={t}
-                                            onClick={() => setRequestsAPITab(t)}
-                                            style={{
-                                              background: requestsAPITab === t ? `${c}22` : 'none',
-                                              border: `1px solid ${requestsAPITab === t ? `${c}66` : 'transparent'}`,
-                                              color: requestsAPITab === t ? c : 'var(--muted-foreground)',
-                                              borderRadius: 4, padding: '1px 6px', fontSize: 9,
-                                              cursor: 'pointer', fontWeight: requestsAPITab === t ? 600 : 400,
-                                            }}
-                                          >{labels[t]}</button>
-                                        );
-                                      })}
-                                    </div>
-                                    {requestsAPITab === 'requests' && (
-                                      !Array.isArray(ri.urls) || ri.urls.length === 0
-                                        ? <span className="text-[10px] text-muted-foreground italic">No request data</span>
-                                        : <div className="flex flex-col gap-0.5">
-                                          {ri.urls.map((u, i) => (
-                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                              <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#58a6ff' }}>{u.rpm} rpm</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.count.toLocaleString()}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                    )}
-                                    {requestsAPITab === 'highfreq' && (
-                                      !Array.isArray(ri.highFreq) || ri.highFreq.length === 0
-                                        ? <span className="text-[10px] text-muted-foreground italic">No high-frequency traffic detected</span>
-                                        : <div className="flex flex-col gap-0.5">
-                                          {ri.highFreq.map((u, i) => {
-                                            const fmtSgt = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-                                            const start = new Date(u.timestamp);
-                                            const end = new Date(start.getTime() + 10 * 60 * 1000);
-                                            const isDowntime = downtimeIntervals.some(iv => start.getTime() < iv.end && end.getTime() > iv.start);
-                                            const textColor = isDowntime ? '#c0392b' : undefined;
-                                            const rep = ipReputations[u.ip];
-                                            return (
-                                              <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                                <div className="flex flex-col min-w-0 flex-1">
-                                                  <span className="truncate" style={{ color: textColor ?? 'var(--muted-foreground)' }}>
-                                                    {u.ip || '(unknown)'}{u.country ? ` - ${u.country}` : ''} · {fmtSgt(start)} → {fmtSgt(end)} SGT
-                                                    <IpRepBadges rep={rep} />
-                                                  </span>
-                                                  <span className="truncate opacity-70" style={{ color: textColor ?? 'var(--muted-foreground)' }}>{u.userAgent || '(unknown)'}</span>
-                                                </div>
-                                                <span style={{ color: isDowntime ? '#c0392b' : '#58a6ff' }} className="flex-shrink-0">{u.rpm} rpm</span>
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                    )}
-                                    {requestsAPITab === 'http4xx' && (
-                                      !Array.isArray(ri.failed4xxUrls) || ri.failed4xxUrls.length === 0
-                                        ? <span className="text-[10px] text-muted-foreground italic">No HTTP 4xx data</span>
-                                        : <div className="flex flex-col gap-0.5">
-                                          {ri.failed4xxUrls.map((u, i) => (
-                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                              <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#f97316' }}>{u.count.toLocaleString()}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                    )}
-                                    {requestsAPITab === 'http5xx' && (
-                                      Array.isArray(ri.failed5xxUrls) && ri.failed5xxUrls.length > 0
-                                        ? <div className="flex flex-col gap-0.5">
-                                          {ri.failed5xxUrls.map((u, i) => (
-                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                              <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={u.url}>{u.url}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{u.totalCount > 0 ? `${(u.count / u.totalCount * 100).toFixed(1)}%` : '—'}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#f85149' }}>{u.count.toLocaleString()}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                        : <span className="text-[10px] text-muted-foreground italic">No 5xx captured in App Insights — may be logged with resultCode 0 or missing</span>
-                                    )}
-                                    {requestsAPITab === 'bots' && (
-                                      !Array.isArray(ri.bots) || ri.bots.length === 0
-                                        ? <span className="text-[10px] text-muted-foreground italic">No bot traffic detected</span>
-                                        : <div className="flex flex-col gap-0.5">
-                                          {ri.bots.slice(0, 10).map((b, i) => (
-                                            <div key={i} className="flex items-center justify-between gap-2 text-[10px] border-b border-border/30 pb-0.5 mb-0.5 last:border-0 last:pb-0 last:mb-0">
-                                              <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }} title={b.userAgent}>{b.userAgent}</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#3fb950' }}>{b.rpm} rpm</span>
-                                              <span className="flex-shrink-0 tabular-nums" style={{ color: '#484f58' }}>{b.count.toLocaleString()}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                    )}
-                                  </div>
-                                );
-                              })()
-                          }
-                        </td>
-                      </tr>
-                    </>
-                  )}
-                </>
+              {/* Same drill-down as the FE section — see the comment there. Per App
+                  Insights resource, so the API's endpoints are its own. */}
+              {visibleBlocks.performance && apiHasInsights && (
+                <PerformanceRows
+                  perf={metrics.apiRequestInsights?.performance}
+                  expanded={perfAPIExpanded}
+                  onToggle={() => setPerfAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                  fmtMs={fmtDuration}
+                  fmtPct={fmtPct}
+                  syncId={hoverSyncId}
+                  deps={endpointDeps[`api|${perfApiSelected}`]}
+                  onRequestDeps={requestApiDeps}
+                  loading={detailsLoading && !detailsLoaded}
+                  error={metrics.apiRequestInsights?.error}
+                />
               )}
-              {metrics.apiConnections != null && (() => {
-                const a1 = apiConA1; const a2 = apiConA2;
-                const diff = a2 - a1;
-                const threshold = apiConHalfAvg(apiConPts) * 0.05;
-                const trend = apiConPts.length < 2 ? null : diff > threshold ? '↑' : diff < -threshold ? '↓' : '→';
-                const trendColor = trend === '↑' ? '#f85149' : '#3fb950';
-                const hasSeries = apiConPts.length > 1;
-                return (
-                  <>
-                    <tr
-                      style={{ cursor: hasSeries ? 'pointer' : 'default' }}
-                      onClick={() => hasSeries && setConnAPIExpanded(v => !v)}
-                      onMouseEnter={e => hasSeries && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <td className="text-muted-foreground font-bold" title="Connections: active outbound TCP connections from the App Service instance(s), sourced from Azure Monitor AppConnections metric. Growing connection counts can indicate SNAT port accumulation or connection pool leaks.">
-                        Connections
-                        {hasSeries && (connAPIExpanded
-                          ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                          : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        )}
-                      </td>
-                      <td className="text-right" style={{ whiteSpace: 'nowrap' }}>
-                        {trend
-                          ? <span style={{ fontSize: 10, color: trendColor }}>Trend - {Math.round(a1)} {trend} {Math.round(a2)}</span>
-                          : <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.p99)}</td>
-                      <td className="text-right" style={{ color: '#22d3ee' }}>{Math.round(+metrics.apiConnections.max)}</td>
-                    </tr>
-                    {connAPIExpanded && hasSeries && (
-                      <tr>
-                        <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 6 }}>
-                          <SeriesChart series={apiConPts} color="#22d3ee" name="Connections" height={130} />
-                          <div style={{ fontSize: 9, color: '#484f58', paddingLeft: 8 }}>
-                            Active outbound TCP connections — solid is the bucket peak, dashed the bucket average.
-                            {' '}Sustained growth with flat traffic is the SNAT / pooling signal the CPI watches for.
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                );
-              })()}
-              {visibleBlocks.dependencies && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
-                const apiInsight  = metrics.apiRequestInsights.insight;
-                if (!apiInsight) return null;
-                const depP99      = apiInsight.dependencyP99 ?? 0;
-                const depTotal    = apiInsight.totalDependencies ?? 0;
-                const depFailRate = apiInsight.dependencyFailureRate ?? 0;
-                const topDeps     = metrics.apiRequestInsights.topDependencies ?? [];
-                const failedDeps  = metrics.apiFailedDependencies ?? [];
-                const hasDetail   = topDeps.length > 0 || failedDeps.length > 0 || apiInsight.totalDependencies > 0 || apiInsight.failedDependencies > 0;
-                const filteredTopDeps    = topDeps.filter(d => d.classification === depsAPIFilter);
-                const filteredFailedDeps = failedDeps.filter(d => d.classification === depsAPIFilter);
-                return (
-                  <>
-                    <tr
-                      style={{ cursor: hasDetail ? 'pointer' : 'default' }}
-                      onClick={() => hasDetail && setDepsAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                      onMouseEnter={e => hasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <td className="text-muted-foreground font-bold">
-                        <span title="Dependencies: outbound calls made by the app to external services (SQL, HTTP APIs, storage, etc.), tracked by App Insights. Shows total call count, failure count, failure rate, and P99 latency. High failure or timeout rates are key CPI signals.">Dependencies</span>
-                        {hasDetail && (depsAPIExpanded
-                          ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                          : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        )}
-                      </td>
-                      <td className="text-right tabular-nums text-muted-foreground">—</td>
-                      <td className="text-right tabular-nums" style={{ color: depP99 > 5000 ? '#f85149' : depP99 > 1000 ? '#d29922' : '#58a6ff' }}>
-                        {depP99 > 0 ? fmtDuration(depP99) : '—'}
-                      </td>
-                      {/* failed (% of total) / timeout (% of total) / total */}
-                      <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
-                        {depTotal > 0 ? (() => {
-                          const depTO = (metrics.apiRequestInsights?.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
-                          return apiInsight.failedDependencies > 0 || depTO > 0
-                            ? <span title={`${apiInsight.failedDependencies.toLocaleString()} failed, of which ${depTO.toLocaleString()} timed out, out of ${depTotal.toLocaleString()} dependency calls — ${depFailRate.toFixed(2)}% failure rate.`}>
-                                <span style={{ color: apiInsight.failedDependencies > 0 ? DEP_FAILED_COLOR : '#484f58', fontSize: 10 }}>{apiInsight.failedDependencies.toLocaleString()} ({fmtPct(apiInsight.failedDependencies, depTotal)})</span>
-                                <span style={{ color: '#484f58' }}> / </span>
-                                <span style={{ color: depTO > 0 ? DEP_TIMEOUT_COLOR : '#484f58', fontSize: 10 }}>{depTO.toLocaleString()} ({fmtPct(depTO, depTotal)})</span>
-                                <span style={{ color: '#484f58' }}> / </span>
-                                <span style={{ color: DEP_TOTAL_COLOR }}>{depTotal.toLocaleString()}</span>
-                              </span>
-                            : <span style={{ color: '#3fb950' }}>{depTotal.toLocaleString()}</span>;
-                        })() : '—'}
-                      </td>
-                    </tr>
-                    {depsAPIExpanded && hasDetail && (
-                      <>
-                        {detailsLoading && !detailsLoaded && (
-                          <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
-                        )}
-                        {(!detailsLoading || detailsLoaded) && <tr>
-                          <td colSpan={4} style={{ paddingTop: 4, paddingBottom: 2 }}>
-                            <div className="flex gap-0.5">
-                              {([
-                                { key: 'topDeps',     label: 'Top',     color: '#58a6ff' },
-                                { key: 'failedDeps',  label: 'Failed',  color: '#f85149' },
-                                { key: 'timeoutDeps', label: 'Timeout', color: '#f97316' },
-                              ] as const).map(t => (
-                                <button
-                                  key={t.key}
-                                  onClick={e => { e.stopPropagation(); setDepsAPITab(t.key); }}
-                                  style={{
-                                    background: depsAPITab === t.key ? `${t.color}22` : 'none',
-                                    border: `1px solid ${depsAPITab === t.key ? `${t.color}66` : 'transparent'}`,
-                                    color: depsAPITab === t.key ? t.color : 'var(--muted-foreground)',
-                                    borderRadius: 4, padding: '1px 6px', fontSize: 9,
-                                    cursor: 'pointer', fontWeight: depsAPITab === t.key ? 600 : 400,
-                                  }}
-                                >{t.label}</button>
-                              ))}
-                            </div>
-                            {depsAPITab !== 'timeoutDeps' && <DepsFilterPills value={depsAPIFilter} onChange={setDepsAPIFilter} />}
-                          </td>
-                        </tr>}
-                        {detailsLoaded && depsAPITab === 'topDeps' && (
-                          filteredTopDeps.length === 0
-                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No {depsAPIFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsAPIFilter === 'internal' ? topDeps.some(d => d.classification === 'thirdParty') : topDeps.some(d => d.classification === 'internal')) ? ` — try ${depsAPIFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
-                            : filteredTopDeps.map((d, i) => (
-                              <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
-                                  {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
-                                </td>
-                                <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
-                                <td className="text-right tabular-nums">
-                                  {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
-                                </td>
-                              </tr>
-                            ))
-                        )}
-                        {detailsLoaded && depsAPITab === 'timeoutDeps' && (() => {
-                          const tDeps = (metrics.apiRequestInsights?.dependencyTimeouts ?? []).slice().sort((a, b) => b.count - a.count).slice(0, 10);
-                          return tDeps.length === 0
-                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No timeout dependencies</td></tr>
-                            : <>{tDeps.map((d, i) => (
-                              <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={d.name}>{d.name}</td>
-                                <td className="text-right tabular-nums text-muted-foreground">—</td>
-                                <td className="text-right tabular-nums text-muted-foreground">—</td>
-                                <td className="text-right tabular-nums" style={{ color: '#f97316' }}>{d.count.toLocaleString()}</td>
-                              </tr>
-                            ))}</>;
-                        })()}
-                        {detailsLoaded && depsAPITab === 'failedDeps' && (
-                          filteredFailedDeps.length === 0
-                            ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No failed {depsAPIFilter === 'internal' ? 'internal' : 'third-party'} dependencies{(depsAPIFilter === 'internal' ? failedDeps.some(d => d.classification === 'thirdParty') : failedDeps.some(d => d.classification === 'internal')) ? ` — try ${depsAPIFilter === 'internal' ? 'Third-Party' : 'Internal'}` : ''}</td></tr>
-                            : filteredFailedDeps.slice(0, 10).map((d, i) => (
-                              <tr key={i} style={{ borderTop: '1px solid rgba(255,255,255,0.04)', fontSize: 10 }}>
-                                <td className="truncate" style={{ color: 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={`${d.type ? `[${d.type}] ` : ''}${d.name}${d.target ? ` → ${d.target}` : ''}`}>
-                                  {d.name || '—'}{d.target ? <span style={{ color: '#6e7681' }}> → {d.target}</span> : null}
-                                </td>
-                                <td className="text-right tabular-nums text-muted-foreground">{spanMinutes > 0 ? (d.totalCount / spanMinutes).toFixed(1) + ' rpm' : '—'}</td>
-                                <td className="text-right tabular-nums" style={{ color: d.p99 >= 5000 ? '#f85149' : d.p99 > 1000 ? '#d29922' : '#58a6ff' }}>{fmtDuration(d.p99)}</td>
-                                <td className="text-right tabular-nums">
-                                  {d.totalCount > 0 ? (() => { const r = d.failCount / d.totalCount; const c = r >= 0.10 ? '#f85149' : d.failCount > 0 ? '#d29922' : '#3fb950'; return d.failCount > 0
-  ? <><span style={{ color: c, fontWeight: 400, fontSize: 10 }}>{d.failCount.toLocaleString()} ({(r * 100).toFixed(1)}%)</span><span style={{ color: '#3fb950' }}> / {d.totalCount.toLocaleString()}</span></>
-  : <span style={{ color: '#3fb950' }}>{d.totalCount.toLocaleString()}</span>; })() : '—'}
-                                </td>
-                              </tr>
-                            ))
-                        )}
-                      </>
-                    )}
-                  </>
-                );
-              })()}
+              {visibleBlocks.users && apiHasInsights && (
+                <UserRows
+                  users={metrics.apiRequestInsights?.userInsights}
+                  userAgents={metrics.apiRequestInsights?.userAgents}
+                  ipReputations={ipReputations}
+                  expanded={usersAPIExpanded}
+                  onToggle={() => setUsersAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                  syncId={hoverSyncId}
+                  loading={detailsLoading && !detailsLoaded}
+                  error={metrics.apiRequestInsights?.error}
+                />
+              )}
               {visibleBlocks.exceptions && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
                 const apiErrorTypes = metrics.apiRequestInsights.errorTypes ?? [];
                 const apiHasDetail  = apiErrorTypes.length > 0;
@@ -3288,19 +2297,22 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                       onMouseEnter={e => apiHasDetail && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                     >
-                      <td className="text-muted-foreground font-bold">
-                        <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
-                        {apiHasDetail && (errAPIExpanded
-                          ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                          : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        )}
+                      {/* One cell, as in the FE block above. */}
+                      <td colSpan={4}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-muted-foreground font-bold">
+                            <span title="Exceptions: unhandled application exceptions captured by App Insights, grouped by type. Split into four mutually exclusive tabs: Socket (transport failed, no connection), Timeout (connected, caller gave up waiting), OOM (out of memory), Unclassified (everything else). Counts sum to this total.">Exceptions</span>
+                            {apiHasDetail && (errAPIExpanded
+                              ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                              : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                            )}
+                          </span>
+                          <span className="tabular-nums" style={{ color: apiErrColor }} title={apiExcCounts.breakdown}>{apiErrorCount.toLocaleString()}</span>
+                        </div>
                       </td>
-                      <td className="text-right tabular-nums text-muted-foreground">—</td>
-                      <td className="text-right tabular-nums text-muted-foreground">—</td>
-                      <td className="text-right tabular-nums" style={{ color: apiErrColor }} title={apiExcCounts.breakdown}>{apiErrorCount.toLocaleString()}</td>
                     </tr>
                     {errAPIExpanded && apiHasDetail && detailsLoading && !detailsLoaded && (
-                      <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Loading details…</td></tr>
+                      <ListSkeletonRow />
                     )}
                     {errAPIExpanded && apiHasDetail && (!detailsLoading || detailsLoaded) && (
                       <>
@@ -3317,301 +2329,32 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
                   </>
                 );
               })()}
-              {visibleBlocks.snatRisk && metrics.type !== 'containerapp' && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
-                const snatDetails     = metrics.apiRequestInsights.snatDetails ?? [];
-                const count           = snatDetails.length;
-                const apiInsight      = metrics.apiRequestInsights.insight;
-                // Socket-layer only — application timeouts are scored by depTimeouts.
-                const apiSocketExc    = apiInsight?.socketLayerExceptions ?? 0;
-                const apiDepFailRate  = apiInsight?.dependencyFailureRate ?? 0;
-                const apiDepTimeouts  = (metrics.apiRequestInsights.dependencyTimeouts ?? []).reduce((s, d) => s + d.count, 0);
-                const apiDepP99Ms     = apiInsight?.dependencyP99         ?? 0;
-                const api5xx          = metrics.apiRequestInsights.total5xx ?? 0;
-                const apiReqTotal     = apiInsight?.totalRequests         ?? 0;
-                const api5xxRate      = apiReqTotal > 0 ? (api5xx / apiReqTotal) * 100 : 0;
-                const apiTopDeps      = metrics.apiRequestInsights.topDependencies ?? [];
-                const apiTopDepTrafficPct = (apiTopDeps[0] && apiReqTotal > 0) ? (apiTopDeps[0].totalCount / apiReqTotal * 100) : 0;
-                const apiThreadPoolStarvation = (metrics.apiRequestInsights.sqlHttpDetails ?? [])
-                  .some(d => /thread.?pool|threadabort|starvation/i.test(d.innermostMessage + d.outerMessage));
-                const risk = snatScore({
-                  socketExceptions: apiSocketExc,
-                  dependencyFailureRate: apiDepFailRate,
-                  dependencyTimeouts: apiDepTimeouts,
-                  dependencyP99Ms: apiDepP99Ms,
-                  connectionBaseline: apiConA1,
-                  connectionCurrent: apiConA2,
-                  http5xxRate: api5xxRate,
-                  cpuAvg: metrics.cpu.avg,
-                  memoryAvg: metrics.memUnit === '%' ? +metrics.memory.avg : -1,
-                  topDepTrafficPct: apiTopDepTrafficPct,
-                  threadPoolStarvation: apiThreadPoolStarvation,
-                  totalDependencies: apiInsight?.totalDependencies ?? 0,
-                  totalRequests: apiReqTotal,
-                });
-                const subscores = [
-                  { key: 'socket'  as const, label: 'Socket Exceptions',     raw: `${apiSocketExc}`,                 norm: risk.socketScore,     wt: 20, pts: 20 * risk.socketScore,     normFormulaRaw: `${apiSocketExc}`,                 normFormulaThreshold: '50 exceptions' },
-                  { key: 'depFail' as const, label: 'Dependencies Failure',  raw: `${apiDepFailRate.toFixed(1)}%`,   norm: risk.depFailScore,    wt: 25, pts: 25 * risk.depFailScore,    normFormulaRaw: `${apiDepFailRate.toFixed(1)}%`,    normFormulaThreshold: '20% fail rate' },
-                  { key: 'depTO'   as const, label: 'Dependencies Timeouts', raw: `${apiDepTimeouts}`,               norm: risk.depTimeoutScore, wt: 30, pts: 30 * risk.depTimeoutScore, normFormulaRaw: `${apiDepTimeouts}`,                normFormulaThreshold: '400 timeouts' },
-                  { key: 'depP99'  as const, label: 'Dependencies P99',      raw: fmtDuration(apiDepP99Ms),    norm: risk.depP99Score,     wt: 15, pts: 15 * risk.depP99Score,     normFormulaRaw: `${Math.round(apiDepP99Ms)}ms`,     normFormulaThreshold: '5000ms P99' },
-                  { key: 'conn'    as const, label: 'Connection Growth',     raw: `+${Math.round(risk.connGrowth)}`, norm: risk.connGrowthScore, wt: 5,  pts: 5  * risk.connGrowthScore, normFormulaRaw: `${Math.round(risk.connGrowth)}`,   normFormulaThreshold: '64 new conns' },
-                  { key: 'http5xx' as const, label: 'HTTP 5xx Rate',         raw: `${api5xxRate.toFixed(1)}%`,       norm: risk.http5xxScore,    wt: 5,  pts: 5  * risk.http5xxScore,    normFormulaRaw: `${api5xxRate.toFixed(1)}%`,        normFormulaThreshold: '5% error rate' },
-                ];
-                return (
-                  <>
-                    <tr
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => setSnatAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <td className="text-muted-foreground font-bold">
-                        <span title="Connection Pressure Index (CPI): measures the probability that SNAT port exhaustion or dependency connection pressure is contributing to failures. Combines socket-layer exceptions (0.20), dependency failure rate (0.25), dependency timeouts (0.30), P99 latency (0.15), connection growth (0.05), and HTTP 5xx rate (0.05) into a normalized 0–100 confidence score.">Connection Pressure Index</span>
-                        {snatAPIExpanded
-                          ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                          : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                        }
-                      </td>
-                      {(() => {
-                        const v = snatVerdict(risk.score, apiSocketExc);
-                        return (
-                          <td
-                            colSpan={2}
-                            className={v ? '' : 'text-right tabular-nums text-muted-foreground'}
-                            style={v ? { color: v.color, fontWeight: v.bold ? 700 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}
-                            title={v?.text}
-                          >{v ? v.text : '—'}</td>
-                        );
-                      })()}
-                      <td className="text-right tabular-nums" style={{ color: risk.color }}>{risk.score.toFixed(1)} - {risk.label}</td>
-                    </tr>
-                    {snatAPIExpanded && (
-                      <tr>
-                        <td colSpan={4} style={{ paddingBottom: 8, paddingTop: 2 }}>
-                          <div style={{ fontSize: 10, paddingLeft: 8, paddingRight: 8 }}>
-                            <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
-                            <div style={{ flex: '0 0 auto', minWidth: 320, display: 'flex', flexDirection: 'column' }}>
-                            {/* Section A: Normalized subscores */}
-                            <div style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 3, marginBottom: 4 }}>
-                              <span>Factor</span><span style={{ textAlign: 'right' }}>Raw Value</span><span style={{ paddingLeft: 8 }}>Formula</span><span style={{ textAlign: 'right' }}>Normalized</span><span style={{ textAlign: 'right' }}>Weight</span><span style={{ textAlign: 'right' }}>Points</span>
-                            </div>
-                            {subscores.map((b, i) => {
-                              const cc = b.pts >= 12 ? '#f85149' : b.pts >= 6 ? '#e6773d' : b.pts > 0 ? '#d29922' : '#3fb950';
-                              return (
-                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, marginBottom: 3 }}>
-                                  <span style={{ color: SNAT_FACTOR_COLORS[b.key], fontWeight: 600 }} title={SNAT_FACTOR_TIPS[b.key]}>{b.label}</span>
-                                  <span style={{ color: '#8b949e', textAlign: 'right' }}>{b.raw}</span>
-                                  <span style={{ color: '#6e7681', paddingLeft: 8 }}><em>{b.normFormulaRaw}</em> / <strong>{b.normFormulaThreshold}</strong></span>
-                                  <span style={{ color: '#6e7681', textAlign: 'right' }}>{b.norm.toFixed(2)}</span>
-                                  <span style={{ color: '#6e7681', textAlign: 'right' }}>{b.wt}%</span>
-                                  <span style={{ color: cc, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{b.pts.toFixed(1)}</span>
-                                </div>
-                              );
-                            })}
-                            <div style={{ display: 'grid', gridTemplateColumns: '130px 55px 120px 50px 35px auto', gap: 5, marginTop: 'auto', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-                              <span style={{ color: '#e6edf3', fontWeight: 700 }} title="Base Confidence: weighted sum of the 6 normalized subscores × 100">Base Confidence</span>
-                              <span />
-                              <span />
-                              <span />
-                              <span />
-                              <span style={{ color: '#e6edf3', textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }} title="Base Confidence: Σ (weight × norm_score) × 100">{risk.baseConfidence.toFixed(1)}</span>
-                            </div>
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0, borderLeft: '1px solid rgba(255,255,255,0.08)', paddingLeft: 16 }}>
-                            {/* Section B: Score stages */}
-                            {(() => {
-                              const stagesGrid = '130px 80px 200px 1fr 90px';
-                              const cBase   = '#e6edf3';
-                              const cContra = risk.contradictionFactor < 1 ? '#f97316' : '#3fb950';
-                              const cAdj    = '#818cf8';
-                              const cHotDep = '#fb923c';
-                              const cRetry  = '#14b8a6';
-                              const cFinal  = risk.color;
-                              const tipBase   = 'Base Confidence: weighted sum of the 6 normalized subscores above, scaled to 0–100';
-                              const tipContra = 'Contradiction Factor: penalty applied when high CPU, memory, or thread-pool starvation indicates the issue is NOT SNAT-related';
-                              const tipAdj    = 'Adjusted Confidence: Base Confidence after applying Contradiction Factor';
-                              const tipHot    = 'Hot Dependency Factor: amplifies score when one dependency dominates traffic (likely SNAT bottleneck candidate)';
-                              const tipRetry  = 'Retry Storm Factor: amplifies score when dependency call volume far exceeds request volume (indicates retry loops)';
-                              const tipFinal  = 'Final Score = Adjusted Confidence × Hot Dependency Factor × Retry Storm Factor (capped at 100)';
-                              return (
-                                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                                  <div style={{ display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 3, marginBottom: 4 }}>
-                                    <span>Stage</span><span>Factor</span><span>Formula</span><span>Detail (substituted values → result)</span><span style={{ textAlign: 'right' }}>Value</span>
-                                  </div>
-                                  {([
-                                    {
-                                      stageColor: cBase,
-                                      stageTip: tipBase,
-                                      stage: 'Base Confidence',
-                                      multiplier: '',
-                                      multiplierColor: '#6e7681',
-                                      formula: '',
-                                      detail: '' as React.ReactNode,
-                                      value: risk.baseConfidence.toFixed(1),
-                                      color: cBase,
-                                    },
-                                    {
-                                      stageColor: cContra,
-                                      stageTip: tipContra,
-                                      stage: 'Contradiction',
-                                      multiplier: `×${risk.contradictionFactor.toFixed(2)}`,
-                                      multiplierColor: cContra,
-                                      formula: 'CPU Avg>85%→×0.7 · Memory Avg>90%→×0.8 · ThreadPool→×0.6',
-                                      detail: (
-                                        <>
-                                          <span style={{ color: CHART_COLORS.cpuAvg }} title="CPU Utilization (avg): shared App Service Plan resource — same value as FE">CPU Utilization (avg) </span>
-                                          <span style={{ color: metrics.cpu.avg >= 0 ? (metrics.cpu.avg > 85 ? '#f97316' : CHART_COLORS.cpuAvg) : '#6e7681', fontWeight: 600 }} title="CPU Utilization (avg): shared App Service Plan resource">{metrics.cpu.avg >= 0 ? `${metrics.cpu.avg.toFixed(1)}%` : 'N/A'}</span>
-                                          <span style={{ color: metrics.cpu.avg > 85 ? '#f97316' : '#6e7681' }}>{metrics.cpu.avg >= 0 ? (metrics.cpu.avg > 85 ? ' >85% → ×0.7' : ' ≤85% (none)') : ''}</span>
-                                          <span style={{ color: '#6e7681' }}> · </span>
-                                          <span style={{ color: CHART_COLORS.memAvg }} title="Memory Utilization (avg): shared App Service Plan resource — same value as FE">Memory Utilization (avg) </span>
-                                          {(() => { const apiMemAvg = metrics.memUnit === '%' ? +metrics.memory.avg : -1; return (<><span style={{ color: apiMemAvg >= 0 ? (apiMemAvg > 90 ? '#f97316' : CHART_COLORS.memAvg) : '#6e7681', fontWeight: 600 }} title="Memory Utilization (avg): shared App Service Plan resource">{apiMemAvg >= 0 ? `${apiMemAvg.toFixed(1)}%` : 'N/A'}</span><span style={{ color: apiMemAvg > 90 ? '#f97316' : '#6e7681' }}>{apiMemAvg >= 0 ? (apiMemAvg > 90 ? ' >90% → ×0.8' : ' ≤90% (none)') : ''}</span></>); })()}
-                                          <span style={{ color: '#6e7681' }}> · </span>
-                                          <span style={{ color: '#a5b4fc' }} title="Thread Pool Starvation: detected by pattern-matching SNAT/SQL exception messages for ThreadPool/ThreadAbort/Starvation strings">Thread Pool Starvation </span>
-                                          <span style={{ color: apiThreadPoolStarvation ? '#f97316' : '#6e7681', fontWeight: 600 }} title="Thread Pool Starvation indicator">{apiThreadPoolStarvation ? 'detected → ×0.6' : '(none)'}</span>
-                                        </>
-                                      ) as React.ReactNode,
-                                      value: risk.contradictionReasons.length > 0 ? risk.contradictionReasons.join(', ') : 'None',
-                                      color: cContra,
-                                    },
-                                    {
-                                      stageColor: cAdj,
-                                      stageTip: tipAdj,
-                                      stage: 'Adjusted Confidence',
-                                      multiplier: '',
-                                      multiplierColor: '#6e7681',
-                                      formula: 'baseConfidence × contradictionFactor',
-                                      detail: (
-                                        <>
-                                          <span style={{ color: cBase }}>Base Confidence (</span>
-                                          <span style={{ color: cBase, fontWeight: 600 }} title={tipBase}>{risk.baseConfidence.toFixed(1)}</span>
-                                          <span style={{ color: cBase }}>) </span>
-                                          <span style={{ color: '#6e7681' }}>× </span>
-                                          <span style={{ color: cContra }}>Contradiction (</span>
-                                          <span style={{ color: cContra, fontWeight: 600 }} title={tipContra}>{risk.contradictionFactor.toFixed(2)}</span>
-                                          <span style={{ color: cContra }}>)</span>
-                                        </>
-                                      ) as React.ReactNode,
-                                      value: risk.adjustedConfidence.toFixed(1),
-                                      color: cAdj,
-                                    },
-                                    {
-                                      stageColor: cHotDep,
-                                      stageTip: tipHot,
-                                      stage: 'Hot Dependency',
-                                      multiplier: `×${risk.hotDepFactor.toFixed(2)}`,
-                                      multiplierColor: cHotDep,
-                                      formula: '1 + min(topDependency% / 100, 0.30)',
-                                      detail: (apiTopDepTrafficPct > 0
-                                        ? (<>
-                                            <span style={{ color: '#6e7681' }}>1 + min(</span>
-                                            <span style={{ color: cHotDep, fontWeight: 600 }}>{apiTopDepTrafficPct.toFixed(1)}%</span>
-                                            <span style={{ color: '#6e7681' }}> / 100, 0.30) = 1 + {Math.min(apiTopDepTrafficPct / 100, 0.30).toFixed(3)}</span>
-                                          </>)
-                                        : detailsLoading && !detailsLoaded
-                                          ? <span style={{ color: '#6e7681' }}>calculating…</span>
-                                          : 'no dominant dependency → ×1.00') as React.ReactNode,
-                                      value: `×${risk.hotDepFactor.toFixed(2)}`,
-                                      color: cHotDep,
-                                    },
-                                    ...(apiTopDeps[0] ? [{
-                                      stageColor: '#6e7681',
-                                      stageTip: `Top dependency by call volume: ${apiTopDeps[0].name}${apiTopDeps[0].target ? ` → ${apiTopDeps[0].target}` : ''}`,
-                                      stage: '↳ Top Dependency %',
-                                      multiplier: '',
-                                      multiplierColor: '#6e7681',
-                                      formula: '',
-                                      detail: (<>
-                                        <span style={{ color: '#6e7681' }}>({apiTopDeps[0].name} — {apiTopDeps[0].totalCount.toLocaleString()} calls) / {apiReqTotal.toLocaleString()} reqs = </span>
-                                        <span style={{ color: cHotDep, fontWeight: 600 }}>{apiTopDepTrafficPct.toFixed(1)}%</span>
-                                      </>) as React.ReactNode,
-                                      value: '',
-                                      color: cHotDep,
-                                    }] : []),
-                                    {
-                                      stageColor: cRetry,
-                                      stageTip: tipRetry,
-                                      stage: 'Retry Storm',
-                                      multiplier: `×${risk.retryStormFactor.toFixed(2)}`,
-                                      multiplierColor: cRetry,
-                                      formula: '1 + min(max(ratio−3, 0) / 15, 0.25)',
-                                      detail: (risk.depCallRatio > 0
-                                        ? (<>
-                                            <span style={{ color: '#6e7681' }}>1 + min(max(</span>
-                                            <span style={{ color: cRetry, fontWeight: 600 }} title="Dependency Amplification Ratio: totalDependencies / totalRequests">{risk.depCallRatio.toFixed(1)}</span>
-                                            <span style={{ color: '#6e7681' }}> − 3, 0) / 15, 0.25) = 1 + min({(Math.max(risk.depCallRatio - 3, 0) / 15).toFixed(3)}, 0.25)</span>
-                                          </>)
-                                        : 'no dependency call data → ×1.00') as React.ReactNode,
-                                      value: `×${risk.retryStormFactor.toFixed(2)}`,
-                                      color: cRetry,
-                                    },
-                                    {
-                                      stageColor: '#6e7681',
-                                      stageTip: `Total dependency calls vs total requests in the selected period`,
-                                      stage: '↳ Dependency Amplification Ratio',
-                                      multiplier: '',
-                                      multiplierColor: '#6e7681',
-                                      formula: '',
-                                      detail: (<><span style={{ color: '#6e7681' }}>{(apiInsight?.totalDependencies ?? 0).toLocaleString()} total dependency / {apiReqTotal.toLocaleString()} total request = </span><span style={{ color: cRetry, fontWeight: 600 }}>{risk.depCallRatio.toFixed(1)}</span></>) as React.ReactNode,
-                                      value: '',
-                                      color: cRetry,
-                                    },
-                                  ] as Array<{ stageColor: string; stageTip: string; stage: string; multiplier: string; multiplierColor: string; formula: string; detail: React.ReactNode; value: string; color: string }>).map((r, i) => (
-                                    <div key={i} style={{ display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, marginBottom: 3, paddingBottom: i === 1 ? 4 : 0, borderBottom: i === 1 ? '1px solid rgba(255,255,255,0.08)' : 'none' }}>
-                                      <span style={{ color: r.stageColor, fontWeight: 600 }} title={r.stageTip}>{r.stage}</span>
-                                      <span style={{ color: r.multiplierColor, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{r.multiplier}</span>
-                                      <span style={{ color: '#8b949e' }}>{r.formula}</span>
-                                      <span style={{ color: '#6e7681' }}>{r.detail}</span>
-                                      <span style={{ color: r.color, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }} title={r.stageTip}>{r.value}</span>
-                                    </div>
-                                  ))}
-                                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', marginTop: 'auto', paddingTop: 4, display: 'grid', gridTemplateColumns: stagesGrid, gap: 5, fontWeight: 700 }}>
-                                    <span style={{ color: detailsLoading && !detailsLoaded ? '#6e7681' : cFinal }} title={tipFinal}>{detailsLoading && !detailsLoaded ? '—' : risk.label}</span>
-                                    <span />
-                                    <span />
-                                    <span />
-                                    <span style={{ color: detailsLoading && !detailsLoaded ? '#6e7681' : cFinal, textAlign: 'right' }} title={tipFinal}>{detailsLoading && !detailsLoaded ? 'calculating…' : `${risk.score.toFixed(1)} / 100`}</span>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                            </div>
-                            </div>
-                            {/* Section C: Severity guide */}
-                            <div style={{ marginTop: 5, textAlign: 'right' }}>
-                              <span style={{ color: '#3fb950' }}>0–20 Healthy</span>
-                              <span style={{ color: '#6e7681' }}> · </span>
-                              <span style={{ color: '#58a6ff' }}>21–40 Low</span>
-                              <span style={{ color: '#6e7681' }}> · </span>
-                              <span style={{ color: '#d29922' }}>41–60 Medium</span>
-                              <span style={{ color: '#6e7681' }}> · </span>
-                              <span style={{ color: '#e6773d' }}>61–80 High</span>
-                              <span style={{ color: '#6e7681' }}> · </span>
-                              <span style={{ color: '#f85149' }}>81–100 Critical</span>
-                            </div>
-                            {/* Section E: SNAT exception details */}
-                            {count > 0 && (
-                              <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 6 }}>
-                                <div style={{ color: '#6e7681', marginBottom: 4, fontWeight: 600 }}>SNAT Exceptions ({count})</div>
-                                {detailsLoading && !detailsLoaded
-                                  ? <span style={{ fontStyle: 'italic', color: 'var(--muted-foreground)' }}>Loading…</span>
-                                  : snatDetails.slice(0, 20).map((s, i) => (
-                                      <div key={i} style={{ display: 'grid', gridTemplateColumns: '45px 1fr 1fr', gap: 6, color: '#cdd9e5', marginBottom: 2 }}>
-                                        <span style={{ color: '#6e7681' }}>{new Date(s.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.operation_Name || '—'}</span>
-                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#f85149' }}>{s.innermostMessage || s.outerMessage || '—'}</span>
-                                      </div>
-                                    ))
-                                }
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                );
-              })()}
+              {/* Below Exceptions, as in the FE block above. */}
+              {visibleBlocks.restarts && (appConfig?.apiType || 'appservice') === 'appservice' && (
+                <RestartRows
+                  restarts={apiRestarts}
+                  loading={restartsLoading}
+                  expanded={restartsAPIExpanded}
+                  onToggle={() => setRestartsAPIExpanded(v => { if (!v && !apiRestarts) onRequestRestarts?.(); return !v; })}
+                  syncId={hoverSyncId}
+                />
+              )}
+              {/* Own plan only: on a shared plan these figures would repeat the
+                  frontend's, and the main table carries them once instead. */}
+              {visibleBlocks.snat && (appConfig?.apiType || 'appservice') === 'appservice' && metrics.apiSharesPlan === false && (
+                <SnatPortsRows
+                  syncId={hoverSyncId}
+                  snat={metrics.apiSnat}
+                  loading={snatLoading}
+                  expanded={snatApiPortsExpanded}
+                  onToggle={() => setSnatApiPortsExpanded(v => { if (!v) onRequestSnat?.(); return !v; })}
+                />
+              )}
             </tbody>
+            )}
           </table>
+          </div>
+          )}
           </div>
           )}
         </div>
@@ -3620,29 +2363,63 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
       </div>
 
       {visibleBlocks.remarks && (
-        <div className="px-4 pt-3 pb-3" data-remarks>
-          <div className="flex items-start gap-2">
-            <div className="flex-1 min-w-0">
-              {aiRemark ? (
-                <div className="text-xs">
-                  <span className="text-muted-foreground font-bold">Remarks (AI): </span>
-                  <span style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>{aiRemark.remarks}</span>
-                </div>
-              ) : (
-                <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} />
-              )}
-            </div>
-            <button
-              onClick={generateAiRemarks}
-              disabled={aiRemarkLoading}
-              className="p-1 rounded hover:bg-muted flex-shrink-0 disabled:opacity-50"
-              title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
-              data-html2canvas-ignore="true"
+        <div className="px-4 pb-3" data-remarks>
+          {/* Same bordered card as the DB / FE / API / RCA blocks: the header carries
+              the "Remarks" label, so the body renders the text without its own prefix. */}
+          <div className="rounded-md border border-border overflow-hidden">
+            <div
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-muted-foreground cursor-pointer"
+              onClick={() => setRemarksOpen(v => !v)}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              title={remarksOpen ? 'Collapse Remarks' : 'Expand Remarks'}
             >
-              <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-blue-400' : 'text-muted-foreground'}`} />
-            </button>
+              <span>Remarks{aiRemark ? ' (AI)' : ''}</span>
+              {remarksOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              <button
+                onClick={e => { e.stopPropagation(); generateAiRemarks(); }}
+                disabled={aiRemarkLoading}
+                className="ml-auto p-0.5 rounded hover:bg-muted flex-shrink-0 disabled:opacity-50"
+                title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
+                data-html2canvas-ignore="true"
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-blue-400' : 'text-muted-foreground'}`} />
+              </button>
+            </div>
+            {remarksOpen && (
+              <div className="border-t border-border px-3 py-2">
+                {aiRemark ? (
+                  <div className="text-xs" style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>
+                    {aiRemark.remarks}
+                  </div>
+                ) : (
+                  <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} hideLabel />
+                )}
+              </div>
+            )}
           </div>
         </div>
+      )}
+
+      <RcaSection
+        open={rcaSectionOpen}
+        onToggle={() => setRcaSectionOpen(v => !v)}
+        status={rcaStatus}
+        markdown={rcaText}
+        stages={rcaStages}
+        error={rcaError}
+        onGenerate={(notes, given) => void handleRunRca(notes, 'business', given)}
+        onDraftChange={setRcaDraft}
+        defaultTitle={`${platformName} Downtime`}
+        defaultServices={(platformUrls.length ? platformUrls : [platformName, appConfig?.apiName].filter(Boolean)).join(', ')}
+        period={incidentPeriod}
+        periodSource={urDowntimeIntervals.length > 0 ? 'uptimerobot' : downtimeIntervals.length > 0 ? 'azure' : 'none'}
+        onExportPdf={exportRcaPdf}
+        onExportWord={exportRcaWord}
+        onCopyTeams={copyRcaForTeams}
+        onCopySummary={copySummaryForTeams}
+      />
+      </>
       )}
 
     </Card>
@@ -3651,7 +2428,7 @@ export function AzureAppCard({ appKey, metrics, loading, detailsLoading = false,
     <RcaDialog
       open={rcaOpen}
       onOpenChange={setRcaOpen}
-      title={resourceGroup || metrics.label}
+      title={platformName}
       status={rcaStatus}
       markdown={rcaText}
       stages={rcaStages}

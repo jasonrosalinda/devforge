@@ -543,6 +543,16 @@ describe('buildRcaPrompt', () => {
     expect(instructions).not.toMatch(/^## (9|10)\. /m);
   });
 
+  // The engineering layout is the default: the RCA dialog's report is untouched by
+  // the card section's business-format option.
+  it('defaults to the engineering layout, never the business one', () => {
+    for (const p of [prompt(), buildRcaPrompt(render(makeData()), '', {}), buildRcaPrompt(render(makeData()), '', { format: 'engineering' })]) {
+      expect(p).toContain('# Root Cause Analysis Report');
+      expect(p).not.toContain('# RCA Report:');
+      expect(p).not.toContain('**Incident number:**');
+    }
+  });
+
   // Analyst notes are optional context typed in the RCA dialog. Absent, the prompt
   // must not carry an empty section or hint at notes that were never supplied.
   it('omits the analyst-notes section when no notes are given', () => {
@@ -564,5 +574,207 @@ describe('buildRcaPrompt', () => {
     expect(p).toMatch(/CONTRADICT the telemetry/);
     expect(p).toMatch(/no figure may originate from them/);
     expect(p).toMatch(/include that candidate in the differential diagnosis/);
+  });
+});
+
+// The card's RCA section renders the report as a form, so it asks for the formal
+// seven-section incident report rather than the engineering layout.
+describe('buildRcaPrompt - business format', () => {
+  const bizPrompt = (notes = '', meta = {}) =>
+    buildRcaPrompt(render(makeData()), notes, { format: 'business', ...meta });
+  const bizInstructions = () => bizPrompt().split('## TELEMETRY REPORT')[0];
+
+  it('produces the RCA Report title and the metadata header block', () => {
+    const p = bizPrompt('', { incidentNumber: 'INC-202607-004' });
+    expect(p).toContain('# RCA Report:');
+    expect(p).toContain('## Root Cause Analysis (RCA)');
+    for (const field of ['**Incident number:**', '**Incident:**', '**Services Affected:**', '**Incident Period:**', '**Severity:**']) {
+      expect(p).toContain(field);
+    }
+    expect(p).toContain('INC-202607-004');
+    expect(p).toMatch(/do not invent, renumber, or reformat it/);
+    // Without one the prompt still has to tell the model how to shape it.
+    expect(bizPrompt()).toMatch(/INC-<YYYYMM of the incident start, SGT>-001/);
+  });
+
+  it('asks for the 7 sections, ending at current status', () => {
+    const instructions = bizInstructions();
+    for (const heading of [
+      '## 1. Background', '## 2. Impact', '## 3. Root Cause', '## 4. Resolution',
+      '## 5. Lessons Learned', '## 6. Preventive Actions', '## 7. Current Status',
+    ]) {
+      expect(instructions).toContain(heading);
+    }
+    expect(instructions).not.toMatch(/^## 8\. /m);
+    expect(instructions).not.toMatch(/## 1\. Executive Summary/);
+    expect(instructions).not.toMatch(/evidence matrix/);
+  });
+
+  // The Quick Summary is derived from the root-cause section, numbered 3 in this
+  // layout and 2 in the engineering one.
+  it('points the Quick Summary at section 3', () => {
+    const instructions = bizInstructions();
+    expect(instructions).toMatch(/section 3 FIRST/);
+    expect(instructions).toMatch(/Never contradict section 3/i);
+    expect(instructions).not.toMatch(/section 2 FIRST/);
+  });
+
+  // The business layout closes with the Tracker, not section 7. Naming section 7 as the
+  // last line told the model to stop early and the Tracker never appeared.
+  it('ends the business report at the Tracker, and the engineering one at section 8', () => {
+    expect(bizInstructions()).toMatch(/final line of the Tracker section/);
+    expect(bizInstructions()).not.toMatch(/final line of section 7/);
+    expect(buildRcaPrompt(render(makeData()), '')).toMatch(/final line of section 8/);
+  });
+
+  // Human events (a user report, when the team started looking) are not in the
+  // telemetry - the background narrative must not manufacture them.
+  it('bars invented human events from the background narrative', () => {
+    const instructions = bizInstructions();
+    expect(instructions).toMatch(/chronological narrative/);
+    expect(instructions).toMatch(/never invent them/);
+  });
+
+  // A business figure is cited or left out — never estimated, and never turned into
+  // a list of follow-up work at the end of the impact section.
+  it('bars estimated business figures and a follow-up list', () => {
+    const instructions = bizInstructions();
+    expect(instructions).not.toMatch(/Following actions/);
+    expect(instructions).toMatch(/never estimate one/i);
+    expect(instructions).toMatch(/never end with work still to be done/);
+  });
+
+  // Impact is the section a manager reads first: the worst-hit page with its real
+  // numbers, then everyone else, in a few sentences.
+  it('keeps impact short, specific and free of other sections\' material', () => {
+    const instructions = bizInstructions();
+    const impact = instructions.slice(instructions.indexOf('## 2. Impact'), instructions.indexOf('## 3. Root Cause'));
+    expect(impact).toMatch(/Two to four sentences/);
+    expect(impact).toMatch(/no headings, no table, no list/);
+    expect(impact).toMatch(/failure rate and attempt count/);
+    expect(impact).toMatch(/the wider front-end user population/);
+    expect(impact).toMatch(/No background, no causes, no timeline narration, no remediation/);
+  });
+
+  // The cause, then how it played out, then at most three contributing factors. The
+  // differential belongs to the engineering layout, not this one.
+  it('keeps root cause brief and drops the ruled-out write-up', () => {
+    const instructions = bizInstructions();
+    const cause = instructions.slice(instructions.indexOf('## 3. Root Cause'), instructions.indexOf('## 4. Resolution'));
+    expect(cause).toMatch(/single \*\*primary cause\*\*/);
+    expect(cause).toMatch(/Two to four sentences, no more/i);
+    expect(cause).toMatch(/No preamble, no method, no restating the impact/);
+    expect(cause).toMatch(/at most three/);
+    expect(cause).toMatch(/No explanation beyond the line itself/);
+    // The elimination reasoning is a decision aid, explicitly not output.
+    expect(cause).toMatch(/Do not list the candidates you considered and eliminated/);
+    expect(cause).toMatch(/publish only the conclusion/);
+    expect(cause).not.toMatch(/name the candidates you \*\*ruled out\*\*/);
+  });
+
+  // Nothing in the summary may promise a differential this layout never writes.
+  it('drops the Quick Summary Ruled out row', () => {
+    expect(bizInstructions()).not.toMatch(/\| Ruled out \|/);
+    // The engineering layout keeps both.
+    const eng = buildRcaPrompt(render(makeData())).split('## TELEMETRY REPORT')[0];
+    expect(eng).toMatch(/\| Ruled out \|/);
+    expect(eng).toContain('differential diagnosis');
+  });
+
+  it('asks for preventive actions as a hyphen-bulleted list', () => {
+    const instructions = bizInstructions();
+    const preventive = instructions.slice(instructions.indexOf('## 6. Preventive Actions'), instructions.indexOf('## 7. Current Status'));
+    expect(preventive).toMatch(/A bulleted list/);
+    expect(preventive).toMatch(/beginning with a hyphen and a space/);
+    expect(preventive).toMatch(/No introductory sentence before the list/);
+  });
+
+  // Sections must not repeat each other, and short beats exhaustive.
+  it('confines each section to its own material and rewards brevity', () => {
+    const instructions = bizInstructions();
+    expect(instructions).toMatch(/Every section answers only its own question/);
+    expect(instructions).toMatch(/A fact belongs to exactly one section/);
+    expect(instructions).toMatch(/Concise beats complete/);
+    expect(instructions).toMatch(/Every number appears once/);
+  });
+
+  // The engineer names the incident in the card, and the report has to be about that
+  // incident rather than whatever else the window contains.
+  it('makes the named incident the subject of the analysis', () => {
+    const p = bizPrompt('', { incidentName: 'MEDU Downtime' });
+    expect(p).toContain('## THE INCIDENT UNDER ANALYSIS');
+    expect(p).toContain('This report analyses one specific incident: **MEDU Downtime**');
+    expect(p).toContain('**Incident:** MEDU Downtime');
+    expect(p).toMatch(/Use that incident name exactly as given/);
+    // Every part of the report speaks to the named symptom, anchored to the period.
+    expect(p).toMatch(/must all speak to that same symptom/);
+    expect(p).toMatch(/Anchor the analysis to the incident period/);
+    // Unrelated anomalies are set aside, not written up as this incident.
+    expect(p).toMatch(/do not belong in this report/);
+    // No evidence of the named symptom is a finding, not a licence to substitute one.
+    expect(p).toMatch(/Insufficient data rather than substituting a different incident/);
+    // It is read before the report layout.
+    expect(p.indexOf('## THE INCIDENT UNDER ANALYSIS')).toBeLessThan(p.indexOf('# RCA Report:'));
+  });
+
+  it('omits the subject block when no incident is named', () => {
+    const p = bizPrompt();
+    expect(p).not.toContain('THE INCIDENT UNDER ANALYSIS');
+    expect(p).toContain('**Incident:** <the same incident name as the title>');
+  });
+
+  // The card measures the outage window from UptimeRobot downtime and configures the
+  // platform's name and URLs, so the model reproduces them rather than deriving a
+  // wider window or guessing a name.
+  it('carries the measured period, services and title verbatim when given', () => {
+    const p = bizPrompt('', {
+      incidentPeriod: '2026-07-29 16:00 SGT \u2192 2026-07-29 17:23 SGT',
+      servicesAffected: 'https://mims-cpd.com',
+      reportTitle: 'MIMS CPD Downtime',
+    });
+    expect(p).toContain('**Incident Period:** 2026-07-29 16:00 SGT \u2192 2026-07-29 17:23 SGT');
+    expect(p).toMatch(/MEASURED outage/);
+    expect(p).toMatch(/Do not recompute or round it/);
+    expect(p).toContain('**Services Affected:** https://mims-cpd.com');
+    expect(p).toContain('Use this exact title: "MIMS CPD Downtime"');
+  });
+
+  // Without them the prompt still has to keep the period off the whole window.
+  it('falls back to the confirmed downtime intervals, not the telemetry window', () => {
+    const p = bizPrompt();
+    expect(p).toMatch(/confirmed downtime intervals in the telemetry, not the whole window/);
+    expect(p).toMatch(/names the incident in business terms/);
+    expect(p).not.toMatch(/Use this exact title/);
+  });
+});
+
+// The Tracker is the record that closes the business report. It used to be the engineer's
+// alone; the generated run now drafts it, so the prompt has to ask for it — and has to say
+// that anything the engineer already wrote is reproduced rather than rewritten.
+describe('buildRcaPrompt - tracker section', () => {
+  const biz = (notes = '') => buildRcaPrompt(render(makeData()), notes, { format: 'business' });
+
+  it('asks for the Tracker heading and all five labelled fields', () => {
+    const p = biz();
+    expect(p).toContain('## Tracker');
+    for (const label of [
+      'Detection / Symptoms', 'Root Cause Identified', 'Corrective Action Taken',
+      'Preventive / Improvement Action', 'Measurable Outcome',
+    ]) {
+      expect(p).toContain(label);
+    }
+  });
+
+  it('forbids the tracker introducing anything the report did not establish', () => {
+    expect(biz()).toMatch(/must not introduce a cause, an action or a figure that appears nowhere above it/);
+    expect(biz()).toMatch(/not established/);
+  });
+
+  it('tells the model to reproduce the analyst\'s own tracker wording', () => {
+    expect(biz()).toMatch(/reproduce their wording for that field and do not rewrite it/);
+  });
+
+  it('does not ask the engineering layout for a tracker', () => {
+    expect(buildRcaPrompt(render(makeData()), '')).not.toContain('## Tracker');
   });
 });

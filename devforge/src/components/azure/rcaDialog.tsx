@@ -49,7 +49,7 @@ export function RcaDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <ScanSearch className="h-4 w-4 text-[#58a6ff]" />
-            RCA Report — {title}
+            Downtime RCA Report (AI) — {title}
           </DialogTitle>
         </DialogHeader>
 
@@ -162,7 +162,15 @@ export function RcaDialog({
           </Button>
         </div>
 
-        <style>{`
+        <style>{RCA_STYLES}</style>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Shared by the dialog and the in-card RCA section, so the rendered markdown
+ *  looks identical in both places. */
+export const RCA_STYLES = `
           .rca-summary {
             border: 1px solid rgba(88, 166, 255, .35); border-left: 3px solid #58a6ff;
             border-radius: 6px; background: rgba(88, 166, 255, .08);
@@ -204,8 +212,4 @@ export function RcaDialog({
           .rca-content a { color: #58a6ff; }
           .rca-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .75rem; color: hsl(var(--muted-foreground)); margin: .5rem 0; }
           .rca-content hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 1rem 0; }
-        `}</style>
-      </DialogContent>
-    </Dialog>
-  );
-}
+`;

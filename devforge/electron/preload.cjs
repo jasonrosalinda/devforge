@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
         fetchAppDetails: (opts) => ipcRenderer.invoke('azure-metrics:fetch-app-details', opts),
         fetchDetectors: (opts) => ipcRenderer.invoke('azure-metrics:fetch-detectors', opts),
+        fetchSnat: (opts) => ipcRenderer.invoke('azure-metrics:fetch-snat', opts),
+        fetchRestarts: (opts) => ipcRenderer.invoke('azure-metrics:fetch-restarts', opts),
+        fetchEndpointDetail: (opts) => ipcRenderer.invoke('azure-metrics:fetch-endpoint-detail', opts),
         onPartial: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('azure-metrics:partial', fn);
@@ -27,6 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         aiRemarks: (opts) => ipcRenderer.invoke('incident-report:ai-remarks', opts),
         saveRca: (opts) => ipcRenderer.invoke('incident-report:saveRca', opts),
         exportRcaPdf: (opts) => ipcRenderer.invoke('incident-report:exportRcaPdf', opts),
+        exportRcaDoc: (opts) => ipcRenderer.invoke('incident-report:exportRcaDoc', opts),
         onRcaChunk: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('incident-report:rca-chunk', fn);

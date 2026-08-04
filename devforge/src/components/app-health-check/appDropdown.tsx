@@ -5,9 +5,11 @@ type Props = {
   selected: string[];
   allKeys: string[];
   onChange: (keys: string[]) => void;
+  /** App key → platform name. Missing entries fall back to the key itself. */
+  labels?: Record<string, string>;
 };
 
-export function AppDropdown({ selected, allKeys, onChange }: Props) {
+export function AppDropdown({ selected, allKeys, onChange, labels = {} }: Props) {
   const [open, setOpen] = useState(false);
   const allSelected = selected.length === allKeys.length;
   const label = allSelected
@@ -51,12 +53,15 @@ export function AppDropdown({ selected, allKeys, onChange }: Props) {
               <button onClick={() => onChange([...allKeys])} style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Select all</button>
               <button onClick={() => onChange([])} style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Deselect all</button>
             </div>
-            {allKeys.map(key => (
-              <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer', color: C.text, fontSize: 13 }}>
-                <input type="checkbox" checked={selected.includes(key)} onChange={() => toggle(key)} style={{ accentColor: C.accent }} />
-                {key}
-              </label>
-            ))}
+            {allKeys.map(key => {
+              const name = labels[key] || key;
+              return (
+                <label key={key} title={name === key ? key : `${name} · ${key}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer', color: C.text, fontSize: 13 }}>
+                  <input type="checkbox" checked={selected.includes(key)} onChange={() => toggle(key)} style={{ accentColor: C.accent }} />
+                  {name}
+                </label>
+              );
+            })}
           </div>
         </>
       )}

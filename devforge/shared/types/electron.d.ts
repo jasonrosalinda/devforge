@@ -117,8 +117,23 @@ export interface IElectronAPI {
         /**
          * `investigationNotes` is the engineer's own findings (code, deploy, infra)
          * typed into the RCA dialog — passed to the model as corroborating context.
+         * `format` picks the report layout: 'engineering' (the dialog's eight-section
+         * report, the default) or 'business' (the card section's seven-section
+         * incident report with an incident-number header).
          */
-        rca: (opts: IncidentPayload & { investigationNotes?: string }) => Promise<{ success: boolean; rca?: string; error?: string }>;
+        rca: (opts: IncidentPayload & {
+            investigationNotes?: string;
+            format?: 'engineering' | 'business';
+            /**
+             * Facts the card already measured or has configured — the outage window
+             * (UptimeRobot downtime), the platform's URLs, the report title. Business
+             * format only; the model reproduces them instead of deriving its own.
+             */
+            incidentName?: string;
+            incidentPeriod?: string;
+            servicesAffected?: string;
+            reportTitle?: string;
+        }) => Promise<{ success: boolean; rca?: string; error?: string }>;
         aiRemarks: (opts: {
             summary: unknown;
         }) => Promise<{ success: boolean; status?: 'healthy' | 'warning' | 'critical'; remarks?: string; error?: string }>;
@@ -129,6 +144,13 @@ export interface IElectronAPI {
             markdown: string;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         exportRcaPdf: (opts: {
+            appName: string;
+            startMs: number;
+            endMs: number;
+            html: string;
+        }) => Promise<{ success: boolean; path?: string; error?: string }>;
+        /** Word export — the same document written as Word-flavoured HTML with a .doc name. */
+        exportRcaDoc: (opts: {
             appName: string;
             startMs: number;
             endMs: number;

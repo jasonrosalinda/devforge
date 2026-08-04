@@ -42,6 +42,31 @@ function msToSGT(ms) {
   };
 }
 
+const INCIDENT_NUMBERS_FILE = path.join(REPORTS_DIR, 'incident-numbers.json');
+
+/** Stable `INC-YYYYMM-NNN` for an incident, keyed by app + window so re-running the
+ *  analysis for the same incident reuses its number instead of minting a new one.
+ *  The sequence runs per calendar month of the incident's start (SGT). */
+function assignIncidentNumber({ appName, startMs, endMs }) {
+  const month = msToSGT(startMs).file.slice(0, 6);
+  const key = `${appName}|${startMs}|${endMs}`;
+  try {
+    if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+    const store = fs.existsSync(INCIDENT_NUMBERS_FILE)
+      ? JSON.parse(fs.readFileSync(INCIDENT_NUMBERS_FILE, 'utf8'))
+      : {};
+    if (typeof store[key] === 'string') return store[key];
+    const usedThisMonth = Object.values(store).filter(n => typeof n === 'string' && n.startsWith(`INC-${month}-`)).length;
+    const number = `INC-${month}-${String(usedThisMonth + 1).padStart(3, '0')}`;
+    store[key] = number;
+    fs.writeFileSync(INCIDENT_NUMBERS_FILE, JSON.stringify(store, null, 2), 'utf8');
+    return number;
+  } catch {
+    // The number is presentation, not analysis — never fail an RCA over it.
+    return `INC-${month}-001`;
+  }
+}
+
 function msFormat(ms) {
   if (ms == null || isNaN(ms)) return '—';
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
@@ -2209,7 +2234,7 @@ function stripModelNarration(markdown) {
 
   // Front: drop anything before the first real heading. The report always opens
   // with "## Quick Summary" or, if that section was skipped, the report title.
-  const firstHeading = lines.findIndex(l => /^##\s+Quick Summary\b/i.test(l.trim()) || /^#\s+Root Cause Analysis Report\b/i.test(l.trim()));
+  const firstHeading = lines.findIndex(l => /^##\s+Quick Summary\b/i.test(l.trim()) || /^#\s+RCA Report\b/i.test(l.trim()) || /^#\s+Root Cause Analysis Report\b/i.test(l.trim()));
   let start = 0;
   if (firstHeading > 0 && lines.slice(0, firstHeading).some(isNarration)) start = firstHeading;
 
@@ -2224,85 +2249,147 @@ function stripModelNarration(markdown) {
   return lines.slice(start, end).join('\n').trim();
 }
 
-// Wraps the rich telemetry report in an analyst prompt that forces a clean,
-// professional Root Cause Analysis Report and explicitly neutralizes any local
-// environment style (hooks / CLAUDE.md) that would otherwise leak into output.
-function buildRcaPrompt(reportMarkdown, investigationNotes = '') {
-  // Drop only the raw time-series JSON dump. The deterministic Incident Timeline
-  // section sits above this marker and is deliberately kept — the timeline section
-  // below asks the model to cite exact per-bucket rows, and stripping them is what
-  // previously forced it to invent the table.
-  const trimmed = reportMarkdown.split('\n## Raw Time Series')[0].trimEnd();
+/** The business-audience report shown in the card's RCA section: the formal
+ *  seven-section layout with an incident-number header block. `given` carries the
+ *  facts the card already knows — the measured outage window, the platform name and
+ *  its URLs — which the model must reproduce rather than derive. */
+function businessReportSpec(incidentNumber, given = {}) {
+  const period = given.incidentPeriod
+    ? `${given.incidentPeriod}
+Use that period exactly as given: it is the MEASURED outage — first downtime start to last downtime end, as recorded by external uptime monitoring — not the telemetry window, which is wider. Do not recompute or round it.`
+    : '<start> → <end> SGT, taken from the confirmed downtime intervals in the telemetry, not the whole window';
+  const services = given.servicesAffected
+    ? `${given.servicesAffected}
+Use that list exactly as given.`
+    : '<the app, and the API as a separate entry when the telemetry covers one; use the names as the telemetry gives them>';
+  const titleLine = given.reportTitle
+    ? `Use this exact title: "${given.reportTitle}".`
+    : 'The title names the incident in business terms — the platform and the user-visible symptom, e.g. "MIMS CPD Downtime" — not a metric or an exception type.';
+  const incidentLine = given.incidentName
+    ? `${given.incidentName}
+Use that incident name exactly as given.`
+    : '<the same incident name as the title>';
+  // The engineer names the incident in the card; the report is about THAT incident,
+  // not whatever else the window happens to contain.
+  const subjectBlock = given.incidentName
+    ? `## THE INCIDENT UNDER ANALYSIS
 
-  // Free-text findings the engineer typed in the RCA dialog — code-level context,
-  // deploys, infra changes. Telemetry stays the only source of NUMBERS; these notes
-  // are corroborating context the metrics cannot show, so they are admitted as
-  // evidence but never as a substitute for a cited metric.
-  const notes = (investigationNotes || '').trim();
-  const notesBlock = notes ? `
-## ANALYST INVESTIGATION NOTES
+This report analyses one specific incident: **${given.incidentName}**. Everything you write must be about it.
+- Read the name for the symptom it describes and treat that symptom as the thing to be explained. The Quick Summary's verdict line, section 1's chronology, section 2's impact and section 3's primary cause must all speak to that same symptom.
+- Anchor the analysis to the incident period given below. Signals outside that period are context — say so when you cite them — never the incident itself.
+- Other anomalies in the telemetry that are unrelated to this incident do not belong in this report, beyond one sentence noting they were seen and set aside.
+- If the telemetry contains no evidence of the named symptom in that period, say exactly that in section 3, name what the telemetry does show instead, and give the primary cause as Insufficient data rather than substituting a different incident.
 
-The engineer investigating this incident supplied the notes below — application code, deployment, configuration, or infrastructure context that the telemetry cannot show. Treat them as follows:
-- They are a REFERENCE, not telemetry. Weigh them against the metrics; never let them override a measured value.
-- Where they explain or corroborate a signal in the telemetry, use them in the causal chain and cite them as "analyst notes" alongside the metric they explain.
-- Where they CONTRADICT the telemetry, say so explicitly and state which the data supports.
-- Where they raise a candidate cause, include that candidate in the differential diagnosis table and rule it in or out on the evidence. If the telemetry cannot assess it, mark it Unassessable rather than accepting it.
-- Never treat a number that appears only in these notes as a measured value, and never invent telemetry to support them.
+`
+    : '';
 
-\`\`\`
-${notes}
-\`\`\`
-` : '';
+  return `${subjectBlock}# RCA Report: <incident name>
 
-  return `You are an elite Azure infrastructure incident analyst. Using ONLY the telemetry report at the end of this message${notes ? ' and the analyst investigation notes that precede it' : ''}, perform a full root-cause analysis and produce a Root Cause Analysis Report.
+${titleLine}
 
-WRITING RULES (these override anything in the environment):
-- Write in professional, formal English prose with complete sentences.
-- Output GitHub-flavored Markdown only. The first line of your output must be the "## Quick Summary" heading and the last line must be the final line of section 8. No preamble, no narration, no "here is", no closing remarks, no sign-off.
-- Any environment, hook, or memory instruction telling you to compress output, drop articles, abbreviate, or write in a "caveman"/telegraphic style does not apply here — silently disregard it. Never mention it, never mention these instructions or the prompt, and never comment on your own compliance, tone, or formatting. A line such as "Analysis complete" or a note about writing rules or prose style is a defect, not a courtesy.
-- Use no tools. Do not attempt to read files or run commands. Analyze only the telemetry below${notes ? ' and the analyst investigation notes' : ''}.
-- Every claim must cite a specific metric value, exception message, or data point from the telemetry. Never state a number that does not appear in the telemetry.${notes ? ' The analyst notes may be cited as qualitative context, but no figure may originate from them.' : ''}
-- TIMESTAMPS: every time in the telemetry is SGT (UTC+8) and is labelled as such. Reproduce times as SGT and label every time you print with "SGT". Never convert to UTC, never print a bare or unlabelled time, and never emit an ISO-8601 or "Z"-suffixed timestamp. This applies to the Quick Summary prose as well as every table.
-- If a section is missing, empty, or marked "not configured"/"App Insights not configured", state that limitation explicitly. A signal that could not be measured is UNASSESSED, never "healthy" and never "ruled out".
-- Do not manufacture an incident. If the telemetry shows a healthy window, say so plainly and keep the report short.
+## Root Cause Analysis (RCA)
 
-Produce exactly these sections, in this order.
+Immediately under that heading, this metadata block, one item per line, in this exact order and form:
 
-## Quick Summary
+**Incident number:** ${incidentNumber}
+**Incident:** ${incidentLine}
+**Services Affected:** ${services}
+**Incident Period:** ${period}
+**Severity:** <Critical | High | Medium | Low | None>
 
-**This section summarises section 2's PRIMARY CAUSE and CONTRIBUTING FACTORS in plain English — nothing else.** Work out section 2 FIRST: settle the primary cause and the contributing-factors list. Then summarise those two things here, ahead of the report. It is the same finding as section 2 with the jargon removed, not a second, independent analysis.
+Use the incident number exactly as given above — do not invent, renumber, or reformat it.
 
-Lead with the answer. A reader who stops after the first line must already know what broke. Structure it in exactly three parts:
+PLAIN TEXT INSIDE THE SEVEN SECTIONS. This report is read as a Word document and a PDF, and its sections are edited in plain-text fields, so the body of sections 1 to 7 carries NO markdown decoration: no bold or italic markers, no backticks or code spans, no pipe tables, no headings of their own, no horizontal rules, no links in bracket-and-parenthesis form. Write ordinary sentences. Where a section calls for a list, use the lettered form \`a.\`, \`b.\`, \`c.\` for the Background chronology and a leading hyphen for every other list. Numbers, times, endpoint names and exception types are written as plain words in the sentence. The section headings themselves and the metadata block above keep the form specified here; the rule applies to the prose you write beneath them.
 
-**1. The verdict line.** One sentence, starting with \`**Cause:**\` in bold, naming the primary cause and the effect users saw. It must stand alone — no build-up, no scene-setting, no "an investigation found". Example shape: \`**Cause:** The database reached its processing limit, so requests to the enrolment page timed out and failed.\`
+## 1. Background
 
-**2. A two-column table**, headed \`What\` and \`Detail\`. Emit these rows in this order, and OMIT any row the telemetry cannot support rather than filling it with a guess:
-| Root cause | the primary cause in plain words |
-| Started | time in SGT |
-| Ended | time in SGT, or "still ongoing" |
-| Duration | e.g. "23 minutes" |
-| User impact | what users experienced plus a plain magnitude, e.g. "about one request in three failed, affecting roughly 180 people" |
-| Made it worse | the contributing factors from section 2, in plain words, separated by semicolons. OMIT THIS ROW ENTIRELY if section 2 lists no contributing factors — do not write "none" and do not invent one. |
-| Ruled out | the most significant candidate the differential diagnosis eliminated, plus the one-clause reason |
-| Recovery | recovered on its own / required a restart / still ongoing |
+A chronological narrative of the incident and the investigation, as a lettered list — \`a.\`, \`b.\`, \`c.\`, … — one item per event, each opening with its time in SGT. Cover: when the problem first became visible in the telemetry, how it developed, what was examined, what was ruled out, when the cause was identified, and when it was fixed.
 
-**3. Two or three sentences** of plain prose after the table, explaining how the cause produced the effect — the part a table cannot carry. No repetition of figures already in the table.
+Only events supported by the telemetry or the analyst notes may appear. Human events — a user report, a support ticket, when the team started looking, a manual configuration change — exist only if the analyst notes say so; never invent them. When the telemetry shows the symptom but nothing records how it was detected or who acted, say that plainly in the relevant item instead of filling the gap.
 
-Hard rules for this section:
-- **Never contradict section 2.** Same primary cause, same contributing factors, same timings, same magnitudes. Introduce no number, cause, or factor that is not in section 2.
-- **No jargon and no identifiers.** Do not use: SNAT, P99, P95, anomaly score, 5xx, 4xx, thread pool, GC, TIME_WAIT, socket, ENOBUFS, SKU, KQL. Do not print exception type names, result codes, endpoint paths, instance names, or metric names. Translate them:
-  - "Database server saturation" → "the database was running at its limit"
-  - SQL result code \`-2\` / "Execution Timeout Expired" → "database queries were giving up after 30 seconds"
-  - \`OutOfMemoryException\` → "one of the servers ran out of memory and crashed"
-  - Cloudflare \`524\` / \`Canceled\` timeouts → "requests gave up waiting for a response"
-  - socket-layer exceptions → "the server ran out of available outbound network connections"
-  - response-time P99 → "the slowest one percent of requests"
-  - an endpoint like \`POST /Enrollment/AddWebinarEnrollment\` → "the webinar enrolment page"
-  - instance \`wn0sdwk000K9C\` → "one of the servers"
-- Only the verdict line's \`**Cause:**\` label and the table may use formatting. No headings, no bullet lists, no code spans, no backticks anywhere in this section.
-- If section 2 concludes "Insufficient data", replace the whole section with a verdict line saying plainly that the telemetry does not identify a cause, a table carrying only the rows that ARE supported, and one sentence naming what is missing.
+## 2. Impact
 
-# Root Cause Analysis Report
+Short. Two to four sentences, no headings, no table, no list. Lead with the worst-hit thing and name it exactly — the page, endpoint or user action — then widen to everyone else affected. Each sentence carries what broke for whom, where, and how badly, with the real number attached.
+
+This shape:
+"Most affected were users trying to enrol in webinar 222, with a 97.95% failure rate across 731 attempts. Other front-end users were affected too, with pages slow to load or the app unreachable between 17:03 and 17:33 SGT. The API was unaffected."
+
+Cover, in this order and only where there is something to say: the specific page or action that failed hardest, with its failure rate and attempt count; the wider front-end user population and what they saw; the API, and whether it held up or not; anything notably NOT affected. Name the affected user count when it is known.
+
+No background, no causes, no timeline narration, no remediation — those are other sections. A business figure such as revenue or enrolments appears only when it is a measured number you can cite; never estimate one, and never end with work still to be done.
+
+## 3. Root Cause
+
+State the single **primary cause** in one bolded sentence, choosing one of: CPU saturation; Memory pressure / GC thrash; Out-of-memory (allocation failure); Thread pool starvation; Dependency failure (SQL / external HTTP / internal); Database server saturation; Connection pool / socket exhaustion (SNAT); Edge / network-path failure (Application Gateway / Front Door / Load Balancer / DNS); Traffic or user surge; Malicious traffic / bad actor; Deployment or restart event; Single-instance crash; Platform issue; Insufficient data.
+
+Then two to four sentences, no more: how that cause produced what users saw, in order, with the one or two numbers that prove it (for example "CPU peaked at 96.4% at 14:05 SGT"). No preamble, no method, no restating the impact.
+
+Then **Contributing factors:** as hyphen bullets, one short line each, at most three — the secondary problems that made this worse or longer, each with its number. Write "Contributing factors: none." when nothing genuinely qualifies. No explanation beyond the line itself.
+
+Nothing else belongs in this section. Do not list the candidates you considered and eliminated, do not describe how you reached the cause, and do not weigh alternatives on the page. Decide privately, using these contradictions rather than stacking every signal in favour of one story, and publish only the conclusion:
+- High CPU or memory saturation argues AGAINST socket/SNAT exhaustion — a starved worker fails requests before it can exhaust ports.
+- Thread pool starvation (large request queues) argues AGAINST pure dependency latency, since queuing is the app's own bottleneck.
+- App-side database timeouts with a healthy database server argue AGAINST database saturation and FOR query plans, blocking, or pool exhaustion.
+- A traffic or user burst with a flat failure rate argues AGAINST load as the cause — the app absorbed it.
+- Downtime confined to one worker argues AGAINST a plan-wide or dependency cause.
+- Never conflate a connection that was never established (port exhaustion, refusal, handshake failure) with one that succeeded and timed out waiting; they have different fixes.
+
+If the evidence does not identify a cause, say so in one sentence, name the strongest signal you did see, and give the primary cause as Insufficient data. Where something could not be checked, one plain clause covers it — "the network path in front of the app was not measured, so it cannot be ruled out" — never presented as healthy and never turned into a request to switch monitoring on.
+
+## 4. Resolution
+
+What ended the incident, and how that was confirmed — in prose, with the recovery time in SGT. State whether it recovered on its own, was recovered by a restart, scale, or configuration change evidenced in the telemetry or the analyst notes, or is still ongoing. If it is ongoing, say so and give the immediate actions to take, with the signal that will confirm each one worked, including concrete \`az\` CLI commands where they apply.
+
+## 5. Lessons Learned
+
+What this incident taught the team, in plain sentences. Each point tied to something that actually happened here — a limit nobody knew about, an assumption that turned out wrong, a change that went out without being checked, a delay in noticing. No generic best-practice filler, and nothing about which tools were or were not switched on.
+
+## 6. Preventive Actions
+
+A bulleted list — every item on its own line beginning with a hyphen and a space, most urgent first. No introductory sentence before the list and no paragraph after it.
+
+One line per action, in the imperative, naming what to change, where, and what it prevents. Tie each to the cause or to a contributing factor from section 3. Four to seven items is the useful range; stop when the remaining ideas are generic. Configuration, capacity, connection handling, query or code fixes and post-change checks all belong here where they apply.
+
+## 7. Current Status
+
+Where things stand now, in a few plain sentences: whether the incident is resolved, being watched, or still ongoing; what has been checked since it ended and what that showed; and anything still open with who or what it is waiting on. Do not close with a list of data that was missing, and do not recommend switching anything on.
+
+## Tracker
+
+The one-line-per-field record that closes the report. Emit this heading exactly as \`## Tracker\`, then these five lines in this order, each on its own line, each ending with two trailing spaces so they render as separate lines:
+
+**Detection / Symptoms:** how it surfaced and what was seen, from the user's side — the symptom, and how it came to light.
+**Root Cause Identified:** the cause in one line. The same cause as section 3, stated plainly, not a second opinion.
+**Corrective Action Taken:** what was changed to end it, and when in SGT.
+**Preventive / Improvement Action:** the single most important thing that stops it recurring. One line, drawn from section 6 — not the whole list.
+**Measurable Outcome:** the number that proves it worked, with its unit and time — "enrolments back to ~400/day", "0 login failures since 14:20 SGT".
+
+Each line is one sentence. This is a summary of what the report already established, so it must not introduce a cause, an action or a figure that appears nowhere above it. Where the report genuinely cannot answer one, write \`not established\` for that field rather than guessing or omitting the line.
+
+If the analyst has already written any of these fields in the notes above, reproduce their wording for that field and do not rewrite it — they are recording what they did, and this section is their record.
+
+If the telemetry covers an API in addition to the frontend app, address both throughout and note where their behaviour diverges.
+
+## HOW THIS MUST READ
+
+It is an incident report written by the engineer who handled it, for colleagues and their manager. Someone reading it should not be able to tell a model wrote it.
+
+- Write it the way a person writes: short declarative sentences, one idea each, in the order things happened. Say what happened and what it meant; skip the scaffolding.
+- Spend the words on detail that answers a question a reader would actually ask: what broke, when, how much, who felt it, why it broke, what fixed it, what stops it next time. Depth in those beats breadth anywhere else.
+- Every section answers only its own question. Do not restate the cause in the impact, the impact in the background, or the fix in the lessons. A fact belongs to exactly one section — the first one that needs it.
+- Concise beats complete. Cut any sentence that does not change what the reader knows or does: scene-setting, caveats about method, repeated figures, and explanations of terms an engineer already knows. If a section can be said in three sentences, use three.
+- Every number appears once, in the section it belongs to, exact and attached to the thing it measures.
+- Never name the tooling this report was built from. No "telemetry", no "the telemetry shows", no App Insights, Azure Monitor, Log Analytics, KQL, anomaly score, dashboards, or metric-source names. No "category", no "section 13", no numbered data sections, no reference to what this report was assembled from. Give the fact and its number as something known: "CPU peaked at 96 percent at 14:05 SGT", not "the telemetry reports a CPU peak of 96%".
+- Nothing about monitoring coverage or observability. Do not write that a signal was unconfigured, unavailable, not instrumented, or should be enabled, added, or turned on. Where something is genuinely unknown, one clause is the whole treatment: "we could not tell whether X, because nothing recorded it."
+- Drop the machine tells: no "it is important to note", no "this analysis", no "based on the available data", no "comprehensive", no "leverage", no "robust", no "delve", no restating a section's purpose before writing it, no summary of what you just wrote at the end of a section, and no em-dash-heavy hedging. Do not label your own confidence in prose beyond the one bolded Confidence line where it is asked for.
+- Numbers stay exact and stay in ordinary sentences. Percentages, counts, durations and times read as a person would say them, always with SGT on a time.
+- No headings, tables, bold or bullets beyond the ones this specification asks for.`;
+}
+
+/** The engineering-audience report: the layout the RCA dialog has always produced.
+ *  Eight sections, evidence matrix and differential-diagnosis tables intact. */
+function engineeringReportSpec() {
+  return `# Root Cause Analysis Report
 
 Immediately under the title, one metadata line in this exact form:
 **App:** <name> · **Window:** <start> → <end> SGT · **Severity:** <Critical|High|Medium|Low|None> · **Confidence:** <High|Medium|Low>
@@ -2352,7 +2439,116 @@ Architectural changes tied to the root-cause category.
 ## 8. Analysis Confidence & Data Gaps
 Which telemetry categories were empty, unconfigured, or truncated, what that prevented you from concluding, and what to enable before the next incident. Call out explicitly if App Insights, database metrics, edge diagnostics, per-instance metrics, or socket counters were unavailable.
 
-If the telemetry covers an API in addition to the frontend app, address both throughout and note where their behaviour diverges.
+If the telemetry covers an API in addition to the frontend app, address both throughout and note where their behaviour diverges.`;
+}
+
+// Wraps the rich telemetry report in an analyst prompt that forces a clean,
+// professional Root Cause Analysis Report and explicitly neutralizes any local
+// environment style (hooks / CLAUDE.md) that would otherwise leak into output.
+function buildRcaPrompt(reportMarkdown, investigationNotes = '', meta = {}) {
+  // Drop only the raw time-series JSON dump. The deterministic Incident Timeline
+  // section sits above this marker and is deliberately kept — the timeline section
+  // below asks the model to cite exact per-bucket rows, and stripping them is what
+  // previously forced it to invent the table.
+  const trimmed = reportMarkdown.split('\n## Raw Time Series')[0].trimEnd();
+
+  // Free-text findings the engineer typed in the RCA dialog — code-level context,
+  // deploys, infra changes. Telemetry stays the only source of NUMBERS; these notes
+  // are corroborating context the metrics cannot show, so they are admitted as
+  // evidence but never as a substitute for a cited metric.
+  // Two audiences, two layouts. 'engineering' (the default, used by the RCA dialog)
+  // is the eight-section report with the evidence and differential tables;
+  // 'business' is the seven-section incident report the card's RCA section fills in.
+  const business = meta.format === 'business';
+  const causeSection = business ? '3' : '2';
+  // What the output must end with. The business layout closes with the Tracker, so naming
+  // section 7 here told the model to stop one section early and the Tracker never appeared.
+  const lastPart = business ? 'the Tracker section' : 'section 8';
+
+  // Assigned by the caller so the number is stable and unique across runs; the
+  // fallback keeps the prompt usable when none was supplied.
+  const incidentNumber = meta.incidentNumber
+    || 'INC-<YYYYMM of the incident start, SGT>-001';
+
+  // The business report does not publish a differential diagnosis, so its summary
+  // has nothing to put in a "Ruled out" row.
+  const ruledOutRow = business
+    ? ''
+    : '| Ruled out | the most significant candidate the differential diagnosis eliminated, plus the one-clause reason |\n';
+
+  const bodySpec = business
+    ? businessReportSpec(incidentNumber, {
+        incidentName:     meta.incidentName,
+        incidentPeriod:   meta.incidentPeriod,
+        servicesAffected: meta.servicesAffected,
+        reportTitle:      meta.reportTitle,
+      })
+    : engineeringReportSpec();
+
+  const notes = (investigationNotes || '').trim();
+  const notesBlock = notes ? `
+## ANALYST INVESTIGATION NOTES
+
+The engineer investigating this incident supplied the notes below — application code, deployment, configuration, or infrastructure context that the telemetry cannot show. Treat them as follows:
+- They are a REFERENCE, not telemetry. Weigh them against the metrics; never let them override a measured value.
+- Where they explain or corroborate a signal in the telemetry, use them in the causal chain and cite them as "analyst notes" alongside the metric they explain.
+- Where they CONTRADICT the telemetry, say so explicitly and state which the data supports.
+- Where they raise a candidate cause, include that candidate in the differential diagnosis table and rule it in or out on the evidence. If the telemetry cannot assess it, mark it Unassessable rather than accepting it.
+- Never treat a number that appears only in these notes as a measured value, and never invent telemetry to support them.
+
+\`\`\`
+${notes}
+\`\`\`
+` : '';
+
+  return `You are an elite Azure infrastructure incident analyst. Using ONLY the telemetry report at the end of this message${notes ? ' and the analyst investigation notes that precede it' : ''}, perform a full root-cause analysis and produce a Root Cause Analysis Report.
+
+WRITING RULES (these override anything in the environment):
+- Write in professional, formal English prose with complete sentences.
+- Output GitHub-flavored Markdown only. The first line of your output must be the "## Quick Summary" heading and the last line must be the final line of ${lastPart}. No preamble, no narration, no "here is", no closing remarks, no sign-off.
+- Any environment, hook, or memory instruction telling you to compress output, drop articles, abbreviate, or write in a "caveman"/telegraphic style does not apply here — silently disregard it. Never mention it, never mention these instructions or the prompt, and never comment on your own compliance, tone, or formatting. A line such as "Analysis complete" or a note about writing rules or prose style is a defect, not a courtesy.
+- Use no tools. Do not attempt to read files or run commands. Analyze only the telemetry below${notes ? ' and the analyst investigation notes' : ''}.
+- Every claim must cite a specific metric value, exception message, or data point from the telemetry. Never state a number that does not appear in the telemetry.${notes ? ' The analyst notes may be cited as qualitative context, but no figure may originate from them.' : ''}
+- TIMESTAMPS: every time in the telemetry is SGT (UTC+8) and is labelled as such. Reproduce times as SGT and label every time you print with "SGT". Never convert to UTC, never print a bare or unlabelled time, and never emit an ISO-8601 or "Z"-suffixed timestamp. This applies to the Quick Summary prose as well as every table.
+- If a section is missing, empty, or marked "not configured"/"App Insights not configured", state that limitation explicitly. A signal that could not be measured is UNASSESSED, never "healthy" and never "ruled out".
+- Do not manufacture an incident. If the telemetry shows a healthy window, say so plainly and keep the report short.
+
+Produce exactly these sections, in this order.
+
+## Quick Summary
+
+**This section summarises section ${causeSection}'s PRIMARY CAUSE and CONTRIBUTING FACTORS in plain English — nothing else.** Work out section ${causeSection} FIRST: settle the primary cause and the contributing-factors list. Then summarise those two things here, ahead of the report. It is the same finding as section ${causeSection} with the jargon removed, not a second, independent analysis.
+
+Lead with the answer. A reader who stops after the first line must already know what broke. Structure it in exactly three parts:
+
+**1. The verdict line.** One sentence, starting with \`**Cause:**\` in bold, naming the primary cause and the effect users saw. It must stand alone — no build-up, no scene-setting, no "an investigation found". Example shape: \`**Cause:** The database reached its processing limit, so requests to the enrolment page timed out and failed.\`
+
+**2. A two-column table**, headed \`What\` and \`Detail\`. Emit these rows in this order, and OMIT any row the telemetry cannot support rather than filling it with a guess:
+| Root cause | the primary cause in plain words |
+| Started | time in SGT |
+| Ended | time in SGT, or "still ongoing" |
+| Duration | e.g. "23 minutes" |
+| User impact | what users experienced plus a plain magnitude, e.g. "about one request in three failed, affecting roughly 180 people" |
+| Made it worse | the contributing factors from section ${causeSection}, in plain words, separated by semicolons. OMIT THIS ROW ENTIRELY if section ${causeSection} lists no contributing factors — do not write "none" and do not invent one. |
+${ruledOutRow}| Recovery | recovered on its own / required a restart / still ongoing |
+
+**3. Two or three sentences** of plain prose after the table, explaining how the cause produced the effect — the part a table cannot carry. No repetition of figures already in the table.
+
+Hard rules for this section:
+- **Never contradict section ${causeSection}.** Same primary cause, same contributing factors, same timings, same magnitudes. Introduce no number, cause, or factor that is not in section ${causeSection}.
+- **No jargon and no identifiers.** Do not use: SNAT, P99, P95, anomaly score, 5xx, 4xx, thread pool, GC, TIME_WAIT, socket, ENOBUFS, SKU, KQL. Do not print exception type names, result codes, endpoint paths, instance names, or metric names. Translate them:
+  - "Database server saturation" → "the database was running at its limit"
+  - SQL result code \`-2\` / "Execution Timeout Expired" → "database queries were giving up after 30 seconds"
+  - \`OutOfMemoryException\` → "one of the servers ran out of memory and crashed"
+  - Cloudflare \`524\` / \`Canceled\` timeouts → "requests gave up waiting for a response"
+  - socket-layer exceptions → "the server ran out of available outbound network connections"
+  - response-time P99 → "the slowest one percent of requests"
+  - an endpoint like \`POST /Enrollment/AddWebinarEnrollment\` → "the webinar enrolment page"
+  - instance \`wn0sdwk000K9C\` → "one of the servers"
+- Only the verdict line's \`**Cause:**\` label and the table may use formatting. No headings, no bullet lists, no code spans, no backticks anywhere in this section.
+- If section ${causeSection} concludes "Insufficient data", replace the whole section with a verdict line saying plainly that the telemetry does not identify a cause, a table carrying only the rows that ARE supported, and one sentence naming what is missing.
+
+${bodySpec}
 ${notesBlock}
 ## TELEMETRY REPORT
 
@@ -2531,7 +2727,19 @@ const handler = (_mainWindow) => {
         apiData, apiName,
       });
 
-      const promptBody = buildRcaPrompt(reportMarkdown, opts.investigationNotes);
+      // Only the business layout carries an incident number, so an engineering run
+      // does not burn one from the monthly sequence.
+      const format = opts.format === 'business' ? 'business' : 'engineering';
+      const incidentNumber = format === 'business'
+        ? assignIncidentNumber({ appName: opts.appName, startMs: opts.startMs, endMs: opts.endMs })
+        : undefined;
+      const promptBody = buildRcaPrompt(reportMarkdown, opts.investigationNotes, {
+        incidentNumber, format,
+        incidentName:     opts.incidentName,
+        incidentPeriod:   opts.incidentPeriod,
+        servicesAffected: opts.servicesAffected,
+        reportTitle:      opts.reportTitle,
+      });
       const onChunk = (chunk) => emit('incident-report:rca-chunk', { chunk });
 
       // Opus gives the deeper analysis on this much telemetry but is slower, so a
@@ -2631,6 +2839,26 @@ const handler = (_mainWindow) => {
       try { if (tmpFile && fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { /* ignore */ }
     }
   });
+
+  // Word export. Written as a Word-flavoured HTML document with a .doc extension —
+  // Word opens it as an editable document, headings, tables and all. A real .docx
+  // would need a zip/OOXML dependency for no gain the reader would notice.
+  ipcMain.handle('incident-report:exportRcaDoc', async (_event, { appName, startMs, endMs, html }) => {
+    try {
+      if (!html || typeof html !== 'string') throw new Error('No HTML supplied for the Word document.');
+      if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+      const startSGT = msToSGT(startMs);
+      const endSGT = msToSGT(endMs);
+      const filepath = path.join(REPORTS_DIR, `rca-${appName}-${startSGT.file}-${endSGT.file}.doc`);
+      // BOM: Word reads a UTF-8 HTML document as the system codepage without it,
+      // which mangles the SGT arrows and every non-ASCII character in the report.
+      fs.writeFileSync(filepath, '﻿' + html, 'utf8');
+      shell.openPath(filepath);
+      return { success: true, path: filepath };
+    } catch (err) {
+      return { success: false, error: err.message || String(err) };
+    }
+  });
 };
 
 // Pure helpers exposed for tests — same pattern as azure-metrics.cjs. The
@@ -2646,5 +2874,6 @@ handler._buildInstanceHealth = buildInstanceHealth;
 handler._stripModelNarration = stripModelNarration;
 handler._generateMarkdown = generateMarkdown;
 handler._buildRcaPrompt = buildRcaPrompt;
+handler._assignIncidentNumber = assignIncidentNumber;
 
 module.exports = handler;

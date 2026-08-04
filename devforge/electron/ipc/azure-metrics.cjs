@@ -3,6 +3,10 @@
 // ─── Per-app result cache ─────────────────────────────────────────────────────
 
 const _fetchCache = new Map();
+// Latency objective used when an app sets none. Mirrors DEFAULT_SLO_MS in
+// src/types/settings.types.ts — the main process cannot import the TS module.
+const DEFAULT_SLO_MS = 1000;
+
 const CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 
 function getCached(cacheKey) {
@@ -56,12 +60,6 @@ const {
 // `contains`, not `has`: these are path fragments, not whole terms.
 const ASSET_DEP_MATCH = '(name contains "_framework/" or name contains "_content/")';
 
-/** Three-way dependency classification. `internalCondition` is null when the app's
- *  hostnames could not be resolved, in which case everything non-asset is third-party. */
-function depClassifyExpr(internalCondition) {
-  const rest = internalCondition ? `iff(${internalCondition}, "internal", "thirdParty")` : '"thirdParty"';
-  return `extend classification = iff(${ASSET_DEP_MATCH}, "assets", ${rest})`;
-}
 
 // ─── Shared signal helpers ───────────────────────────────────────────────────
 // Downtime detection and socket metric names live in azure-signals.cjs so the
@@ -72,6 +70,11 @@ const {
   classifyDowntimeCause,
   extractDowntimeIntervalsMultiSignal,
 } = require('./azure-signals.cjs');
+
+// SNAT port charts come from the App Service detector API — see azure-snat.cjs.
+const { fetchSnatCharts } = require('./azure-snat.cjs');
+// Restart events — same detector plumbing, but per site rather than per plan.
+const { fetchRestartCharts } = require('./azure-restarts.cjs');
 
 // ─── Pure Helpers (exported for testing) ─────────────────────────────────────
 
@@ -112,23 +115,6 @@ function sqlDbResourceId(subscriptionId, app) {
 
 // Fetches the real hostnames (default + custom domains) bound to an App Service or Container App,
 // so dependency `target` classification can match the app's actual domain, not just its Azure resource name.
-async function getAppHostnames(token, resId, type) {
-  try {
-    if (type === 'containerapp') {
-      const res = await fetch(`https://management.azure.com${resId}?api-version=2023-05-01`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) return [];
-      const data = await res.json();
-      const ingress = data.properties?.configuration?.ingress;
-      const customDomains = (ingress?.customDomains ?? []).map(d => d.name).filter(Boolean);
-      return [ingress?.fqdn, ...customDomains].filter(Boolean);
-    }
-    const res = await fetch(`https://management.azure.com${resId}?api-version=2022-03-01`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const hostNames = data.properties?.hostNames ?? [];
-    return [...new Set([data.properties?.defaultHostName, ...hostNames].filter(Boolean))];
-  } catch { return []; }
-}
 
 // ─── Azure SDK helpers ────────────────────────────────────────────────────────
 
@@ -392,26 +378,6 @@ async function queryFailedRequestsSeries(client, resId, range, granularity, cust
   return queryCountSeries(client, resId, 'Http5xx', range, granularity, customStart, customEnd);
 }
 
-async function getResponseTime(client, resId, range, granularity, customStart, customEnd) {
-  try {
-    const result = await client.queryResource(resId, ['HttpResponseTime'], {
-      timespan: buildTimespan(range, customStart, customEnd),
-      granularity,
-      aggregations: ['Average', 'Maximum'],
-    });
-    const data = result.metrics[0]?.timeseries?.[0]?.data || [];
-    if (!data.length) return null;
-    const s = summarize(data);
-    const series = data.map(d => ({
-      t: d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp),
-      avg: Math.round((d.average ?? 0) * 1000) / 1000,
-    }));
-    return { avg: s.avg, max: s.max, p99: s.p99, series };
-  } catch {
-    return null;
-  }
-}
-
 async function getAvailabilityFromAppInsights(appId, credential, range, granularity, customStart, customEnd) {
   try {
     const aiToken = await credential.getToken('https://api.applicationinsights.io/.default');
@@ -496,11 +462,11 @@ async function getContainerAppTimeSeries(appId, credential, range, customStart, 
     const bin = isoGranToKql(gran);
     const headers = { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' };
     const endpoint = `https://api.applicationinsights.io/v1/apps/${appId}/query`;
+    // Response time is no longer read from here: it comes from the per-site
+    // response breakdown in getRequestInsights, which Container Apps get too.
     const queries = [
       `requests | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
       `requests | where toint(resultCode) >= 400 and toint(resultCode) < 500 | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
-      `requests | summarize avgSec=round(avg(duration)/1000,3) by bin(timestamp, ${bin}) | order by timestamp asc`,
-      `requests | summarize avgSec=round(avg(duration)/1000,3), maxSec=round(max(duration)/1000,3), p99Sec=round(percentile(duration,99)/1000,3)`,
     ];
     const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: queries.join(';\n'), timespan }) });
     if (!res.ok) return null;
@@ -509,107 +475,173 @@ async function getContainerAppTimeSeries(appId, credential, range, customStart, 
     const tables = data.tables || [];
     const reqRows  = tables[0]?.rows ?? [];
     const h4xRows  = tables[1]?.rows ?? [];
-    const rtRows   = tables[2]?.rows ?? [];
-    const summRow  = tables[3]?.rows?.[0];
     const requestsSeries = reqRows.map(([t, count]) => ({ t: new Date(t).toISOString(), count: Number(count) }));
     const http4xxSeries  = h4xRows.map(([t, count]) => ({ t: new Date(t).toISOString(), count: Number(count) }));
-    const rtSeries       = rtRows.map(([t, avg]) => ({ t: new Date(t).toISOString(), avg: Number(avg) }));
-    const responseTime   = summRow
-      ? { avg: Number(summRow[0]) || 0, max: Number(summRow[1]) || 0, p99: Number(summRow[2]) || 0, series: rtSeries }
-      : null;
-    return { requestsSeries, http4xxSeries, responseTime };
+    return { requestsSeries, http4xxSeries };
   } catch { return null; }
 }
 
-// Distinct users (by IP) per time bucket, summarized into the same {avg, max, p99, series} shape as ARM MetricSeries.
-// FE only — never called for the API app's aiAppId.
-async function getUserStats(appId, credential, range, customStart, customEnd, gran) {
+// getUserStats lived here: distinct clients per bucket, frontend only, its own HTTP
+// call. It is now Group F inside getRequestInsights, which runs per App Insights
+// resource — so the API gets the same figures instead of none, at no extra round trip.
+
+/**
+ * The downstream calls made by one endpoint, ranked by the time they cost it.
+ *
+ * Ranked by total time (calls x average), not by the worst single call: a 38ms query run
+ * 750 times costs the endpoint more than one 2s outlier, and it is the row worth acting on.
+ *
+ * `count()` rather than `sum(itemCount)`, matching the app-wide Dependencies row — under
+ * adaptive sampling both undercount equally, but this way a per-endpoint figure can never
+ * exceed the app-wide total it is a part of, which is the confusing failure.
+ */
+/** How many of an endpoint's calls get a timeline. The rest still list, just unplottable. */
+const TIMELINE_DEPS = 8;
+
+/**
+ * Bucket width for a dependency timeline, sized so any window yields ~120 buckets.
+ *
+ * Mirrors the request timelines' `topUrlBin` rather than reusing it — that one is computed
+ * inside getRequestInsights, and this runs in its own handler.
+ */
+function depTimelineBin(range, customStart, customEnd) {
+  const msMap = { '30m': 30*60e3, '1h': 3600e3, '6h': 6*3600e3, '12h': 12*3600e3, '1d': 24*3600e3, '3d': 72*3600e3, '7d': 168*3600e3, '30d': 720*3600e3 };
+  const spanMs = customStart && customEnd ? new Date(customEnd) - new Date(customStart) : (msMap[range] || msMap['1d']);
+  const spanMins = spanMs / 60000;
+  return spanMins <= 120   ? '1m'
+       : spanMins <= 600   ? '5m'
+       : spanMins <= 1800  ? '15m'
+       : spanMins <= 7200  ? '1h'
+       : spanMins <= 43200 ? '6h'
+       : '1d';
+}
+
+async function fetchEndpointDetail(appId, credential, endpoint, range, customStart, customEnd) {
+  let aiToken;
   try {
-    const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
-    const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
-    const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-    const bin = isoGranToKql(gran);
-    const query = `requests
-| extend dimIp = tostring(customDimensions["Client IP Address"])
-| extend ip = iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))
-| where isnotempty(ip)
-| summarize count = dcount(ip) by bin(timestamp, ${bin})
-| order by timestamp asc`;
+    aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  } catch (e) {
+    return { series: null, deps: null, error: `Token error: ${e.message}` };
+  }
+
+  const timespanMap = { '30m':'PT30M','1h':'PT1H','6h':'PT6H','12h':'PT12H','1d':'P1D','3d':'P3D','7d':'P7D','30d':'P30D' };
+  const timespan = customStart && customEnd
+    ? `${new Date(customStart).toISOString()}/${new Date(customEnd).toISOString()}`
+    : (timespanMap[range] || 'P1D');
+
+  // The endpoint is a literal, so it is escaped rather than interpolated raw — an
+  // endpoint name carrying a quote would otherwise change the shape of the query.
+  const runQuery = async (query) => {
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, timespan }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`${res.status}: ${txt}`.slice(0, 300));
+    }
     const data = await res.json();
-    if (data.error) return null;
-    const rows = data.tables?.[0]?.rows || [];
-    const points = rows.map(([t, count]) => ({ timeStamp: t, average: Number(count) || 0, maximum: Number(count) || 0 }));
-    return summarize(points);
-  } catch { return null; }
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.tables?.[0]?.rows ?? [];
+  };
+
+  // A dependency is only identified by all three of type, target and name together — two
+  // targets commonly serve a call of the same name, and charting them as one would merge
+  // a healthy database with a failing one.
+  const depKeyExpr = 'strcat(type, "|", target, "|", name)';
+  const opClean = `extend opClean=iif(operation_Name has "?", substring(operation_Name, 0, indexof(operation_Name, "?")), operation_Name)`;
+  const forEndpoint = `dependencies | ${opClean} | where opClean == "${kqlLit(endpoint)}"`;
+  const bin = depTimelineBin(range, customStart, customEnd);
+
+  try {
+    // The endpoint's own request timeline. Fetched here, per endpoint, rather than for every
+    // merged endpoint inside the details batch: the chart only ever shows one at a time, so
+    // the batch version was shipping ~60 timelines to draw one — the single largest thing in
+    // that payload, and it had to be parsed and held in state for every card.
+    const reqSeriesRows = await runQuery(
+      `requests | extend rc=toint(resultCode) | ${NAME_CLEAN_EXPR} ` +
+      `| where nameClean == "${kqlLit(endpoint)}" ` +
+      `| summarize count=count(), c4=countif(${RC_4XX_EXPR}), c5=countif(${RC_5XX_EXPR}), ` +
+        `avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1) by bin(timestamp, ${bin}) ` +
+      `| project t=timestamp, count, c4, c5, avgMs, p95 | order by t asc`);
+    const series = reqSeriesRows.map(([t, count, c4, c5, avgMs, p95]) => ({
+      t: String(t ?? ''),
+      count: Number(count) || 0, c4: Number(c4) || 0, c5: Number(c5) || 0,
+      avgMs: Number(avgMs) || 0, p95: Number(p95) || 0,
+    }));
+
+    const rows = await runQuery(
+      `${forEndpoint} ` +
+      `| summarize count=count(), failCount=countif(success == false), avgMs=round(avg(duration),1), ` +
+        `p95=round(percentile(duration,95),1), totalMs=round(sum(duration),0) by type, target, name ` +
+      `| order by totalMs desc | take 20`);
+
+    const deps = rows.map(([type, target, name, count, failCount, avgMs, p95, totalMs]) => ({
+      type: String(type ?? ''), target: String(target ?? ''), name: String(name ?? '') || '(unnamed)',
+      count: Number(count) || 0, failCount: Number(failCount) || 0,
+      avgMs: Number(avgMs) || 0, p95: Number(p95) || 0, totalMs: Number(totalMs) || 0,
+    }));
+    if (!deps.length) return { series, deps, bin };
+
+    // Timelines for the costliest calls only. The filter is built from the rows just
+    // returned rather than re-ranking in KQL, so a charted line always belongs to a row
+    // that exists — a second `top` could disagree with the first on a tie.
+    const charted = deps.slice(0, TIMELINE_DEPS);
+    const keyOf = (d) => `${d.type}|${d.target}|${d.name}`;
+    const keyList = charted.map(d => `"${kqlLit(keyOf(d))}"`).join(', ');
+
+    let seriesRows = [];
+    try {
+      seriesRows = await runQuery(
+        `${forEndpoint} | extend depKey=${depKeyExpr} | where depKey in (${keyList}) ` +
+        `| summarize count=count(), failCount=countif(success == false), avgMs=round(avg(duration),1), ` +
+          `p95=round(percentile(duration,95),1) by bin(timestamp, ${bin}), depKey ` +
+        `| project t=timestamp, depKey, count, failCount, avgMs, p95 | order by t asc`);
+    } catch {
+      // The list is the useful part and it already succeeded. A timeline failure leaves
+      // rows unplottable rather than failing the whole block.
+      seriesRows = [];
+    }
+
+    const byKey = new Map();
+    for (const row of seriesRows) {
+      if (!Array.isArray(row)) continue;
+      const [t, depKey, count, failCount, avgMs, p95] = row;
+      const key = String(depKey ?? '');
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({
+        t: String(t ?? ''),
+        count: Number(count) || 0, failCount: Number(failCount) || 0,
+        avgMs: Number(avgMs) || 0, p95: Number(p95) || 0,
+      });
+    }
+    for (const d of deps) {
+      const pts = byKey.get(keyOf(d));
+      if (pts) d.series = pts.sort((a, b) => a.t.localeCompare(b.t));
+    }
+
+    return { series, deps, bin };
+  } catch (e) {
+    return { series: null, deps: null, error: e.message || String(e) };
+  }
 }
+
+/** Query string stripped, so '/order?id=1' and '/order?id=2' are one endpoint. */
+const NAME_CLEAN_EXPR = `extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)`;
+
+// The status-class predicates as bare boolean expressions, so a `where` filter and a
+// `countif` aggregate can never disagree on what counts as a 4xx or a 5xx. A 5xx includes
+// failures with no usable result code: a request killed mid-flight reports success == false
+// with an empty code, and dropping those undercounts every outage.
+const RC_4XX_EXPR = `rc >= 400 and rc < 500`;
+const RC_5XX_EXPR = `rc >= 500 or (success == false and (isempty(resultCode) or rc == 0 or isnull(rc)))`;
 
 function kqlLit(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-// Builds a KQL boolean expression classifying a dependency as internal: either `target`
-// matches one of the app's own resource names or real bound hostnames (default + custom
-// domains), `target` is hostless (no "." — an in-proc call or bare server name), or (for
-// HTTP deps) `name` is a bare path like "GET /api/x" with no "://" scheme — App Insights
-// records same-origin/correlated calls this way, vs. a full absolute URL
-// ("POST https://px.ads.linkedin.com/...") for genuine third parties.
-function buildInternalCondition(app, hostnames = []) {
-  const needles = [app?.apiName, app?.dbName, app?.name, ...hostnames].filter(n => n && String(n).trim());
-  const conds = [
-    `(type has "Http" and name !contains "://")`,
-    `target !contains "."`,
-    ...needles.map(n => `target contains "${kqlLit(n)}"`),
-  ];
-  return conds.join(' or ');
-}
 
-async function getFailedDependencies(appId, credential, range, customStart, customEnd, internalCondition = null) {
-  try {
-    const aiToken = await credential.getToken('https://api.applicationinsights.io/.default');
-    const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
-    const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-    const classifyExpr = depClassifyExpr(internalCondition);
-    const query = `dependencies
-| extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name)
-| ${classifyExpr}
-| where success == false
-| summarize failCount=count(), p95=percentile(duration, 95), p99=percentile(duration, 99), avgDuration=avg(duration) by classification, nameClean, type, target
-| join kind=leftouter (dependencies | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | ${classifyExpr} | summarize totalCount=count() by classification, nameClean, type, target) on classification, nameClean, type, target
-| project classification, name=nameClean, type, target, totalCount=coalesce(totalCount, failCount), failCount, avgDuration, p95, p99
-| order by classification asc, failCount desc
-| serialize
-| extend rn = row_number(1, prev(classification) != classification)
-| where rn <= 25
-| project-away rn`;
-    const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const rows = data.tables?.[0]?.rows || [];
-    const t = startTime.toISOString();
-    return rows.map(([classification, name, depType, depTarget, totalCount, failCount, avgDuration, p95, p99]) => ({
-      t,
-      classification: classification === 'internal' ? 'internal' : classification === 'assets' ? 'assets' : 'thirdParty',
-      name:        name      ?? '(unknown)',
-      type:        depType   ?? '(unknown)',
-      target:      depTarget ?? '',
-      totalCount:  Number(totalCount)  || 0,
-      failCount:   Number(failCount)   || 0,
-      avgDuration: Math.round(Number(avgDuration) || 0),
-      p95:         Math.round(Number(p95) || 0),
-      p99:         Math.round(Number(p99) || 0),
-    }));
-  } catch { return null; }
-}
 
 async function getAvailabilityFromAzureMonitor(client, resId, appType, granularity, ts) {
   if (appType === 'appservice') {
@@ -714,7 +746,31 @@ async function findAppInsightsAppId(token, subscriptionId, resourceGroup, appNam
   } catch { return null; }
 }
 
-async function getRequestInsights(appId, credential, range, customStart, customEnd, summaryOnly = false, internalCondition = null) {
+/**
+ * Flat `[t, url, count]` rows from the per-endpoint timeline query → one series per
+ * endpoint. Buckets with no traffic are simply absent rather than zero-filled: the
+ * chart draws them as gaps (connectNulls={false}), which reads as "no requests in
+ * this bucket" instead of implying the endpoint returned zero.
+ */
+function groupUrlSeries(rows) {
+  const byUrl = new Map();
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const [t, url, count] = row;
+    const key = String(url ?? '(unknown)');
+    let entry = byUrl.get(key);
+    if (!entry) { entry = { url: key, total: 0, series: [] }; byUrl.set(key, entry); }
+    const n = Number(count) || 0;
+    entry.total += n;
+    entry.series.push({ t: String(t ?? ''), count: n });
+  }
+  return [...byUrl.values()]
+    .sort((a, b) => b.total - a.total)
+    .map(({ url, series }) => ({ url, series: series.sort((a, b) => a.t.localeCompare(b.t)) }));
+}
+
+
+async function getRequestInsights(appId, credential, range, customStart, customEnd, summaryOnly = false, sloMs = DEFAULT_SLO_MS) {
   const msMap = { '30m': 30*60e3, '1h': 3600e3, '6h': 6*3600e3, '12h': 12*3600e3, '1d': 24*3600e3, '3d': 72*3600e3, '7d': 168*3600e3, '30d': 720*3600e3 };
   const spanMs = customStart && customEnd ? new Date(customEnd) - new Date(customStart) : (msMap[range] || msMap['1d']);
   const spanMins = spanMs / 60000;
@@ -778,30 +834,62 @@ async function getRequestInsights(appId, credential, range, customStart, customE
   const insightKql = `let deps=dependencies|summarize TotalDependencies=count(),FailedDependencies=countif(success==false),DependencyFailureRate=todouble(countif(success==false))/count()*100,DependencyP95=percentile(duration,95),DependencyP99=percentile(duration,99);let reqs=requests|summarize TotalRequests=count(),FailedRequests=countif(success==false),RequestFailureRate=todouble(countif(success==false))/count()*100,RequestP95=percentile(duration,95),RequestP99=percentile(duration,99);let ex=exceptions|summarize SocketLayerExceptions=sumif(itemCount,${SOCKET_MATCH}),TimeoutExceptions=sumif(itemCount,${TIMEOUT_ONLY_MATCH}),OomExceptions=sumif(itemCount,${OOM_ONLY_MATCH}),GenericExceptions=sumif(itemCount,${GENERIC_MATCH}),TotalExceptions=sum(itemCount);let users=requests|extend dimIp=tostring(customDimensions["Client IP Address"])|extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, ""))|where isnotempty(ip)|summarize UniqueUsers=dcount(ip);deps|extend JoinKey=1|join kind=inner(reqs|extend JoinKey=1) on JoinKey|join kind=inner(ex|extend JoinKey=1) on JoinKey|join kind=inner(users|extend JoinKey=1) on JoinKey|project-away JoinKey,JoinKey1,JoinKey2|extend IncidentSummary=case(DependencyFailureRate>15 and DependencyP99>15000 and SocketLayerExceptions>0,"Critical: Severe dependency degradation with SNAT/socket exhaustion. Connections are being rejected at the network layer. Immediate action required.",DependencyFailureRate>10 and SocketLayerExceptions>0,"High: Elevated dependency failures combined with socket pressure. Likely SNAT port depletion or connection pool saturation causing fast-fail rejections.",DependencyFailureRate>15 and DependencyP99>10000,"High: Severe dependency latency and high failure rate. Downstream services are degraded — check DB, cache, and external API health.",DependencyFailureRate>10 and DependencyP99>8000,"Elevated dependency failures with significant latency spikes. Downstream services intermittently unresponsive — possible connection exhaustion or resource contention.",RequestP99>60000 and RequestFailureRate<5,"Warning: Extreme request latency (P99 > 1 min) with low failure rate. App is serving requests but resource saturation is causing severe queuing — possible CPU/memory pressure or slow dependency.",RequestP99>30000,"Warning: Severe request latency detected (P99 > 30s). Likely intermittent outages or resource saturation impacting tail requests.",DependencyFailureRate>5 and DependencyP95>5000,"Warning: Partial dependency degradation with elevated latency and intermittent failures. Downstream services are slow — investigate DB query performance or external API timeouts.",DependencyFailureRate>5,"Warning: Elevated dependency failure rate without major latency spike. Dependencies are rejecting connections quickly — possible quota exhaustion, misconfiguration, or fast-fail circuit breaker.",RequestP95>3000 and RequestFailureRate<2,"Info: Performance degradation with elevated response latency but low failure rates. App is under load — monitor for worsening.",RequestFailureRate>20,"Critical: Major application failure with high request failure rate. Immediate investigation required.",RequestFailureRate>5,"Warning: Elevated request failure rate. Application is returning errors — check exception logs and dependency health.","No significant degradation pattern detected in the selected time range.")`;
 
   // Group A: request/dependency-based (8 queries → 1 HTTP call)
-  const depsClassifyExpr = `${depClassifyExpr(internalCondition)} | `;
-  const topDepsKql =
-    `dependencies | ${depsClassifyExpr}summarize totalCount=count(), failCount=countif(success==false), avgDuration=round(avg(duration),0), p95=round(percentile(duration,95),0), p99=round(percentile(duration,99),0) by classification, name, type, target ` +
-    `| order by classification asc, totalCount desc | serialize | extend rn=row_number(1, prev(classification) != classification) | where rn <= 10 | project-away rn`;
+  // Bucket width for the per-endpoint timelines (groupA[11..13]). Sized so any
+  // window yields ~120 buckets per endpoint: ten endpoints × 1440 one-minute
+  // buckets would put 14k rows on the wire for a single day.
+  const topUrlBin = spanMins <= 120   ? '1m'
+                  : spanMins <= 600   ? '5m'
+                  : spanMins <= 1800  ? '15m'
+                  : spanMins <= 7200  ? '1h'
+                  : spanMins <= 43200 ? '6h'
+                  : '1d';
+  // Shared by each failure list and its matching timeline. Held in one place because
+  // the timeline is only meaningful if it selects exactly the endpoints the list
+  // ranks — a predicate that drifts between the two silently plots the wrong set.
+  const nameCleanExpr = NAME_CLEAN_EXPR;
+  const rc4xxExpr = RC_4XX_EXPR;
+  const rc5xxExpr = RC_5XX_EXPR;
+  const is4xx = `extend rc=toint(resultCode) | where ${rc4xxExpr}`;
+  const is5xx = `extend rc=toint(resultCode) | where ${rc5xxExpr}`;
   const groupAKqls = [
-    `requests | summarize n=count() by name | top 10 by n desc | project url=name, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     `requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | where success == false | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
     `requests | summarize avgMs=avg(duration), p99Ms=percentile(duration,99), maxMs=max(duration), n=count() by name | top 10 by maxMs desc | project url=name, avgMs=round(avgMs,1), p99Ms=round(p99Ms,1), maxMs=round(maxMs,1), count=n`,
-    `requests | extend rc=toint(resultCode) | where rc >= 400 and rc < 500 | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
-    `requests | extend rc=toint(resultCode) | where rc >= 500 or (success == false and (isempty(resultCode) or rc == 0 or isnull(rc))) | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize failCount=count(), p95=percentile(duration,95), p99=percentile(duration,99) by nameClean | join kind=leftouter (requests | extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize totalCount=count() by nameClean) on nameClean | project url=nameClean, totalCount=coalesce(totalCount,failCount), failCount, p95, p99 | order by failCount desc | take 10`,
-    `requests | extend rc=toint(resultCode) | where rc >= 400 and rc < 500 | count`,
-    `requests | extend rc=toint(resultCode) | where rc >= 500 or (success == false and (isempty(resultCode) or rc == 0 or isnull(rc))) | count`,
-    topDepsKql,
+    `requests | ${is4xx} | count`,
+    `requests | ${is5xx} | count`,
     `exceptions | summarize count=count() by type | order by count desc | take 10`,
     `exceptions | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
     `dependencies | where success == false | where resultCode in (${TIMEOUT_RESULT_CODES}) | extend nameClean = iif(name has "?", substring(name, 0, indexof(name, "?")), name) | summarize timeoutCount=sum(itemCount), p95=round(percentile(duration,95),0), maxMs=round(max(duration),0) by nameClean, resultCode, type | project name=nameClean, resultCode, type, p95, maxMs, timeoutCount | order by timeoutCount desc | take 15`,
   ];
 
+  // Who counts as a distinct client. App Insights records the caller in two places and
+  // neither is reliable alone: `customDimensions["Client IP Address"]` is set when the
+  // app forwards it, `client_IP` is Azure's own view. '::1' is the loopback a warm-up
+  // ping arrives as, and counting it would put one fake user in every bucket.
+  //
+  // Held in one const because "unique users", "top clients" and the Group B ranking all
+  // have to agree on it — a definition that drifts between them produces a top-10 list
+  // whose counts cannot be reconciled with the unique-user line above it.
+  const clientIpExpr =
+    `extend dimIp=tostring(customDimensions["Client IP Address"]) ` +
+    `| extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) ` +
+    `| where isnotempty(ip)`;
+
+  // Where the caller's user agent lives. App Insights spells the header three ways
+  // depending on SDK version and falls back to its own parsed `client_Browser`, so all
+  // four are tried in order. Hoisted for the same reason as clientIpExpr: the top-agent
+  // ranking, the bot filter and the per-client agent list have to agree on it, or a
+  // client's agents cannot be reconciled with the agent list beside them.
+  const clientUaExpr =
+    `extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser)`;
+
   // Group B: client-based + SNAT + SQL/HTTP timeouts (6 queries → 1 HTTP call)
   const groupBKqls = [
-    `requests | extend dimIp=tostring(customDimensions["Client IP Address"]) | extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | where isnotempty(ip) | summarize n=count() by ip | top 10 by n desc | project ip, count=n, rpm=round(todouble(n)/${spanMins},2)`,
-    `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
-    `requests | extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | where isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS") | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
-    `requests | extend dimIp=tostring(customDimensions["Client IP Address"]), ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`,
+    `requests | ${clientUaExpr} | where isnotempty(ua) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | ${clientUaExpr} | where isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS") | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    // High-frequency bursts identify by IP OR agent, unlike clientIpExpr which requires
+    // an IP — a caller Azure could not resolve an address for is still a burst worth
+    // seeing, so this one falls back to the agent as the identifier.
+    `requests | ${clientUaExpr} | extend dimIp=tostring(customDimensions["Client IP Address"]) | extend rawIp=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) | extend identifier=iff(isempty(rawIp), ua, rawIp) | where isnotempty(identifier) | summarize requestCount=count() by bin(timestamp,1m), identifier, client_CountryOrRegion, ua | summarize totalCount=sum(requestCount), peakRpm=max(requestCount), firstSeen=min(timestamp), lastSeen=max(timestamp) by identifier, client_CountryOrRegion, ua | where peakRpm > 5 | top 5 by totalCount desc | project timestamp=firstSeen, lastSeen, ip=identifier, country=client_CountryOrRegion, userAgent=ua, count=totalCount, rpm=todouble(peakRpm)`,
     `exceptions | where outerMessage has_any ("SocketException","No buffer space available","ENOBUFS","actively refused","Connection refused","timed out","ETIMEDOUT","SNAT") | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
     `exceptions | where outerMessage has_any ("timeout","Timeout","timed out","SqlException","SqlTimeout","TaskCanceledException","HttpRequestException","TimeoutException") | where not(outerMessage has_any ("SocketException","ENOBUFS","No buffer space available","actively refused","Connection refused","ETIMEDOUT","SNAT")) | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
   ];
@@ -847,29 +935,158 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `exceptions | where ${OOM_ONLY_MATCH} | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
   ];
 
-  let urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows;
-  let ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows;
+  // Group D: response-time breakdown (5 queries → 1 HTTP call). The Response row
+  // only had avg / P99 / max for the whole app, which says a tail exists but not
+  // where it comes from. These answer that: which endpoints own the time, how the
+  // distribution is shaped, whether one worker is slow, and how much of the wait
+  // is spent in downstream calls rather than in our own code.
+  const groupDKqls = [
+    // D0 — full percentile spread. Avg 200ms with P99 1.3s is a tail problem;
+    // P50 sitting near P99 means everything is slow. Different investigations.
+    `requests | summarize count=count(), avgMs=round(avg(duration),1), p50=round(percentile(duration,50),1), p75=round(percentile(duration,75),1), p95=round(percentile(duration,95),1), p99=round(percentile(duration,99),1), maxMs=round(max(duration),1)`,
+    // D1 — total time contribution: count × avg, not max. Top-by-max finds one
+    // freak request; this finds the endpoint actually costing users seconds.
+    `requests | ${nameCleanExpr} | summarize count=count(), avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1), totalMs=round(sum(duration),0) by nameClean | top 10 by totalMs desc | project url=nameClean, count, avgMs, p95, totalMs`,
+    // D2 — App Insights stamps every request with a performanceBucket, so the whole
+    // distribution shape is one summarize rather than a histogram query.
+    `requests | where isnotempty(performanceBucket) | summarize count=count() by bucket=performanceBucket`,
+    // D3 — per worker. Separates one bad instance from plan-wide degradation.
+    `requests | where isnotempty(cloud_RoleInstance) | summarize count=count(), avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1), p99=round(percentile(duration,99),1), maxMs=round(max(duration),1) by instance=cloud_RoleInstance | order by p95 desc | take 20`,
+    // D4 — how much of the response was spent waiting on dependencies. Answers
+    // "is this us or downstream" without opening a single trace.
+    `requests | where isnotempty(operation_Id) | summarize reqMs=sum(duration) by operation_Id | join kind=leftouter (dependencies | summarize depMs=sum(duration) by operation_Id) on operation_Id | summarize totalReqMs=round(sum(reqMs),0), totalDepMs=round(sum(coalesce(depMs, 0.0)),0)`,
+    // D5 — this site's own response timeline. The Response chart used to come from
+    // the frontend's ARM metric, which has no API equivalent; querying it per App
+    // Insights resource is what lets the FE and the API each have one.
+    `requests | summarize avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1) by bin(timestamp, ${topUrlBin}) | order by timestamp asc`,
+    // D6 — the distributions split by outcome. Averaging successes together with
+    // failures is how a burst of instant 500s makes a latency graph improve while
+    // the service is down; this is the query that makes that visible.
+    `requests | summarize count=count(), p50=round(percentile(duration,50),1), p95=round(percentile(duration,95),1), p99=round(percentile(duration,99),1), maxMs=round(max(duration),1) by success`,
+    // D7 — error taxonomy. overSlo counts only successful responses, so a slow 500
+    // is one explicit failure rather than one explicit plus one policy failure.
+    `requests | summarize total=count(), failed=countif(success == false), fourXx=countif(toint(resultCode) >= 400 and toint(resultCode) < 500), fiveXx=countif(toint(resultCode) >= 500), overSlo=countif(success == true and duration > ${sloMs})`,
+  ];
+
+  // Group E: the Performance section (2 queries → 1 HTTP call).
+  //
+  // The existing Top / 4xx / 5xx lists answer three separate questions and cannot be
+  // read together: an endpoint that is busy AND failing AND slow appears three times,
+  // with a different metric each time and a different key each time (`urls` groups on
+  // the raw name, the failure lists on nameClean). This merges them into one endpoint
+  // set carrying all three golden signals — rate, errors, duration — so one row is
+  // one endpoint and one chart can show whether its latency moved with its errors.
+  //
+  // Keyed on nameClean throughout. Merging the raw-name list with the nameClean lists
+  // would emit '/order?id=1' and '/order' as two unrelated rows for one endpoint.
+  const PERF_5XX_CAP = 50;
+  // Every endpoint the section covers: the ten busiest, the ten worst 4xx, and every
+  // endpoint with a 5xx up to the cap. Held in one const and joined by BOTH queries
+  // below, because a row list and a timeline built from separately-derived key sets
+  // drift silently — the chart plots endpoints no row can select, and vice versa.
+  const perfKeyUnion =
+    `union (requests | ${nameCleanExpr} | summarize c=count() by nameClean | top 10 by c desc | project nameClean), ` +
+          `(requests | ${is4xx} | ${nameCleanExpr} | summarize c=count() by nameClean | top 10 by c desc | project nameClean), ` +
+          `(requests | ${is5xx} | ${nameCleanExpr} | summarize c=count() by nameClean | top ${PERF_5XX_CAP} by c desc | project nameClean) ` +
+    `| distinct nameClean`;
+  const perfAggregates =
+    `count=count(), c4=countif(${rc4xxExpr}), c5=countif(${rc5xxExpr}), ` +
+    `avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1)`;
+  const groupEKqls = [
+    // E0 — one row per endpoint, whole window. Ordered so a broken endpoint outranks a
+    // busy one: an endpoint taking three requests and 500ing all three is the first
+    // thing to look at, and sorting by traffic would bury it below fifty healthy rows.
+    `requests | extend rc=toint(resultCode) | ${nameCleanExpr} ` +
+    `| join kind=inner (${perfKeyUnion}) on nameClean ` +
+    `| summarize ${perfAggregates}, p99=round(percentile(duration,99),1), maxMs=round(max(duration),1) by nameClean ` +
+    `| project url=nameClean, count, rpm=round(todouble(count)/${spanMins},2), fourXx=c4, fiveXx=c5, avgMs, p95, p99, maxMs ` +
+    `| order by fiveXx desc, fourXx desc, count desc`,
+  ];
+
+  // Group F: the Users section (2 queries → 1 HTTP call).
+  //
+  // Per App Insights resource, which is the whole point: the card's old app-level Users
+  // row came from a frontend-only query, so an app's API had no user figures at all.
+  const TOP_CLIENTS = 10;
+  // The client ranking, in one place so F1's figures and F2's agents describe the same
+  // ten addresses. Both join against it rather than each applying its own `top 10`.
+  const topClientKey = `requests | ${clientIpExpr} | summarize n=count() by ip | top ${TOP_CLIENTS} by n desc | project ip`;
+  // The agent ranking, matching Group B's userAgents list (also top 10 by count) — that
+  // list supplies the rows the agent tab renders, and this supplies their lines.
+  const topAgentKey = `requests | ${clientUaExpr} | where isnotempty(ua) | summarize n=count() by ua | top ${TOP_CLIENTS} by n desc | project ua`;
+  const groupFKqls = [
+    // F0 — distinct clients per bucket. dcount is approximate by design in KQL; that is
+    // fine for a shape-of-traffic line and is why the figures below it are counts.
+    `requests | ${clientIpExpr} | summarize users=dcount(ip) by bin(timestamp, ${topUrlBin}) | order by timestamp asc`,
+    // F1 — the busiest clients, with enough detail to judge each one: how long it was
+    // around, how many distinct endpoints it touched, and what it got back. One address
+    // hitting one endpoint for an hour and collecting 404s is a prober; the same volume
+    // spread over forty endpoints is a person.
+    //
+    // Country comes from max() rather than a group key: Azure's geo lookup can resolve one
+    // IP to different regions across a window, and grouping on it would split a single
+    // client into two rows that each look half as busy.
+    `requests | ${clientIpExpr} | extend rc=toint(resultCode) ` +
+    `| summarize n=count(), country=max(client_CountryOrRegion), firstSeen=min(timestamp), lastSeen=max(timestamp), ` +
+      `urlCount=dcount(name), c4=countif(${rc4xxExpr}), c5=countif(${rc5xxExpr}) by ip ` +
+    `| join kind=inner (${topClientKey}) on ip ` +
+    `| project ip, country, count=n, rpm=round(todouble(n)/${spanMins},2), firstSeen, lastSeen, urlCount, fourXx=c4, fiveXx=c5 ` +
+    `| order by count desc`,
+    // F2 — each top client's dominant user agent, plus how many it presented.
+    //
+    // arg_max over a per-(ip, agent) count, not max(ua): max() on a string returns the
+    // lexically largest agent, which is an arbitrary one. The dominant agent is the one
+    // that identifies the client. `agents` counts the rest — a single address arriving
+    // under a dozen agents is one machine rotating them, which is worth seeing.
+    `requests | ${clientIpExpr} | ${clientUaExpr} | where isnotempty(ua) ` +
+    `| join kind=inner (${topClientKey}) on ip ` +
+    `| summarize uaN=count() by ip, ua ` +
+    `| summarize arg_max(uaN, ua), agents=count() by ip ` +
+    `| project ip, userAgent=ua, agents`,
+    // F3 / F4 — per-client and per-agent request timelines, for the same ten of each that
+    // the lists rank. These are what let a row be clicked and charted: the unique-user
+    // line says traffic doubled, and only one client's own line says whether that was
+    // everyone or one address.
+    //
+    // Inner-joined against the shared ranking consts rather than re-ranking, so every
+    // listed row has a line and no line exists that no row can select.
+    `requests | ${clientIpExpr} | join kind=inner (${topClientKey}) on ip ` +
+    `| summarize n=count() by bin(timestamp, ${topUrlBin}), ip ` +
+    `| project t=timestamp, key=ip, count=n | order by t asc`,
+    `requests | ${clientUaExpr} | where isnotempty(ua) | join kind=inner (${topAgentKey}) on ua ` +
+    `| summarize n=count() by bin(timestamp, ${topUrlBin}), ua ` +
+    `| project t=timestamp, key=ua, count=n | order by t asc`,
+  ];
+
+
+  let failedUrlRows, slowUrlRows, total4xxRows, total5xxRows, errorTypeRows, errorDetailRows;
+  let uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows;
   let depTimeoutRows;
   let insightResult;
   let groupCRows = null;
+  let groupDRows = null;
+  let groupERows = null;
+  let groupFRows = null;
 
   if (summaryOnly) {
     // Only fetch summary aggregates needed for collapsed badges (2 HTTP calls)
     const [[t4xx, t5xx, etRows, dtRows], ins] = await Promise.all([
-      runBatch([groupAKqls[5], groupAKqls[6], groupAKqls[8], groupAKqls[10]]),
+      runBatch([groupAKqls[2], groupAKqls[3], groupAKqls[4], groupAKqls[6]]),
       runQueryFull(insightKql),
     ]);
     total4xxRows = t4xx; total5xxRows = t5xx; errorTypeRows = etRows; depTimeoutRows = dtRows;
     insightResult = ins;
-    urlRows = null; failedUrlRows = null; slowUrlRows = null; failed4xxRows = null; failed5xxRows = null;
-    topDepRows = null; errorDetailRows = null;
-    ipRows = null; uaRows = null; botRows = null; hfRows = null; snatDetailRows = null; sqlHttpDetailRows = null;
+    failedUrlRows = null; slowUrlRows = null; errorDetailRows = null;
+    uaRows = null; botRows = null; hfRows = null; snatDetailRows = null; sqlHttpDetailRows = null;
   } else {
-    [[urlRows, failedUrlRows, slowUrlRows, failed4xxRows, failed5xxRows, total4xxRows, total5xxRows, topDepRows, errorTypeRows, errorDetailRows, depTimeoutRows], [ipRows, uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult, groupCRows] = await Promise.all([
+    [[failedUrlRows, slowUrlRows, total4xxRows, total5xxRows, errorTypeRows, errorDetailRows, depTimeoutRows], [uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult, groupCRows, groupDRows, groupERows, groupFRows] = await Promise.all([
       runBatch(groupAKqls),
       runBatch(groupBKqls),
       runQueryFull(insightKql),
       runBatch(groupCKqls),
+      runBatch(groupDKqls),
+      runBatch(groupEKqls),
+      runBatch(groupFKqls),
     ]);
   }
 
@@ -905,6 +1122,97 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     timeline:   (cRows(3) ?? []).map(([t, count]) => ({ t: str(t), count: num(count) })),
     targets:    (cRows(4) ?? []).map(([target, depType, resultCode, count, avgDuration, p95]) => ({ target: str(target) || '(unknown)', depType: str(depType), resultCode: str(resultCode), count: num(count), avgDuration: num(avgDuration), p95: num(p95) })),
     details:    (cRows(5) ?? []).map(socketDetailMapper),
+  };
+
+  // ── Group D parse ──────────────────────────────────────────────────────────
+  const dRows = (i) => (Array.isArray(groupDRows) && Array.isArray(groupDRows[i]) ? groupDRows[i] : null);
+  const spreadRow = dRows(0)?.[0] ?? null;
+  const depShareRow = dRows(4)?.[0] ?? null;
+  const totalReqMs = depShareRow ? num(depShareRow[0]) : 0;
+  const totalDepMs = depShareRow ? num(depShareRow[1]) : 0;
+  const responseInsights = groupDRows == null ? null : {
+    spread: spreadRow ? {
+      count: num(spreadRow[0]),
+      avgMs: num(spreadRow[1]),
+      p50:   num(spreadRow[2]),
+      p75:   num(spreadRow[3]),
+      p95:   num(spreadRow[4]),
+      p99:   num(spreadRow[5]),
+      maxMs: num(spreadRow[6]),
+    } : null,
+    byTotalTime: (dRows(1) ?? []).map(([url, count, avgMs, p95, totalMs]) => ({
+      url: str(url) || '(unknown)', count: num(count), avgMs: num(avgMs), p95: num(p95), totalMs: num(totalMs),
+    })),
+    buckets: (dRows(2) ?? []).map(([bucket, count]) => ({ bucket: str(bucket), count: num(count) })),
+    byInstance: (dRows(3) ?? []).map(([instance, count, avgMs, p95, p99, maxMs]) => ({
+      instance: str(instance) || 'unknown', count: num(count), avgMs: num(avgMs), p95: num(p95), p99: num(p99), maxMs: num(maxMs),
+    })),
+    // Dependency time can exceed request time when calls run in parallel, so the
+    // share is capped — over 100% would read as a data error rather than as
+    // "this endpoint fans out".
+    dependencyShare: totalReqMs > 0 ? Math.min(100, Math.round(totalDepMs / totalReqMs * 1000) / 10) : null,
+    series: (dRows(5) ?? []).map(([t, avgMs, p95]) => ({ t: str(t), avgMs: num(avgMs), p95: num(p95) })),
+    seriesBin: Array.isArray(dRows(5)) ? topUrlBin : null,
+    bySuccess: (() => {
+      // KQL returns `success` as a bool or as the string "True" depending on the
+      // schema version, so both spellings are accepted rather than assumed.
+      const pick = (want) => {
+        const row = (dRows(6) ?? []).find(r => String(r[0]).toLowerCase() === String(want));
+        return row ? { count: num(row[1]), p50: num(row[2]), p95: num(row[3]), p99: num(row[4]), maxMs: num(row[5]) } : null;
+      };
+      return { ok: pick(true), failed: pick(false) };
+    })(),
+    errors: (() => {
+      const row = dRows(7)?.[0];
+      if (!row) return null;
+      return { total: num(row[0]), failed: num(row[1]), fourXx: num(row[2]), fiveXx: num(row[3]), overSlo: num(row[4]) };
+    })(),
+    sloMs,
+  };
+
+  // ── Group E parse ──────────────────────────────────────────────────────────
+  const eRows = (i) => (Array.isArray(groupERows) && Array.isArray(groupERows[i]) ? groupERows[i] : null);
+  const perfEndpoints = (eRows(0) ?? []).map(([url, count, rpmVal, fourXx, fiveXx, avgMs, p95, p99, maxMs]) => ({
+    url: str(url) || '(unknown)',
+    count: num(count), rpm: num(rpmVal),
+    fourXx: num(fourXx), fiveXx: num(fiveXx),
+    avgMs: num(avgMs), p95: num(p95), p99: num(p99), maxMs: num(maxMs),
+  }));
+  const performance = groupERows == null ? null : {
+    endpoints: perfEndpoints,
+    // The 5xx arm of the key set is capped, so a wide outage can be trimmed. Reported
+    // rather than silently truncated: a list that stops at exactly the cap reads as
+    // "these are all of them" when it is not.
+    fiveXxCap: PERF_5XX_CAP,
+    fiveXxCapped: perfEndpoints.filter(e => e.fiveXx > 0).length >= PERF_5XX_CAP,
+  };
+
+  // ── Group F parse ──────────────────────────────────────────────────────────
+  const fRows = (i) => (Array.isArray(groupFRows) && Array.isArray(groupFRows[i]) ? groupFRows[i] : null);
+  // F2's agents are folded onto F1's rows here rather than shipped as a second list:
+  // both describe the same ten clients, and one flat row is what the UI renders.
+  const agentByIp = new Map((fRows(2) ?? []).map(([ip, userAgent, agents]) => [
+    str(ip), { userAgent: str(userAgent), agents: num(agents) },
+  ]));
+  const userInsights = groupFRows == null ? null : {
+    bin: Array.isArray(fRows(0)) ? topUrlBin : null,
+    series: (fRows(0) ?? []).map(([t, users]) => ({ t: str(t), users: num(users) })),
+    topIps: (fRows(1) ?? []).map(([ip, country, count, rpmVal, firstSeen, lastSeen, urlCount, fourXx, fiveXx]) => {
+      const key = str(ip);
+      const agent = agentByIp.get(key);
+      return {
+        ip: key || '(unknown)', country: str(country),
+        count: num(count), rpm: num(rpmVal),
+        firstSeen: str(firstSeen), lastSeen: str(lastSeen),
+        urlCount: num(urlCount), fourXx: num(fourXx), fiveXx: num(fiveXx),
+        userAgent: agent?.userAgent ?? '', agents: agent?.agents ?? 0,
+      };
+    }),
+    // groupUrlSeries already turns flat [t, key, count] rows into one gap-preserving
+    // series per key; only the field name differs, since these keys are addresses and
+    // agents rather than URLs.
+    clientSeries: (Array.isArray(fRows(3)) ? groupUrlSeries(fRows(3)) : []).map(({ url, series }) => ({ key: url, series })),
+    agentSeries:  (Array.isArray(fRows(4)) ? groupUrlSeries(fRows(4)) : []).map(({ url, series }) => ({ key: url, series })),
   };
 
   const genericDetailMapper = ([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({
@@ -978,24 +1286,22 @@ async function getRequestInsights(appId, credential, range, customStart, customE
   }
 
   return {
-    urls:        parseOrErr(urlRows,       ([url, count, rpm])    => ({ url: String(url),       count: Number(count), rpm: Number(rpm) })),
-    ips:         parseOrErr(ipRows,        ([ip, count, rpm])     => ({ ip: String(ip),         count: Number(count), rpm: Number(rpm) })),
     userAgents:  parseOrErr(uaRows,        ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     bots:        parseOrErr(botRows,       ([ua, count, rpm])     => ({ userAgent: String(ua),  count: Number(count), rpm: Number(rpm) })),
     highFreq:    parseOrErr(hfRows,        ([ts, lastSeen, ip, country, ua, count, rpm]) => ({ timestamp: String(ts), lastSeen: String(lastSeen), ip: String(ip), country: String(country), userAgent: String(ua), count: Number(count), rpm: Number(rpm) })),
     failedUrls:  parseOrErr(failedUrlRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
-    failed4xxUrls: parseOrErr(failed4xxRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
-    failed5xxUrls: parseOrErr(failed5xxRows, ([url, totalCount, failCount, p95, p99]) => ({ url: String(url), totalCount: Number(totalCount) || 0, count: Number(failCount) || 0, p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })),
     slowUrls:    parseOrErr(slowUrlRows,   ([url, avgMs, p99Ms, maxMs, count]) => ({ url: String(url), avgMs: Number(avgMs), p99Ms: Number(p99Ms), maxMs: Number(maxMs), count: Number(count) })),
     total4xx: Array.isArray(total4xxRows) && total4xxRows[0] ? Number(total4xxRows[0][0]) || 0 : null,
     total5xx: Array.isArray(total5xxRows) && total5xxRows[0] ? Number(total5xxRows[0][0]) || 0 : null,
     snatDetails: Array.isArray(snatDetailRows) ? snatDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
     sqlHttpDetails: Array.isArray(sqlHttpDetailRows) ? sqlHttpDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
-    topDependencies: Array.isArray(topDepRows) ? topDepRows.map(([classification, name, type, target, totalCount, failCount, avgDuration, p95, p99]) => ({ classification: classification === 'internal' ? 'internal' : classification === 'assets' ? 'assets' : 'thirdParty', name: String(name), type: String(type), target: String(target), totalCount: Number(totalCount) || 0, failCount: Number(failCount) || 0, avgDuration: Math.round(Number(avgDuration) || 0), p95: Math.round(Number(p95) || 0), p99: Math.round(Number(p99) || 0) })) : null,
     errorTypes: Array.isArray(errorTypeRows) ? errorTypeRows.map(([type, count]) => ({ type: String(type || 'Unknown'), count: Number(count) || 0 })) : null,
     errorCount: Array.isArray(errorTypeRows) ? errorTypeRows.reduce((s, [, c]) => s + (Number(c) || 0), 0) : null,
     errorDetails: Array.isArray(errorDetailRows) ? errorDetailRows.map(([timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack]) => ({ timestamp: String(timestamp ?? ''), type: String(type ?? 'Unknown'), outerMessage: String(outerMessage ?? ''), method: String(method ?? ''), assembly: String(assembly ?? ''), operation_Name: String(operation_Name ?? ''), innermostMessage: String(innermostMessage ?? ''), severityLevel: severityLevel != null ? Number(severityLevel) : null, handledAt: String(handledAt ?? ''), cloud_RoleName: String(cloud_RoleName ?? ''), client_Browser: String(client_Browser ?? ''), client_OS: String(client_OS ?? ''), innermostType: String(innermostType ?? ''), innermostMethod: String(innermostMethod ?? ''), parsedStack: String(parsedStack ?? '') })) : null,
     dependencyTimeouts: Array.isArray(depTimeoutRows) ? depTimeoutRows.map(([name, resultCode, depType, p95, maxMs, count]) => ({ name: String(name ?? ''), resultCode: String(resultCode ?? ''), type: String(depType ?? ''), p95: Math.round(Number(p95) || 0), maxMs: Math.round(Number(maxMs) || 0), count: Number(count) || 0 })) : null,
+    responseInsights,
+    performance,
+    userInsights,
     socketInsights,
     timeoutInsights,
     oomInsights,
@@ -1065,16 +1371,18 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
 
   const [
     cpu, { metric: memory, unit: memUnit },
-    instances, availability, responseTime, requests, failedRequests, failedRequestsSeries,
+    instances, availability, httpQueue, requests, failedRequests, failedRequestsSeries,
     instanceHealthSeries, instanceProbeSeries, requestInsights, http4xxSeries, requestSeries,
-    aiFailedByInstance, caTimeSeries, connections, userStats,
+    aiFailedByInstance, caTimeSeries,
     dbCpu, dbMemory,
   ] = await Promise.all([
     queryMetric(client, metricsResId, 'CpuPercentage', range, gran, customStart, customEnd),
     fetchMemory(),
     isAppService ? getInstances(token, resId, range, gran, customStart, customEnd) : getReplicas(token, resId),
     getAvailability(client, token, resId, app.type, range, gran, customStart, customEnd, aiAppId, credential),
-    isAppService ? getResponseTime(client, resId, range, gran, customStart, customEnd) : Promise.resolve(null),
+    // Queue length is the one saturation signal that is not a utilization percentage:
+    // requests waiting for a worker. Published on the plan, Windows only, null elsewhere.
+    isAppService ? queryMetric(client, metricsResId, 'HttpQueueLength', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? queryCountMetrics(client, resId, ['Requests'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? queryCountMetrics(client, resId, ['Http4xx', 'Http5xx'], range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     isAppService ? queryFailedRequestsSeries(client, resId, range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
@@ -1085,8 +1393,6 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     isAppService ? queryCountSeries(client, resId, 'Requests', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     aiAppId ? getFailedRequestsByInstance(aiAppId, credential, range, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     (!isAppService && aiAppId) ? getContainerAppTimeSeries(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
-    isAppService ? queryMetric(client, resId, 'AppConnections', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
-    aiAppId ? getUserStats(aiAppId, credential, range, customStart, customEnd, gran).catch(() => null) : Promise.resolve(null),
     hasDb ? queryMetric(client, dbResId, 'cpu_percent', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
     hasDb ? queryMetric(client, dbResId, 'sql_instance_memory_percent', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
   ]);
@@ -1174,9 +1480,11 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
   let apiInstances = null;
   let apiInstanceHealthSeries = null;
   let apiRequestInsights = null;
-  let apiFailedDependencies = null;
   let apiAppInsightsConfigured = false;
-  let apiConnections = null;
+  // Whether the API runs on the same App Service plan as the frontend. SNAT ports
+  // are allocated per worker instance on the plan, so when it is shared both sites
+  // report the same figures and the card shows them once instead of twice.
+  let apiSharesPlan = null;
   if (app.apiName) {
     const apiResId = resourceId(subscriptionId, {
       type: app.apiType || 'appservice',
@@ -1186,17 +1494,22 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
 
     const apiIsContainerApp = (app.apiType || 'appservice') === 'containerapp';
     // Resolve apiAiAppId in parallel with instances + health
-    const [apiInst, apiHealth, apiAiAppId, apiConn] = await Promise.all([
+
+    const [apiInst, apiHealth, apiAiAppId] = await Promise.all([
       apiIsContainerApp ? getReplicas(token, apiResId) : getInstances(token, apiResId, range, gran, customStart, customEnd).catch(() => null),
       apiIsContainerApp ? Promise.resolve(null) : getInstanceHealthSeries(client, apiResId, range, gran, customStart, customEnd).catch(() => null),
       app.apiInsightsAppId
         ? Promise.resolve(app.apiInsightsAppId)
         : (apiIsContainerApp ? Promise.resolve(null) : findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null)),
-      apiIsContainerApp ? Promise.resolve(null) : queryMetric(client, apiResId, 'AppConnections', range, gran, customStart, customEnd).catch(() => null),
     ]);
     apiInstances = apiInst;
     apiInstanceHealthSeries = apiHealth;
-    apiConnections = apiConn;
+
+    if (!apiIsContainerApp && isAppService) {
+      const apiPlan = await getPlanInfo(token, apiResId).catch(() => null);
+      apiSharesPlan = !!(plan?.farmId && apiPlan?.farmId &&
+        plan.farmId.toLowerCase() === apiPlan.farmId.toLowerCase());
+    }
 
     // Supplement API instances with historical entries from apiInstanceHealthSeries
     if (apiInstanceHealthSeries && apiInstances) {
@@ -1232,7 +1545,6 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
         getFailedRequestsByInstance(apiAiAppId, credential, range, customStart, customEnd).catch(() => null),
       ]);
       apiRequestInsights = apiRI;
-      apiFailedDependencies = null;
 
       // Enrich apiInstanceHealthSeries with AI fallback if Azure Monitor returned nothing
       if (!apiInstanceHealthSeries?.length && apiAiFBI?.length) {
@@ -1261,28 +1573,24 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     memUnit,
     dbCpu: dbCpu ?? null,
     dbMemory: dbMemory ?? null,
-    connections: isAppService ? connections : null,
-    apiConnections: apiConnections ?? null,
     plan,
     instances,
     apiInstances,
-    responseTime: isAppService ? responseTime : (caTimeSeries?.responseTime ?? null),
     availability: refinedAvailability,
     requests: isAppService ? requests : (caInsight?.totalRequests != null ? { total: caInsight.totalRequests } : null),
     failedRequests: isAppService ? failedRequests : (caInsight?.failedRequests != null ? { total: caInsight.failedRequests } : null),
     failedRequestsSeries: effectiveFailedSeries,
     http4xxSeries: isAppService ? (http4xxSeries ?? null) : (caTimeSeries?.http4xxSeries ?? null),
     requestsSeries: isAppService ? requestSeries : (caTimeSeries?.requestsSeries ?? null),
+    httpQueue: httpQueue ?? null,
     instanceHealthSeries: effectiveInstanceHealth,
     apiInstanceHealthSeries: apiInstanceHealthSeries ?? null,
     instanceProbeSeries: (instanceProbeSeries && instanceProbeSeries.length) ? instanceProbeSeries : null,
     requestInsights,
-    failedDependencies: null,
     appInsightsConfigured: !!aiAppId,
     apiRequestInsights: apiRequestInsights ?? null,
-    apiFailedDependencies: apiFailedDependencies ?? null,
     apiAppInsightsConfigured,
-    users: userStats ?? null,
+    apiSharesPlan,
   };
 }
 
@@ -1316,25 +1624,19 @@ async function fetchAppDetailsData(app, subscriptionId, credential, range, custo
       : Promise.resolve(null),
   ]);
 
-  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, failedDependencies: null, apiFailedDependencies: null, socketMetrics, apiSocketMetrics };
 
-  const apiIsContainerApp = apiIsContainerAppEarly;
-  const [appHostnames, apiHostnames] = await Promise.all([
-    getAppHostnames(token, resourceId(subscriptionId, app), app.type),
-    app.apiName
-      ? getAppHostnames(token, resourceId(subscriptionId, { name: app.apiName, resourceGroup: app.resourceGroup, type: apiIsContainerApp ? 'containerapp' : 'appservice' }), apiIsContainerApp ? 'containerapp' : 'appservice')
-      : Promise.resolve([]),
-  ]);
-  const internalCondition = buildInternalCondition(app, [...appHostnames, ...apiHostnames]);
 
-  const [requestInsights, apiRequestInsights, failedDependencies, apiFailedDependencies] = await Promise.all([
-    getRequestInsights(aiAppId, credential, range, customStart, customEnd, false, internalCondition).catch(() => null),
-    apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false, internalCondition).catch(() => null) : Promise.resolve(null),
-    getFailedDependencies(aiAppId, credential, range, customStart, customEnd, internalCondition).catch(() => null),
-    apiAiAppId ? getFailedDependencies(apiAiAppId, credential, range, customStart, customEnd, internalCondition).catch(() => null) : Promise.resolve(null),
+
+  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, socketMetrics, apiSocketMetrics };
+
+  const [requestInsights, apiRequestInsights] = await Promise.all([
+    getRequestInsights(aiAppId, credential, range, customStart, customEnd, false, app.sloMs || DEFAULT_SLO_MS).catch(() => null),
+    apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false, app.sloMs || DEFAULT_SLO_MS).catch(() => null) : Promise.resolve(null),
   ]);
 
-  return { requestInsights, apiRequestInsights, failedDependencies: failedDependencies ?? null, apiFailedDependencies: apiFailedDependencies ?? null, socketMetrics, apiSocketMetrics };
+  return { requestInsights, apiRequestInsights, socketMetrics, apiSocketMetrics };
+
+
 }
 
 // ─── Detector KQL helpers ─────────────────────────────────────────────────────
@@ -1510,6 +1812,170 @@ const handler = (_mainWindow) => {
     }
   });
 
+  /**
+   * One endpoint's downstream calls.
+   *
+   * Its own handler, fetched per endpoint on selection, rather than a top-8-for-every-
+   * endpoint query inside the details batch. Three reasons:
+   *
+   *  - The details response is cached, so folding this in meant a card fetched before the
+   *    feature existed served a payload with no dependency data and no way to ask for it.
+   *  - Inside runBatch a rejected query comes back as an error object, which the parse
+   *    turned into an empty list — a KQL failure was indistinguishable from "this endpoint
+   *    called nothing". Here the error travels to the UI and is shown.
+   *  - Only one endpoint is ever on screen, so fetching sixty endpoints' calls to render
+   *    one was most of the work wasted.
+   *
+   * Attribution is by `operation_Name`, the request that made the call, cleaned exactly
+   * like request `name` so a query string cannot split one endpoint in two. A dependency
+   * raised outside a request (startup, a background job) has no operation_Name and is
+   * therefore absent rather than attributed to an arbitrary endpoint.
+   */
+  ipcMain.handle('azure-metrics:fetch-endpoint-detail', async (_event, { appKey, endpoint, site, config, range, customStart, customEnd }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { series: null, deps: null, error: 'No config' };
+    if (!endpoint) return { series: null, deps: null, error: 'No endpoint' };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { series: null, deps: null, error: `App "${appKey}" not found` };
+
+    const cacheKey = `${appKey}:epdeps:${site}:${endpoint}:${customStart ?? range}:${customEnd ?? ''}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const cred = new DefaultAzureCredential();
+      const token = await getToken(cred);
+      const isAppService = app.type === 'appservice';
+      const appId = site === 'api'
+        ? (app.apiInsightsAppId
+            || ((app.apiType || 'appservice') === 'appservice' && isAppService
+                 ? await findAppInsightsAppId(token, config.subscriptionId, app.resourceGroup, app.apiName).catch(() => null)
+                 : null))
+        : (app.appInsightsAppId
+            || (isAppService
+                 ? await findAppInsightsAppId(token, config.subscriptionId, app.resourceGroup, app.name).catch(() => null)
+                 : null));
+      if (!appId) return { series: null, deps: null, error: 'No App Insights resource for this site' };
+
+      const result = await fetchEndpointDetail(appId, cred, endpoint, range, customStart, customEnd);
+      // Only a real answer is cached. Caching an error would pin a transient failure for
+      // the whole TTL and make the retry look broken.
+      if (Array.isArray(result.deps)) setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { series: null, deps: null, error: err.message || String(err) };
+    }
+  });
+
+  // SNAT port allocations come from App Service Diagnostics, not Azure Monitor, so
+  // they have their own handler rather than riding along with fetch-app-details:
+  // the detector round trip is slow and the section is only loaded when expanded.
+  ipcMain.handle('azure-metrics:fetch-snat', async (_event, { appKey, range, config, customStart, customEnd, granularity }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { fe: { charts: null, error: 'No config' }, api: null, shared: false };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { fe: { charts: null, error: `App "${appKey}" not found` }, api: null, shared: false };
+
+    // The grain is part of the key: the same window at 1m and at 15m are different
+    // answers, and the finer one must not be served from a coarser cached fetch.
+    const gran = granularity || ((customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range));
+    const cacheKey = `${appKey}:snat:${customStart ?? range}:${customEnd ?? ''}:${gran}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const cred = new DefaultAzureCredential();
+      const token = await getToken(cred);
+      const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+      const startIso = startTime.toISOString();
+      const endIso = endTime.toISOString();
+
+      // Container Apps do not run on an App Service plan, so there is no detector
+      // for them — the site is skipped rather than reported as an error.
+      const forSite = async (siteApp, isAppService) => {
+        if (!isAppService) return { charts: null };
+        try {
+          const parsed = await fetchSnatCharts(token, resourceId(config.subscriptionId, siteApp), startIso, endIso, gran);
+          // requestedGrain travels with the data so the UI can say when the detector
+          // served a coarser bucket than the interval the user picked.
+          return { charts: parsed?.charts ?? null, detector: parsed?.detector ?? null, grainMs: parsed?.grainMs ?? null, requestedGrain: gran };
+        } catch (err) {
+          return { charts: null, error: err.message || String(err) };
+        }
+      };
+
+      // Ports are allocated per worker instance on the plan, so a shared plan means
+      // both detectors return the same numbers — the API call is skipped and the
+      // card shows one section instead of two identical ones.
+      const apiIsAppService = !!app.apiName && (app.apiType || 'appservice') === 'appservice';
+      const apiSite = { type: 'appservice', resourceGroup: app.resourceGroup, name: app.apiName };
+      const shared = apiIsAppService && await (async () => {
+        const [fePlan, apiPlan] = await Promise.all([
+          getPlanInfo(token, resourceId(config.subscriptionId, app)).catch(() => null),
+          getPlanInfo(token, resourceId(config.subscriptionId, apiSite)).catch(() => null),
+        ]);
+        return !!(fePlan?.farmId && apiPlan?.farmId &&
+          fePlan.farmId.toLowerCase() === apiPlan.farmId.toLowerCase());
+      })();
+
+      const [fe, api] = await Promise.all([
+        forSite(app, (app.type || 'appservice') === 'appservice'),
+        apiIsAppService && !shared ? forSite(apiSite, true) : Promise.resolve(null),
+      ]);
+
+      const result = { fe, api, shared };
+      // Only a result with charts is worth keeping. Caching an empty one pins a
+      // transient detector failure to the card for the whole TTL, and re-running
+      // the fetch is the obvious thing a user does when the section looks wrong.
+      if (fe?.charts?.length) setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { fe: { charts: null, error: err.message || String(err) }, api: null, shared: false };
+    }
+  });
+
+  // Restart events are per site: a frontend restarting while its API stays up is
+  // the distinction worth seeing, so unlike SNAT this is never collapsed into one.
+  ipcMain.handle('azure-metrics:fetch-restarts', async (_event, { appKey, range, config, customStart, customEnd, granularity }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { fe: null, api: null };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { fe: null, api: null };
+
+    const gran = granularity || ((customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range));
+    const cacheKey = `${appKey}:restarts:${customStart ?? range}:${customEnd ?? ''}:${gran}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const cred = new DefaultAzureCredential();
+      const token = await getToken(cred);
+      const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+      const startIso = startTime.toISOString();
+      const endIso = endTime.toISOString();
+
+      const forSite = async (siteApp, isAppService) => {
+        if (!isAppService) return null;
+        try {
+          return await fetchRestartCharts(token, resourceId(config.subscriptionId, siteApp), startIso, endIso, gran);
+        } catch { return null; }
+      };
+
+      const apiIsAppService = !!app.apiName && (app.apiType || 'appservice') === 'appservice';
+      const [fe, api] = await Promise.all([
+        forSite(app, (app.type || 'appservice') === 'appservice'),
+        apiIsAppService
+          ? forSite({ type: 'appservice', resourceGroup: app.resourceGroup, name: app.apiName }, true)
+          : Promise.resolve(null),
+      ]);
+
+      const result = { fe, api };
+      // Same reasoning as the SNAT cache: pinning a transient detector failure for
+      // the whole TTL makes a re-fetch look broken.
+      if (fe?.charts?.length || api?.charts?.length) setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { fe: null, api: null, error: err.message || String(err) };
+    }
+  });
+
   ipcMain.handle('azure-metrics:fetch-detectors', async (_event, { appInsightsAppId, startIso, endIso }) => {
     if (!appInsightsAppId) return { categories: [], error: 'No App Insights App ID' };
     let token;
@@ -1541,5 +2007,6 @@ const handler = (_mainWindow) => {
 
 handler._getGranularity = getGranularity;
 handler._summarize = summarize;
+handler._groupUrlSeries = groupUrlSeries;
 
 module.exports = handler;

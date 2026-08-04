@@ -15,8 +15,6 @@ export const C = {
   btnActive:  '#1f6feb',
 } as const;
 
-export const INGESTION_DELAY_MS = 5 * 60 * 1000;
-
 export const GRANULARITIES: { label: string; value: string; maxSpanHours: number }[] = [
   { label: '1m',  value: 'PT1M',  maxSpanHours: 24 },
   { label: '5m',  value: 'PT5M',  maxSpanHours: 120 },
@@ -36,8 +34,16 @@ export function toDatetimeLocal(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function maxEndDt(): string {
-  return toDatetimeLocal(new Date(Date.now() - INGESTION_DELAY_MS));
+/**
+ * Current local time, for the "now" button and the default end of the range.
+ *
+ * The picker used to be clamped five minutes back for App Insights ingestion lag.
+ * That silently refused the most recent window during an incident — exactly when
+ * it is wanted — so the range is unrestricted and a thin last bucket is simply
+ * what a very recent end looks like.
+ */
+export function nowDt(): string {
+  return toDatetimeLocal(new Date());
 }
 
 export const inputStyle: React.CSSProperties = {

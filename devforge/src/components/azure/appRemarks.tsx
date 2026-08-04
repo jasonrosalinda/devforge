@@ -25,12 +25,20 @@ export interface RemarkResult {
 
 export type VisibleBlocks = Partial<Record<string, boolean>>;
 
+/**
+ * Which visible-block toggle silences each remark.
+ *
+ * Latency and error remarks point at 'performance': the Response and Requests rows they
+ * used to name are gone, and Performance is the row that now carries both per endpoint.
+ * A stale key here would not error — VisibleBlocks is a Partial<Record<string, boolean>>,
+ * so an unknown key reads as undefined and the remark would simply become unsilenceable.
+ */
 const KIND_TO_BLOCK: Record<RemarkKind, string> = {
   'CPU spike': 'cpu',
   'memory pressure': 'memory',
-  'slow response': 'response',
-  '5xx errors': 'requests',
-  '4xx surge': 'requests',
+  'slow response': 'performance',
+  '5xx errors': 'performance',
+  '4xx surge': 'performance',
   'downtime': 'uptimerobot',
 };
 
@@ -210,8 +218,12 @@ export function buildRemarks(
     severity: severityFromLastBad(memLastBad, rangeStart, rangeEnd),
   });
 
-  const respLastBad = findLastBadIso(m.responseTime?.series, (p) => p.avg > RESP_SLOW_SEC);
-  const respEpisodes = countEpisodes(m.responseTime?.series, (p) => p.avg > RESP_SLOW_SEC);
+  // Response now comes from per-site request telemetry rather than the frontend's
+  // ARM metric, so the series is in milliseconds and carries a P95 alongside the
+  // average. P95 is the signal: an average hides a tail that users still feel.
+  const respSeries = m.requestInsights?.responseInsights?.series;
+  const respLastBad = findLastBadIso(respSeries, (p) => p.p95 > RESP_SLOW_SEC * 1000);
+  const respEpisodes = countEpisodes(respSeries, (p) => p.p95 > RESP_SLOW_SEC * 1000);
   remarks.push({
     kind: 'slow response',
     display: respEpisodes > 0 ? `slow response (${respEpisodes} ${respEpisodes === 1 ? 'spike' : 'spikes'})` : undefined,
@@ -295,14 +307,16 @@ interface AppRemarksProps {
   rangeEnd?: string | undefined;
   visibleBlocks?: VisibleBlocks;
   urMonitors?: UptimeRobotMonitor[];
+  /** Drop the inline "Remarks:" prefix when a surrounding card header already says it. */
+  hideLabel?: boolean;
 }
 
-export function AppRemarks({ metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors }: AppRemarksProps) {
+export function AppRemarks({ metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors, hideLabel = false }: AppRemarksProps) {
   const { text, severity } = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
   if (!text) return null;
   return (
     <div className="text-xs">
-      <span className="text-muted-foreground font-bold">Remarks: </span>
+      {!hideLabel && <span className="text-muted-foreground font-bold">Remarks: </span>}
       <span style={{ color: SEVERITY_COLORS[severity], fontWeight: 600 }}>{text}</span>
     </div>
   );
