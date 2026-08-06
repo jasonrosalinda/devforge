@@ -9,7 +9,7 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,8 @@ import { SnatPortsRows } from './snatPortSection';
 import { RestartRows } from './restartSection';
 import { PerformanceRows } from './performanceSection';
 import { UserRows } from './userSection';
+import { ExceptionLocationChart } from './exceptionLocationChart';
+import { ExceptionSiteTable } from './exceptionSiteTable';
 import { SkeletonBlock, ListSkeletonRow } from './loadingSkeleton';
 import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
@@ -78,6 +80,40 @@ function excBucketCounts(ri: {
   const generic = list.reduce((s, t) => s + (t.trueCount ?? t.count), 0);
   const total = ri?.errorCount ?? generic;
   return { generic, timeout: null, socket: null, oom: null, total, breakdown: 'Bucket breakdown unavailable — refresh to load it.' };
+}
+
+/** The throw-site chart as a table row, sitting between the tab strip and the
+ *  tab's own content. Filtering by bucket happens here so one payload — every
+ *  bucket's sites in one list — serves all four tabs without a refetch. */
+function ExcLocationChartRow({ sites, bucket, bin, topN, error, syncId }: {
+  sites: ExceptionLocationSeries[] | null | undefined;
+  bucket: ExcTab;
+  bin?: string | null | undefined;
+  topN?: number | null | undefined;
+  error?: string | null | undefined;
+  syncId?: string | undefined;
+}) {
+  const forBucket = (sites ?? []).filter(s => s.bucket === bucket);
+  // A failed query says so instead of rendering nothing — an absent chart would
+  // otherwise read as "this bucket has no exceptions", which the tab count next
+  // to it plainly contradicts.
+  if (!forBucket.length) {
+    if (!error) return null;
+    return (
+      <tr>
+        <td colSpan={4} style={{ paddingLeft: 20, paddingTop: 2, paddingBottom: 2, fontSize: 9, color: '#d29922' }}>
+          Throw-site chart unavailable: {error}
+        </td>
+      </tr>
+    );
+  }
+  return (
+    <tr>
+      <td colSpan={4} style={{ paddingTop: 0, paddingBottom: 0 }}>
+        <ExceptionLocationChart sites={forBucket} bin={bin} topN={topN} syncId={syncId} />
+      </td>
+    </tr>
+  );
 }
 
 function ExcTabRow({ value, onChange, counts }: {
@@ -1376,12 +1412,17 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     details: ErrDetail[] | null | undefined,
     selType: string | null,
     setSelType: (t: string | null) => void,
+    // Server-side throw sites for the whole window. Preferred over `details`,
+    // which is capped at 50 sampled records and so cannot state a real total.
+    sites?: ExceptionSiteRow[] | null | undefined,
+    siteTopN?: number | null | undefined,
   ): React.ReactNode => (
     types.length === 0
       ? <tr><td colSpan={4} style={{ fontSize: 10, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No exception type data</td></tr>
       : <>{types.map((e, i) => {
         const isSelected = selType === e.type;
         const filtered = (details ?? []).filter(d => d.type === e.type);
+        const typeSites = (sites ?? []).filter(s => s.type === e.type);
         const shown = e.trueCount ?? e.count;
         return (
           <React.Fragment key={i}>
@@ -1404,10 +1445,19 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 title={e.trueCount != null && e.trueCount !== e.count ? `${e.trueCount.toLocaleString()} occurrences, from ${e.count.toLocaleString()} sampled records` : undefined}
               >{shown.toLocaleString()}</td>
             </tr>
-            {isSelected && filtered.length === 0 && (
+            {isSelected && filtered.length === 0 && typeSites.length === 0 && (
               <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 32, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No detail records available</td></tr>
             )}
-            {isSelected && (() => {
+            {/* The site table when the query behind it ran; the old per-endpoint
+                list only as the fallback for payloads cached before it existed. */}
+            {isSelected && typeSites.length > 0 && (
+              <tr style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(248,81,73,0.03)' }}>
+                <td colSpan={4} style={{ paddingLeft: 32, paddingRight: 8, paddingTop: 4, paddingBottom: 6 }}>
+                  <ExceptionSiteTable rows={typeSites} topN={siteTopN} />
+                </td>
+              </tr>
+            )}
+            {isSelected && typeSites.length === 0 && (() => {
               const grouped = filtered.reduce<Map<string, { d: ErrDetail; count: number }>>(
                 (map, d) => { const key = d.operation_Name || '(unknown path)'; const ex = map.get(key); if (ex) ex.count++; else map.set(key, { d, count: 1 }); return map; },
                 new Map()
@@ -2152,6 +2202,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               const socketIns      = metrics.requestInsights.socketInsights ?? null;
               const timeoutIns     = metrics.requestInsights.timeoutInsights ?? null;
               const oomIns         = metrics.requestInsights.oomInsights ?? null;
+              // The Unclassified tab lists generic types, so only generic-bucket
+              // sites belong under them.
+              const genericSites   = (metrics.requestInsights.excSites ?? []).filter(s => s.bucket === 'generic');
               return (
                 <>
                   <tr
@@ -2182,8 +2235,16 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   {errorsExpanded && hasDetail && (!detailsLoading || detailsLoaded) && (
                     <>
                       <ExcTabRow value={errTab} onChange={setErrTab} counts={excCounts} />
+                      <ExcLocationChartRow
+                        sites={metrics.requestInsights.excLocationSeries}
+                        bucket={errTab}
+                        bin={metrics.requestInsights.excLocationBin}
+                        topN={metrics.requestInsights.excLocationTopN}
+                        error={metrics.requestInsights.excLocationError}
+                        syncId={hoverSyncId}
+                      />
                       {errTab === 'generic'
-                        ? renderErrTypes(genericTypes, genericDetails, selectedErrType, setSelectedErrType)
+                        ? renderErrTypes(genericTypes, genericDetails, selectedErrType, setSelectedErrType, genericSites, metrics.requestInsights.excSiteTopN)
                         : errTab === 'timeout'
                         ? renderTimeoutTab(timeoutIns, fmtExcTime)
                         : errTab === 'oom'
@@ -2289,6 +2350,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 const apiSocketIns      = metrics.apiRequestInsights.socketInsights ?? null;
                 const apiTimeoutIns     = metrics.apiRequestInsights.timeoutInsights ?? null;
                 const apiOomIns         = metrics.apiRequestInsights.oomInsights ?? null;
+                const apiGenericSites   = (metrics.apiRequestInsights.excSites ?? []).filter(s => s.bucket === 'generic');
                 return (
                   <>
                     <tr
@@ -2317,8 +2379,16 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                     {errAPIExpanded && apiHasDetail && (!detailsLoading || detailsLoaded) && (
                       <>
                         <ExcTabRow value={errAPITab} onChange={setErrAPITab} counts={apiExcCounts} />
+                        <ExcLocationChartRow
+                          sites={metrics.apiRequestInsights.excLocationSeries}
+                          bucket={errAPITab}
+                          bin={metrics.apiRequestInsights.excLocationBin}
+                          topN={metrics.apiRequestInsights.excLocationTopN}
+                          error={metrics.apiRequestInsights.excLocationError}
+                          syncId={hoverSyncId}
+                        />
                         {errAPITab === 'generic'
-                          ? renderErrTypes(apiGenericTypes, apiGenericDetails, selectedErrAPIType, setSelectedErrAPIType)
+                          ? renderErrTypes(apiGenericTypes, apiGenericDetails, selectedErrAPIType, setSelectedErrAPIType, apiGenericSites, metrics.apiRequestInsights.excSiteTopN)
                           : errAPITab === 'timeout'
                           ? renderTimeoutTab(apiTimeoutIns, fmtExcTime)
                           : errAPITab === 'oom'

@@ -49,8 +49,55 @@ const {
   TIMEOUT_ONLY_MATCH,
   OOM_ONLY_MATCH,
   GENERIC_MATCH,
+  BUCKET_EXPR,
   TIMEOUT_RESULT_CODES,
 } = require('./exception-buckets.cjs');
+
+// ─── Throw-site resolution (KQL) ─────────────────────────────────────────────
+// Reduces each exception to the one stack frame worth naming: the first frame
+// belonging to our own code. Mirrors getMeaningfulFrame() in azureAppCard.tsx —
+// same skip list, same "first match wins by array order" rule — so the chart and
+// the drill-down below it never disagree about where a failure came from.
+//
+// Rows whose parsedStack is empty (App Insights drops it for some SDKs) are not
+// dropped: they fall back to a synthetic single frame built from the exception's
+// own assembly/method columns, which is what the UI would have shown anyway.
+// startswith_cs, not startswith: the JS side uses String.startsWith, and Kusto's
+// default startswith is case-insensitive — the case-sensitive form is what keeps
+// the two implementations returning the same frame.
+const FRAMEWORK_ASM_EXPR = [
+  'System.', 'Microsoft.', 'mscorlib', 'netstandard',
+].map(p => `asm startswith_cs "${p}"`).join(' or ');
+// Throw sites plotted per bucket. Eight lines is already at the limit of what a
+// 140px chart can separate by colour, and the tail below it is a long list of
+// one-offs that would each draw a flat line at zero.
+const EXC_LOC_TOP_N = 8;
+
+// Throw sites listed under one exception type in the drill-down. A table can
+// carry more rows than a chart can carry lines, and the whole reason for the
+// table is that the old endpoint list buried the real sites.
+const EXC_SITE_TOP_N = 25;
+// Distinct line numbers collected per site. A site reporting more than this is
+// not one defect being edited between deploys, it is a generated file.
+const EXC_SITE_MAX_LINES = 20;
+
+const MEANINGFUL_FRAME_EXPR =
+  `extend rawStack = todynamic(tostring(details[0].parsedStack)) ` +
+  `| extend frames = iff(array_length(rawStack) > 0, rawStack, ` +
+    `pack_array(bag_pack("assembly", assembly, "method", method, "fileName", "", "line", 0))) ` +
+  `| mv-apply with_itemindex = fi f = frames on ( ` +
+    `extend asm = tostring(f.assembly) ` +
+    // 0 sorts before 1, so an app frame always beats a framework frame; `fi`
+    // breaks the tie by original stack order, exactly as Array.find would.
+    `| extend isApp = iff(isnotempty(asm) and not(${FRAMEWORK_ASM_EXPR}), 0, 1) ` +
+    // One composite sort key, because Kusto's `top` accepts exactly one sort
+    // expression — `top 1 by isApp asc, fi asc` is a parse error, not a warning.
+    // isApp dominates (app frame before framework frame), fi breaks the tie by
+    // original stack order, which is what Array.find does on the JS side. The
+    // multiplier only has to exceed the deepest stack we could ever see.
+    `| top 1 by isApp * 100000 + fi asc ` +
+    `| project fAsm = asm, fMethod = tostring(f.method), fFile = tostring(f.fileName), fLine = coalesce(toint(f.line), 0) ` +
+  `)`;
 
 // ─── Dependency classification ───────────────────────────────────────────────
 // Static asset fetches — Blazor framework files and Razor class library content.
@@ -935,6 +982,79 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `exceptions | where ${OOM_ONLY_MATCH} | project timestamp, type, outerMessage, method, assembly, operation_Name, innermostMessage, severityLevel, handledAt, cloud_RoleName, client_Browser, client_OS, innermostType, innermostMethod, parsedStack=tostring(details[0].parsedStack) | top 50 by timestamp desc`,
   ];
 
+  // Exceptions over time, grouped by throw site rather than by endpoint.
+  //
+  // The Group C lists rank endpoints, and an endpoint answers "which URL was hit",
+  // not "which line threw". One faulty component reached from 300 pages reads as
+  // 300 unremarkable endpoint rows; grouped by its frame it is a single tall line,
+  // and the shape of that line says whether it is a deploy regression, a burst, or
+  // a constant bleed.
+  //
+  // Sent on its own rather than appended to Group C, for the reason Group C is
+  // itself separate: runBatch concatenates an array into ONE query, so any error —
+  // an unsupported operator, a column this workspace lacks — fails every statement
+  // in the batch. This is the most exotic query in the file, and it must not be
+  // able to blank the Socket / Timeout / OOM tabs.
+  //
+  // Every bucket is computed in one pass (BUCKET_EXPR) so the UI can switch tabs
+  // without a refetch. Shape: bin first, roll each site's bins into a list so the
+  // ranking has one row per site to sort, keep the top ${EXC_LOC_TOP_N} per bucket,
+  // then unpack. Ranking that way needs no second pass over the exceptions table —
+  // the mv-apply resolving the frame is the expensive step and runs exactly once.
+  //
+  // row_number over a sorted stream rather than `partition by`: same top-N-per-
+  // group result from operators with no strategy hints or partition-count limits.
+  //
+  // Grouped by FILE, not by frame — neither the line nor the method is part of the
+  // key. A file reports several lines as it is edited between deploys, and several
+  // methods because a component fails in more than one lifecycle hook; both split
+  // one defect into lines that mean the same thing, share one legend label, and
+  // halve each other's apparent height. A frame with no file (no PDB) falls back to
+  // its method, which is then the only thing identifying it.
+  //
+  // The breakdown is not lost: excSiteKql below keeps method and line, as columns
+  // of the drill-down table where they can be read rather than as a label.
+  const excLocationKql =
+    `exceptions | extend bucket = ${BUCKET_EXPR} | ${MEANINGFUL_FRAME_EXPR} ` +
+    `| extend siteKey = iff(isnotempty(fFile), strcat(fAsm, " @ ", fFile), strcat(fAsm, " :: ", fMethod)) ` +
+    // fAsm / fFile are functionally determined by siteKey, so grouping on them too
+    // costs nothing and carries them through for the label without a second pass.
+    // fMethod is NOT in the key — min() picks a representative, used only to label
+    // a fileless frame, where siteKey already pins it to that one method.
+    `| summarize binCount = sum(itemCount), methodAny = min(fMethod) ` +
+      `by bucket, siteKey, fAsm, fFile, tb = bin(timestamp, ${socketBin}) ` +
+    `| summarize bins = make_list(bag_pack("t", tb, "c", binCount)), total = sum(binCount), ` +
+      `methodAny = min(methodAny) by bucket, siteKey, fAsm, fFile ` +
+    `| order by bucket asc, total desc ` +
+    `| extend rn = row_number(1, prev(bucket) != bucket) ` +
+    `| where rn <= ${EXC_LOC_TOP_N} ` +
+    `| mv-expand b = bins ` +
+    `| project bucket, fAsm, methodAny, fFile, tb = tostring(b["t"]), trueCount = tolong(b["c"])`;
+
+  // Per exception TYPE, the throw sites behind it — what the type drill-down
+  // lists instead of one row per endpoint.
+  //
+  // The endpoint listing repeated the same stack frame for every URL that reached
+  // it: a shared component threw on 300 pages and produced 300 rows reading "1",
+  // burying the fact that it is one defect with 20,000 occurrences. Grouped by
+  // frame it is one row, and the endpoint becomes an attribute of it — named when
+  // it is the only one, counted when it is not.
+  //
+  // Counts are sampling-corrected totals over the whole window, not counts of the
+  // 50 sampled detail records the old list could see.
+  const excSiteKql =
+    `exceptions | extend bucket = ${BUCKET_EXPR} | ${MEANINGFUL_FRAME_EXPR} ` +
+    `| summarize trueCount = sum(itemCount), records = count(), ` +
+      // make_set over the line numbers: the whole point of dropping the line from
+      // the grouping key is that one site can carry several, listed together.
+      `lineSet = make_set(fLine, ${EXC_SITE_MAX_LINES}), ` +
+      `endpoints = dcount(operation_Name), sampleEndpoint = min(operation_Name) ` +
+      `by bucket, type, fAsm, fMethod, fFile ` +
+    `| order by bucket asc, type asc, trueCount desc ` +
+    `| extend rn = row_number(1, prev(type) != type or prev(bucket) != bucket) ` +
+    `| where rn <= ${EXC_SITE_TOP_N} ` +
+    `| project bucket, type, fAsm, fMethod, fFile, lines = tostring(lineSet), endpoints, sampleEndpoint, trueCount, records`;
+
   // Group D: response-time breakdown (5 queries → 1 HTTP call). The Response row
   // only had avg / P99 / max for the whole app, which says a tail exists but not
   // where it comes from. These answer that: which endpoints own the time, how the
@@ -1067,6 +1187,8 @@ async function getRequestInsights(appId, credential, range, customStart, customE
   let groupDRows = null;
   let groupERows = null;
   let groupFRows = null;
+  let excLocationRows = null;
+  let excSiteRows = null;
 
   if (summaryOnly) {
     // Only fetch summary aggregates needed for collapsed badges (2 HTTP calls)
@@ -1079,7 +1201,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     failedUrlRows = null; slowUrlRows = null; errorDetailRows = null;
     uaRows = null; botRows = null; hfRows = null; snatDetailRows = null; sqlHttpDetailRows = null;
   } else {
-    [[failedUrlRows, slowUrlRows, total4xxRows, total5xxRows, errorTypeRows, errorDetailRows, depTimeoutRows], [uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult, groupCRows, groupDRows, groupERows, groupFRows] = await Promise.all([
+    [[failedUrlRows, slowUrlRows, total4xxRows, total5xxRows, errorTypeRows, errorDetailRows, depTimeoutRows], [uaRows, botRows, hfRows, snatDetailRows, sqlHttpDetailRows], insightResult, groupCRows, groupDRows, groupERows, groupFRows, excLocationRows, excSiteRows] = await Promise.all([
       runBatch(groupAKqls),
       runBatch(groupBKqls),
       runQueryFull(insightKql),
@@ -1087,6 +1209,8 @@ async function getRequestInsights(appId, credential, range, customStart, customE
       runBatch(groupDKqls),
       runBatch(groupEKqls),
       runBatch(groupFKqls),
+      runQuery(excLocationKql),
+      runQuery(excSiteKql),
     ]);
   }
 
@@ -1252,6 +1376,58 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     details: (cRows(14) ?? []).map(genericDetailMapper),
   };
 
+  // Arrives as one row per (bucket, site, bin); the UI wants one entry per site
+  // carrying its own series, so the bins are folded back together here.
+  const excLocationSeries = (() => {
+    const rows = excLocationRows;
+    if (!Array.isArray(rows)) return null;
+    const bySite = new Map();
+    for (const [bucket, fAsm, fMethod, fFile, tb, trueCount] of rows) {
+      // Keyed the way the query grouped: file when there is one, else method.
+      const key = `${str(bucket)}|${str(fAsm)}|${str(fFile) || str(fMethod)}`;
+      let site = bySite.get(key);
+      if (!site) {
+        site = {
+          bucket: str(bucket) || 'generic',
+          assembly: str(fAsm), method: str(fMethod), file: str(fFile),
+          trueCount: 0, series: [],
+        };
+        bySite.set(key, site);
+      }
+      site.trueCount += num(trueCount);
+      site.series.push({ t: str(tb), count: num(trueCount) });
+    }
+    const sites = [...bySite.values()];
+    // KQL ordered by bin across all sites, so each site's own points are in
+    // order but only incidentally — sort per site rather than rely on that.
+    for (const s of sites) s.series.sort((a, b) => a.t.localeCompare(b.t));
+    return sites.sort((a, b) => b.trueCount - a.trueCount);
+  })();
+
+  // Throw sites per exception type. `lines` arrives as a JSON array string from
+  // make_set; 0 is the sentinel the frame expression uses for "no line info", so
+  // it is dropped rather than displayed as line zero.
+  const excSites = (() => {
+    if (!Array.isArray(excSiteRows)) return null;
+    return excSiteRows.map(([bucket, type, fAsm, fMethod, fFile, lines, endpoints, sampleEndpoint, trueCount, records]) => {
+      let parsed = [];
+      try {
+        const raw = JSON.parse(str(lines) || '[]');
+        if (Array.isArray(raw)) parsed = raw.map(n => Number(n) || 0).filter(n => n > 0).sort((a, b) => a - b);
+      } catch { /* make_set always emits valid JSON; a malformed one just means no lines */ }
+      return {
+        bucket: str(bucket) || 'generic',
+        type: str(type) || 'Unknown',
+        assembly: str(fAsm), method: str(fMethod), file: str(fFile),
+        lines: parsed,
+        endpoints: num(endpoints),
+        sampleEndpoint: str(sampleEndpoint),
+        trueCount: num(trueCount),
+        records: num(records),
+      };
+    });
+  })();
+
   const errorTypesGeneric = cRows(6)
     ? cRows(6).map(([type, count, trueCount]) => ({ type: str(type) || 'Unknown', count: num(count), trueCount: num(trueCount) }))
     : null;
@@ -1307,6 +1483,15 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     oomInsights,
     errorTypesGeneric,
     errorDetailsGeneric,
+    excLocationSeries,
+    excLocationBin: Array.isArray(excLocationRows) ? socketBin : null,
+    excLocationTopN: EXC_LOC_TOP_N,
+    // Surfaced rather than swallowed: the chart is the only consumer, and a silently
+    // missing chart is indistinguishable from an app that simply has no exceptions.
+    excLocationError: excLocationRows && excLocationRows.error ? String(excLocationRows.error) : null,
+    excSites,
+    excSiteTopN: EXC_SITE_TOP_N,
+    excSiteError: excSiteRows && excSiteRows.error ? String(excSiteRows.error) : null,
     insight,
   };
 }

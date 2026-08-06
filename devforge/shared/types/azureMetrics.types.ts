@@ -80,6 +80,51 @@ export interface OomInsights {
   details: ExceptionDetail[]
 }
 
+/** Exceptions over time for one throw site — the first non-framework stack frame,
+ *  resolved server-side by the same rule as `getMeaningfulFrame`.
+ *
+ *  Grouped by code location rather than by endpoint: a component that fails on
+ *  every page it appears on is one line here and 300 forgettable rows in an
+ *  endpoint list. `bucket` matches the exception tab keys, so one payload serves
+ *  all four tabs. */
+export interface ExceptionLocationSeries {
+  bucket: 'socket' | 'timeout' | 'oom' | 'generic'
+  assembly: string
+  method: string
+  /** Source path from the stack frame. Empty when the SDK shipped no file info. */
+  file: string
+  /** Sum of itemCount over the window — sampling-corrected, like every other
+   *  trueCount in this file. */
+  trueCount: number
+  series: Array<{ t: string; count: number }>
+}
+
+/** One throw site under one exception type — a row of the type drill-down table.
+ *
+ *  Deliberately not keyed by line: the same defect reports different lines as the
+ *  file is edited between deploys, so the lines are collected into a column
+ *  instead of splitting one site into several rows. */
+export interface ExceptionSiteRow {
+  bucket: 'socket' | 'timeout' | 'oom' | 'generic'
+  /** Exception type this site threw — the row it appears under. */
+  type: string
+  assembly: string
+  method: string
+  file: string
+  /** Distinct line numbers seen, ascending. Empty when the frames carried none. */
+  lines: number[]
+  /** Distinct endpoints that reached this site. */
+  endpoints: number
+  /** An endpoint name — meaningful only when `endpoints` is 1, since it is
+   *  whichever sorts first otherwise. */
+  sampleEndpoint: string
+  /** Sampling-corrected total over the whole window, not a count of the capped
+   *  detail records. */
+  trueCount: number
+  /** Raw record count behind `trueCount`, for the sampling note. */
+  records: number
+}
+
 /** One outbound socket / TCP state counter, averaged over the selected window. */
 export interface SocketMetric {
   name: string
@@ -149,6 +194,25 @@ export interface AppMetrics {
     timeoutInsights?: TimeoutInsights | null
     /** Out-of-memory records only — powers the OOM tab. */
     oomInsights?: OomInsights | null
+    /** Exception volume over time per throw site, all four buckets in one list —
+     *  powers the chart above the tab content. Null on payloads cached before it
+     *  existed. */
+    excLocationSeries?: ExceptionLocationSeries[] | null
+    /** KQL bin width behind `excLocationSeries` ("5m", "1h", …), for the axis label. */
+    excLocationBin?: string | null
+    /** How many throw sites per bucket the query kept, so the UI can say what it
+     *  is not showing rather than imply the list is complete. */
+    excLocationTopN?: number | null
+    /** Why the throw-site query returned nothing. Without it a failed query and an
+     *  app with no exceptions both render as an absent chart. */
+    excLocationError?: string | null
+    /** Throw sites per exception type — powers the type drill-down table. Null on
+     *  payloads cached before it existed, which fall back to the endpoint list. */
+    excSites?: ExceptionSiteRow[] | null
+    /** Sites-per-type cap the query applied. */
+    excSiteTopN?: number | null
+    /** Why the site table is missing, for the same reason as `excLocationError`. */
+    excSiteError?: string | null
     insight?: {
       summary: string
       totalDependencies: number
@@ -220,6 +284,25 @@ export interface AppMetrics {
     timeoutInsights?: TimeoutInsights | null
     /** Out-of-memory records only — powers the OOM tab. */
     oomInsights?: OomInsights | null
+    /** Exception volume over time per throw site, all four buckets in one list —
+     *  powers the chart above the tab content. Null on payloads cached before it
+     *  existed. */
+    excLocationSeries?: ExceptionLocationSeries[] | null
+    /** KQL bin width behind `excLocationSeries` ("5m", "1h", …), for the axis label. */
+    excLocationBin?: string | null
+    /** How many throw sites per bucket the query kept, so the UI can say what it
+     *  is not showing rather than imply the list is complete. */
+    excLocationTopN?: number | null
+    /** Why the throw-site query returned nothing. Without it a failed query and an
+     *  app with no exceptions both render as an absent chart. */
+    excLocationError?: string | null
+    /** Throw sites per exception type — powers the type drill-down table. Null on
+     *  payloads cached before it existed, which fall back to the endpoint list. */
+    excSites?: ExceptionSiteRow[] | null
+    /** Sites-per-type cap the query applied. */
+    excSiteTopN?: number | null
+    /** Why the site table is missing, for the same reason as `excLocationError`. */
+    excSiteError?: string | null
     insight?: {
       summary: string
       totalDependencies: number
