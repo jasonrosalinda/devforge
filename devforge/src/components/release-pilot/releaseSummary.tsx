@@ -248,21 +248,27 @@ function buildSummary(sections: RunbookSection[]): SummarySection[] {
 
   for (const section of sections) {
     const dates: DateGroup[] = [];
+    // Date/Time cells are often merged with rowspan, so continuation rows parse
+    // as blank. Carry the previous row's values forward instead of treating the
+    // blank as a distinct date/time.
+    let lastDate = '';
 
     for (const row of section.typedRows) {
       const title = activityTitle(row);
       if (!title) continue;
 
-      const date = normDate(row.date);
+      const date = normDate(row.date) || lastDate;
+      lastDate = date;
       const time = normTime(row.time);
       const item: SummaryItem = { title, pics: row.pics, status: row.status };
 
       let dateGroup = dates.find(d => d.date === date);
       if (!dateGroup) { dateGroup = { date, timeGroups: [] }; dates.push(dateGroup); }
 
-      // Append to the last time group if it matches; else start a new one.
+      // Append to the last time group if it matches — or if the row has no time
+      // of its own (blank / dash placeholder), meaning it continues the one above.
       const last = dateGroup.timeGroups[dateGroup.timeGroups.length - 1];
-      if (last && last.time === time) last.items.push(item);
+      if (last && (last.time === time || !time)) last.items.push(item);
       else dateGroup.timeGroups.push({ time, items: [item] });
     }
 
@@ -338,7 +344,7 @@ function toPlainText(model: SummarySection[], goals: string[] = [], notice = '',
   for (const section of model) {
     out.push(section.heading);
     for (const dg of section.dates) {
-      out.push(`----${dg.date}----`);
+      if (dg.date) out.push(`----${dg.date}----`);
       for (const tg of dg.timeGroups) {
         const indent = ' '.repeat(`${tg.time} - `.length + 4);
         tg.items.forEach((item, i) => {
@@ -507,7 +513,7 @@ function toHtml(model: SummarySection[], goals: string[] = [], notice = '', qc: 
     // pasted into Teams/Outlook — &nbsp; indentation collapses in their fonts.
     p.push('<table style="border-collapse:collapse;margin:2px 0">');
     for (const dg of section.dates) {
-      p.push(`<tr><td colspan="2" style="padding:4px 0 1px;color:#6b7280">----${esc(dg.date)}----</td></tr>`);
+      if (dg.date) p.push(`<tr><td colspan="2" style="padding:4px 0 1px;color:#6b7280">----${esc(dg.date)}----</td></tr>`);
       for (const tg of dg.timeGroups) {
         tg.items.forEach((item, i) => {
           const timeCell = i === 0 ? `<strong>${esc(tg.time)}</strong>` : '';
@@ -763,7 +769,7 @@ export function ReleaseSummary({ sections, goals = [], releaseTitle, releaseLabe
               <h3 className="text-sm font-semibold">{section.heading}</h3>
               {section.dates.map((dg, di) => (
                 <div key={di} className="flex flex-col gap-1.5">
-                  <div className="font-mono text-xs text-muted-foreground">----{dg.date}----</div>
+                  {dg.date && <div className="font-mono text-xs text-muted-foreground">----{dg.date}----</div>}
                   {dg.timeGroups.map((tg, ti) => (
                     <div key={ti} className="flex gap-2 text-xs">
                       <div className="shrink-0 whitespace-nowrap font-medium min-w-[88px]">{tg.time}</div>

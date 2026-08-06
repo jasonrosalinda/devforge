@@ -52,6 +52,30 @@ function cellStatus(cell: RunbookCell, isStatusCol: boolean): { text: string; co
   return null;
 }
 
+// Date/Time columns are the ones Confluence authors merge with rowspan; a
+// continuation row parses as blank, and authors also just retype the same value
+// on the next row. Both mean "same as above", so rebuild the merge here.
+// Returns per row: the rowSpan to render, or 0 when the row above covers it.
+// `breaksRun` force-starts a new run at that row (used to stop a Time run from
+// spanning a date change, which would leave the two columns visually crossed).
+function mergeSpans(rows: RunbookCell[][], col: number, breaksRun?: (r: number) => boolean): number[] {
+  const spans = new Array<number>(rows.length).fill(1);
+  if (col < 0) return spans;
+  let anchor = -1;
+  rows.forEach((cells, r) => {
+    const text = (cells[col]?.text ?? '').trim();
+    const anchorText = anchor >= 0 ? (rows[anchor]?.[col]?.text ?? '').trim() : '';
+    // Blank continues the run; a repeat of the anchor's value folds into it.
+    if (anchor >= 0 && !breaksRun?.(r) && (text === '' || text === anchorText)) {
+      spans[r] = 0;
+      spans[anchor] = (spans[anchor] ?? 1) + 1;
+    } else {
+      anchor = r;
+    }
+  });
+  return spans;
+}
+
 // When raw HTML is clicked, open the lightbox if the target was an <img>.
 function makeImageClickHandler(onImageClick: (img: RunbookImage) => void) {
   return (e: React.MouseEvent<HTMLDivElement>) => {
@@ -67,6 +91,11 @@ export function RunbookTable({ data, typedRows, onImageClick }: RunbookTableProp
   const onImg = makeImageClickHandler(onImageClick);
   const statusIdx = data.columns.findIndex(c => /status/i.test(c));
   const picsIdx   = data.columns.findIndex(c => /pic|person|owner/i.test(c));
+  // "Time" only — never "Start Time" / "End Time", which are per-row values.
+  const dateIdx   = data.columns.findIndex(c => /^\s*date/i.test(c));
+  const timeIdx   = data.columns.findIndex(c => /^\s*time/i.test(c));
+  const dateSpans = mergeSpans(data.rows, dateIdx);
+  const timeSpans = mergeSpans(data.rows, timeIdx, r => r > 0 && dateSpans[r] !== 0);
 
   return (
     <div className="flex flex-col gap-2">
@@ -86,11 +115,18 @@ export function RunbookTable({ data, typedRows, onImageClick }: RunbookTableProp
             return (
               <TableRow key={r} className="align-top">
                 {cells.map((cell, c) => {
+                  const span = c === dateIdx ? dateSpans[r] : c === timeIdx ? timeSpans[r] : 1;
+                  if (span === 0) return null; // covered by a merged cell above
                   const status = cellStatus(cell, c === statusIdx);
                   const isPics = c === picsIdx;
                   const pics = isPics ? typedRows[r]?.pics ?? [] : [];
+                  const merged = (span ?? 1) > 1;
                   return (
-                    <TableCell key={c} className="align-top">
+                    <TableCell
+                      key={c}
+                      {...(merged ? { rowSpan: span } : {})}
+                      className={merged ? 'align-middle' : 'align-top'}
+                    >
                       {status ? (
                         <StatusPill text={status.text} color={status.color} />
                       ) : isPics ? (
