@@ -5,7 +5,7 @@ import { EndpointPerfChart } from './azureMetricChart';
 import { CellSkeleton, PanelSkeleton, SkeletonBlock } from './loadingSkeleton';
 import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import {
-  perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey,
+  perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
   PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR,
 } from './performance';
 
@@ -42,8 +42,15 @@ export function PerformancePanel({
   onRequestDeps?: ((endpoint: string) => void) | undefined;
 }) {
   const { endpoints } = perf;
-  const first = endpoints[0]?.url ?? '';
-  const [selected, setSelected] = useState(first);
+  /**
+   * The charted endpoint, or null for the set-wide total.
+   *
+   * Null is the default rather than the busiest endpoint: opening on one arbitrary row
+   * answers a question nobody asked yet, and the figures printed on the collapsed row are
+   * the set's totals — so the chart under them should be the same traffic. Picking a row
+   * drills in; picking it again comes back out.
+   */
+  const [selected, setSelected] = useState<string | null>(null);
 
   // Reset when the fetch returns a different endpoint set — otherwise a URL held over
   // from the previous time range stays selected while having no row to deselect it from.
@@ -51,7 +58,7 @@ export function PerformancePanel({
   const lastSignature = useRef(signature);
   if (lastSignature.current !== signature) {
     lastSignature.current = signature;
-    setSelected(first);
+    setSelected(null);
   }
 
   // Ask for the charted endpoint's calls — on first render for the default selection, and
@@ -79,12 +86,44 @@ export function PerformancePanel({
   const visibleEndpoints = showAllRows ? endpoints : endpoints.slice(0, ROW_CAP);
   const hiddenRows = endpoints.length - visibleEndpoints.length;
 
-  const bin = deps?.bin;
-  const chartRows = perfChartRows(deps?.series);
+  // With no row selected the chart draws the whole set, which ships with the details
+  // payload — so the default view is on screen immediately and costs no round trip.
+  const overallRows = perfChartRows(perf.overallSeries ?? undefined);
+  const bin = selected ? deps?.bin : perf.overallBin;
+  const chartRows = selected ? perfChartRows(deps?.series) : overallRows;
+  // In flight only applies to a selection: the total is already here or it is not.
+  const chartLoading = Boolean(selected && deps?.loading && chartRows.length === 0);
 
-  const chip = (color: string, label: string, tip: string) => (
+  /**
+   * Which codes the charted endpoint's failures actually were.
+   *
+   * 5xx first, then 4xx, each by volume — the same ordering the endpoint table uses, and
+   * for the same reason: one 500 is worth more attention than four hundred 404s.
+   *
+   * Per selection only. The default view is every endpoint at once, where a merged code
+   * list would say the site returned 404s without saying by whom, which is not actionable.
+   */
+  const codes = selected
+    ? [...(deps?.codes ?? [])].sort((a, b) =>
+        (a.cls === b.cls ? 0 : a.cls === '5xx' ? -1 : 1) || b.count - a.count)
+    : [];
+
+  // What the bars on screen add up to. The legend is where a reader is already looking to
+  // decode the colours, so the figure for each colour belongs there rather than in a
+  // separate summary line — and in the default view these are the only totals on the card
+  // that cover every endpoint.
+  const ct = chartTotals(chartRows);
+  /** Share of the charted traffic, never rounding a real value down to '0.0%'. */
+  const share = (n: number) =>
+    ct.count > 0 && n > 0 ? (n / ct.count < 0.001 ? '<0.1%' : `${(n / ct.count * 100).toFixed(1)}%`) : '0%';
+
+  const chip = (color: string, label: string, value: number, tip: string) => (
     <span key={label} title={tip} style={{ color: '#6e7681', whiteSpace: 'nowrap' }}>
-      <span style={{ color }}>■</span> {label}
+      <span style={{ color }}>■</span> {label}{' '}
+      {/* Dimmed at zero for the same reason as the table cells: a clean class is worth
+          seeing at a glance, and a blank reads as "not measured". */}
+      <span className="tabular-nums" style={{ color: value > 0 ? color : '#30363d' }}>{value.toLocaleString()}</span>
+      <span style={{ color: '#484f58' }}> ({share(value)})</span>
     </span>
   );
 
@@ -94,11 +133,31 @@ export function PerformancePanel({
 
   return (
     <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
+      {/* Names what the bars are. The set-wide total and one busy endpoint draw the same
+          shape, so without this line the two states are indistinguishable. */}
+      <div style={{ color: '#6e7681', paddingLeft: 8, marginBottom: 1 }}>
+        {selected
+          ? <>Charting <span style={{ color: '#cdd9e5' }}>{selected}</span>
+              <span style={{ color: '#484f58' }}> — click its row again to go back to the total.</span></>
+          : <>Charting <span style={{ color: '#cdd9e5' }}>every endpoint</span>
+              {/* Stated, not implied: this is all traffic, while the figures on the row
+                  above cover the merged set only — so the two totals will not agree, and
+                  a reader who assumes they should will read the gap as a bug. */}
+              <span style={{ color: '#484f58' }}> — all requests to this site, including the ones
+              outside the {endpoints.length}-endpoint list below. Click a row to chart one.</span></>}
+      </div>
+
       {/* Draws whatever endpoint is selected, fetched on selection. A skeleton while that is
           in flight, not an empty axis — an empty chart reads as "this endpoint had no
           traffic", which is a different statement from "not loaded yet". */}
-      {deps?.loading && chartRows.length === 0
+      {chartLoading
         ? <SkeletonBlock className="w-full rounded-md" style={{ height: 170 }} />
+        : !selected && overallRows.length === 0
+        // Said rather than drawn as a bare axis: the row list is populated, so an empty
+        // plot here means the set-wide timeline query is what came back empty.
+        ? <span style={{ color: '#484f58', fontStyle: 'italic', paddingLeft: 8 }}>
+            No app-wide timeline for this window — click an endpoint to chart it on its own.
+          </span>
         : <EndpointPerfChart
             rows={chartRows}
             binLabel={bin}
@@ -110,17 +169,40 @@ export function PerformancePanel({
             lineColor={PERF_LINE_COLOR}
           />}
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, color: '#484f58', paddingLeft: 8, margin: '2px 0 5px' }}>
-        {chip(PERF_OK_COLOR,  'successful', 'Requests that returned neither a 4xx nor a 5xx')}
-        {chip(PERF_4XX_COLOR, '4xx',        'Client errors from this endpoint')}
-        {chip(PERF_5XX_COLOR, '5xx',        'Server errors from this endpoint')}
-        <span style={{ whiteSpace: 'nowrap' }} title="95th percentile response time — right-hand axis">
-          <span style={{ color: PERF_LINE_COLOR }}>──</span> P95
+      {/* Centred under the plot: the row is now figures rather than a colour key, so it
+          reads as the chart's caption, and a caption hanging off the left edge of a
+          full-width chart reads as belonging to whatever is to its left. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 10, color: '#484f58', padding: '0 8px', margin: '2px 0 5px' }}>
+        {/* The stack height totalled, first: it is what the three colours are shares of. */}
+        <span
+          style={{ whiteSpace: 'nowrap', color: '#6e7681' }}
+          title={selected
+            ? `Total requests to ${selected} in this window`
+            : 'Total requests to every endpoint on this site in this window — larger than the figure on the Performance row, which counts the merged endpoint set only'}
+        >
+          {selected ? 'endpoint total' : 'total'}{' '}
+          <span className="tabular-nums" style={{ color: '#cdd9e5' }}>{ct.count.toLocaleString()}</span>
         </span>
-        <span style={{ whiteSpace: 'nowrap' }} title="Average response time — right-hand axis">
-          <span style={{ color: PERF_LINE_COLOR }}>╌╌</span> average
+        {chip(PERF_OK_COLOR,  'successful', ct.ok, 'Requests that returned neither a 4xx nor a 5xx')}
+        {chip(PERF_4XX_COLOR, '4xx',        ct.c4, selected ? 'Client errors from this endpoint' : 'Client errors across every endpoint')}
+        {chip(PERF_5XX_COLOR, '5xx',        ct.c5, selected ? 'Server errors from this endpoint' : 'Server errors across every endpoint')}
+        {/* Peak, not a total: percentiles cannot be summed or averaged across buckets, so
+            the worst bucket is the only honest single figure the plotted line supports. */}
+        <span style={{ whiteSpace: 'nowrap' }} title="95th percentile response time — right-hand axis. The figure is the worst bucket's P95: percentiles cannot be combined across buckets, so there is no window-wide P95 to quote here.">
+          <span style={{ color: PERF_LINE_COLOR }}>──</span> P95 peak{' '}
+          <span className="tabular-nums" style={{ color: msColor(ct.peakP95) }}>{fmtMs(ct.peakP95)}</span>
         </span>
-        <span>bar height is requests per {bin ?? 'bucket'} — click a row to chart it.</span>
+        <span style={{ whiteSpace: 'nowrap' }} title="Average response time — right-hand axis. Weighted by each bucket's request count, so a near-empty bucket cannot drag it.">
+          <span style={{ color: PERF_LINE_COLOR }}>╌╌</span> average{' '}
+          <span className="tabular-nums" style={{ color: msColor(ct.avgMs) }}>{fmtMs(ct.avgMs)}</span>
+        </span>
+      </div>
+
+      {/* Out of the figure row and onto its own line, left-aligned with the paragraph below
+          it: this is instruction rather than measurement, and mixing it in made the centred
+          figures wrap around a sentence. */}
+      <div style={{ color: '#484f58', paddingLeft: 8, marginBottom: 5 }}>
+        bar height is requests per {bin ?? 'bucket'} — click a row to chart it, click it again for the total.
       </div>
 
       {/* Above the table, not below it: this describes how the list was built and how it is
@@ -150,8 +232,8 @@ export function PerformancePanel({
         return (
           <div
             key={e.url}
-            onClick={() => setSelected(e.url)}
-            title={`${e.url}\n\n${e.count.toLocaleString()} requests, ${e.fourXx.toLocaleString()} 4xx, ${e.fiveXx.toLocaleString()} 5xx\navg ${fmtMs(e.avgMs)} · P95 ${fmtMs(e.p95)} · P99 ${fmtMs(e.p99)} · max ${fmtMs(e.maxMs)}\n\nClick to chart it and load its downstream calls`}
+            onClick={() => setSelected(prev => (prev === e.url ? null : e.url))}
+            title={`${e.url}\n\n${e.count.toLocaleString()} requests, ${e.fourXx.toLocaleString()} 4xx, ${e.fiveXx.toLocaleString()} 5xx\navg ${fmtMs(e.avgMs)} · P95 ${fmtMs(e.p95)} · P99 ${fmtMs(e.p99)} · max ${fmtMs(e.maxMs)}\n\n${on ? 'Click again to go back to the set-wide total' : 'Click to chart it and load its downstream calls'}`}
             style={{
               display: 'grid', gridTemplateColumns: GRID, gap: 6, marginBottom: 1,
               cursor: 'pointer',
@@ -303,6 +385,52 @@ export function PerformancePanel({
           </div>
           </>
           )}
+        </div>
+      )}
+
+      {/* Which codes the charted endpoint's failures actually were.
+          At the foot of the panel rather than under the legend: the legend is the chart's
+          caption and has to stay short enough to scan in one line, while this is a list
+          that grows with however many codes the endpoint returned. It sits with the
+          downstream calls because both are the same kind of thing — the drill-down that
+          says WHY the bars above look like that. */}
+      {selected && codes.length > 0 && (
+        <div style={{ marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 4 }}>
+          <div style={{ color: '#6e7681', fontWeight: 600, marginBottom: 2 }}>
+            Failure codes from <span style={{ color: '#cdd9e5' }}>{selected}</span>
+            <span style={{ fontWeight: 400, color: '#484f58' }}>
+              {' — '}{(ct.c4 + ct.c5).toLocaleString()} failed request{ct.c4 + ct.c5 === 1 ? '' : 's'}
+              {' across '}{codes.length} code{codes.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 10 }}>
+            {codes.map(c => {
+              const color = c.cls === '5xx' ? PERF_5XX_COLOR : PERF_4XX_COLOR;
+              const classTotal = c.cls === '5xx' ? ct.c5 : ct.c4;
+              return (
+                <span
+                  key={`${c.cls}|${c.code}`}
+                  style={{ whiteSpace: 'nowrap', color }}
+                  title={`${c.count.toLocaleString()} × ${c.code} — ${
+                    classTotal > 0 ? `${(c.count / classTotal * 100).toFixed(1)}% of this endpoint's ${c.cls}` : c.cls
+                  }\navg ${fmtMs(c.avgMs)} · P95 ${fmtMs(c.p95)}${
+                    // Says whether it is still happening. A code that stopped an hour ago and
+                    // one still arriving are the same number on the bar.
+                    c.lastSeen ? `\nlast seen ${new Date(c.lastSeen).toLocaleString()}` : ''
+                  }`}
+                >
+                  <span className="tabular-nums" style={{ fontWeight: 600 }}>{c.code}</span>
+                  <span style={{ color: '#484f58' }}> ×</span>{' '}
+                  <span className="tabular-nums">{c.count.toLocaleString()}</span>
+                  {/* The share is of its own class, not of all failures: 404s and 500s are
+                      different questions, and one percentage over both answers neither. */}
+                  {classTotal > 0 && (
+                    <span style={{ color: '#484f58' }}> ({(c.count / classTotal * 100).toFixed(1)}% of {c.cls})</span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

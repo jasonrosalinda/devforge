@@ -578,7 +578,7 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
 
   // The endpoint is a literal, so it is escaped rather than interpolated raw — an
   // endpoint name carrying a quote would otherwise change the shape of the query.
-  const runQuery = async (query) => {
+  const runTables = async (query) => {
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
@@ -590,7 +590,14 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
     }
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-    return data.tables?.[0]?.rows ?? [];
+    return (data.tables || []).map(t => t.rows ?? []);
+  };
+  const runQuery = async (query) => (await runTables(query))[0] ?? [];
+  /** Several statements in one HTTP call — App Insights returns tables in statement order.
+   *  Used only for statements that stand or fall together: a batch fails as a unit. */
+  const runBatch = async (queries) => {
+    const tables = await runTables(queries.join(';\n'));
+    return queries.map((_, i) => tables[i] ?? []);
   };
 
   // A dependency is only identified by all three of type, target and name together — two
@@ -606,16 +613,48 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
     // merged endpoint inside the details batch: the chart only ever shows one at a time, so
     // the batch version was shipping ~60 timelines to draw one — the single largest thing in
     // that payload, and it had to be parsed and held in state for every card.
-    const reqSeriesRows = await runQuery(
+    const forRequests =
       `requests | extend rc=toint(resultCode) | ${NAME_CLEAN_EXPR} ` +
-      `| where nameClean == "${kqlLit(endpoint)}" ` +
+      `| where nameClean == "${kqlLit(endpoint)}"`;
+    const seriesKql =
+      `${forRequests} ` +
       `| summarize count=count(), c4=countif(${RC_4XX_EXPR}), c5=countif(${RC_5XX_EXPR}), ` +
         `avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1) by bin(timestamp, ${bin}) ` +
-      `| project t=timestamp, count, c4, c5, avgMs, p95 | order by t asc`);
+      `| project t=timestamp, count, c4, c5, avgMs, p95 | order by t asc`;
+    // Which codes the failures actually were. The chart says an endpoint returned 36 4xx;
+    // 36 × 401 is an auth change and 36 × 404 is a dead link, and the bar cannot tell them
+    // apart. Grouped on the raw resultCode, with the class carried alongside so the UI
+    // never has to re-derive it — a failure with no usable code is a 5xx by RC_5XX_EXPR
+    // but parses to no number at all, and re-deriving in the UI would drop it.
+    const codesKql =
+      `${forRequests} | where ${RC_4XX_EXPR} or ${RC_5XX_EXPR} ` +
+      `| extend cls=iif(${RC_4XX_EXPR}, "4xx", "5xx") ` +
+      `| summarize count=count(), avgMs=round(avg(duration),1), p95=round(percentile(duration,95),1), ` +
+        `lastSeen=max(timestamp) by resultCode, cls ` +
+      `| project code=iif(isempty(resultCode), "(no code)", resultCode), cls, count, avgMs, p95, lastSeen ` +
+      `| top 25 by count desc`;
+
+    // One HTTP call for both — they describe the same requests. A batch fails as a unit,
+    // so the fallback re-runs the timeline alone: the chart is the thing the panel cannot
+    // do without, and it must not be lost to a breakdown query this workspace dislikes.
+    let reqSeriesRows = [];
+    let codeRows = [];
+    try {
+      [reqSeriesRows, codeRows] = await runBatch([seriesKql, codesKql]);
+    } catch {
+      reqSeriesRows = await runQuery(seriesKql);
+      codeRows = [];
+    }
     const series = reqSeriesRows.map(([t, count, c4, c5, avgMs, p95]) => ({
       t: String(t ?? ''),
       count: Number(count) || 0, c4: Number(c4) || 0, c5: Number(c5) || 0,
       avgMs: Number(avgMs) || 0, p95: Number(p95) || 0,
+    }));
+    const codes = codeRows.map(([code, cls, count, avgMs, p95, lastSeen]) => ({
+      code: String(code ?? '') || '(no code)',
+      cls: cls === '4xx' ? '4xx' : '5xx',
+      count: Number(count) || 0, avgMs: Number(avgMs) || 0, p95: Number(p95) || 0,
+      lastSeen: String(lastSeen ?? ''),
     }));
 
     const rows = await runQuery(
@@ -629,7 +668,7 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
       count: Number(count) || 0, failCount: Number(failCount) || 0,
       avgMs: Number(avgMs) || 0, p95: Number(p95) || 0, totalMs: Number(totalMs) || 0,
     }));
-    if (!deps.length) return { series, deps, bin };
+    if (!deps.length) return { series, codes, deps, bin };
 
     // Timelines for the costliest calls only. The filter is built from the rows just
     // returned rather than re-ranking in KQL, so a charted line always belongs to a row
@@ -668,9 +707,9 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
       if (pts) d.series = pts.sort((a, b) => a.t.localeCompare(b.t));
     }
 
-    return { series, deps, bin };
+    return { series, codes, deps, bin };
   } catch (e) {
-    return { series: null, deps: null, error: e.message || String(e) };
+    return { series: null, codes: null, deps: null, error: e.message || String(e) };
   }
 }
 
@@ -1121,6 +1160,20 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `| summarize ${perfAggregates}, p99=round(percentile(duration,99),1), maxMs=round(max(duration),1) by nameClean ` +
     `| project url=nameClean, count, rpm=round(todouble(count)/${spanMins},2), fourXx=c4, fiveXx=c5, avgMs, p95, p99, maxMs ` +
     `| order by fiveXx desc, fourXx desc, count desc`,
+    // E1 — every request in the window as one timeline. This is what the chart draws before
+    // any row is picked, so the section opens on the shape of the whole app's traffic rather
+    // than on one arbitrary endpoint's.
+    //
+    // Deliberately NOT joined to perfKeyUnion: this is all endpoints, including the quiet
+    // ones the merged set leaves out, so it will read higher than the request total printed
+    // on the collapsed row — that figure is the merged set's. The panel says which is which.
+    //
+    // P95 here is a true app-wide percentile, unlike perfTotals' worstP95 — one KQL
+    // percentile over the raw durations in the bucket, not a roll-up of per-endpoint
+    // percentiles, which cannot be combined.
+    `requests | extend rc=toint(resultCode) ` +
+    `| summarize ${perfAggregates} by bin(timestamp, ${topUrlBin}) ` +
+    `| project t=timestamp, count, c4, c5, avgMs, p95 | order by t asc`,
   ];
 
   // Group F: the Users section (2 queries → 1 HTTP call).
@@ -1302,8 +1355,18 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     fourXx: num(fourXx), fiveXx: num(fiveXx),
     avgMs: num(avgMs), p95: num(p95), p99: num(p99), maxMs: num(maxMs),
   }));
+  // The app-wide timeline behind the section's default chart. Empty rather than absent when
+  // the query returns nothing, so the panel can tell "no traffic" from "no such query" —
+  // `overallBin` is null only when E1 itself did not answer.
+  const perfOverallSeries = (eRows(1) ?? []).map(([t, count, c4, c5, avgMs, p95]) => ({
+    t: str(t),
+    count: num(count), c4: num(c4), c5: num(c5),
+    avgMs: num(avgMs), p95: num(p95),
+  }));
   const performance = groupERows == null ? null : {
     endpoints: perfEndpoints,
+    overallSeries: perfOverallSeries,
+    overallBin: eRows(1) ? topUrlBin : null,
     // The 5xx arm of the key set is capped, so a wide outage can be trimmed. Reported
     // rather than silently truncated: a list that stops at exactly the cap reads as
     // "these are all of them" when it is not.

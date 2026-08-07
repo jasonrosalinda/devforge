@@ -452,6 +452,20 @@ export interface EndpointPerformance {
    *  timeline for all ~60 was the largest thing in the details payload to draw one of
    *  them. They arrive per endpoint from `fetchEndpointDetail`, on selection. */
   endpoints: EndpointPerfRow[]
+  /** Every request in the window as one timeline — what the chart draws with no row
+   *  selected.
+   *
+   *  All endpoints, not just the merged set in `endpoints`: it therefore totals more than
+   *  the row's request figure, which covers the merged set only.
+   *
+   *  Shipped with the details payload rather than fetched on demand like the per-endpoint
+   *  timelines: it is a single series and it is what the section opens on, so making it a
+   *  round trip would leave the default view empty for as long as the fetch takes.
+   *
+   *  Null on payloads cached before it existed; empty means the window had no traffic. */
+  overallSeries?: EndpointPerfPoint[] | null
+  /** KQL bin width behind `overallSeries`, for the chart caption. */
+  overallBin?: string | null
   /** Cap applied to the 5xx arm of the merge. */
   fiveXxCap: number
   /** True when the 5xx list hit `fiveXxCap` and may be trimming endpoints. */
@@ -586,10 +600,32 @@ export interface DetectorAnalysisResult {
   error?: string
 }
 
+/**
+ * One status code an endpoint returned, with the class it belongs to.
+ *
+ * The class is carried rather than re-derived from the code: a request killed mid-flight
+ * reports `success == false` with no usable code, which counts as a 5xx by the same
+ * predicate the chart uses but parses to no number at all. Re-deriving in the UI would
+ * silently drop exactly the failures worth seeing.
+ */
+export interface EndpointStatusCode {
+  /** The raw result code, or '(no code)' for a failure that carried none. */
+  code: string
+  cls: '4xx' | '5xx'
+  count: number
+  avgMs: number
+  p95: number
+  /** ISO timestamp of the most recent occurrence — says whether it is still happening. */
+  lastSeen: string
+}
+
 /** One endpoint's dependency fetch. `deps` is null when the query could not answer. */
 export interface EndpointDepsResult {
   /** The endpoint's own request timeline — what the Performance chart draws. */
   series?: EndpointPerfPoint[] | null
+  /** Which codes this endpoint's 4xx and 5xx actually were, busiest first. The chart can
+   *  say an endpoint returned 36 4xx; only this can say they were all 401s. */
+  codes?: EndpointStatusCode[] | null
   deps: EndpointDependency[] | null
   /** KQL bin width behind every timeline here (e.g. '5m'), for the chart caption. */
   bin?: string | null

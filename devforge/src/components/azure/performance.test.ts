@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey } from './performance';
+import { perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals } from './performance';
 import type { EndpointPerfRow } from '@shared/types/azureMetrics.types';
 
 const pt = (over: Partial<{ t: string; count: number; c4: number; c5: number; avgMs: number; p95: number }> = {}) =>
@@ -36,6 +36,42 @@ describe('perfChartRows', () => {
 
   it('keeps an all-error bucket visible as a full-height 5xx bar', () => {
     expect(perfChartRows([pt({ count: 7, c5: 7 })])[0]).toMatchObject({ ok: 0, c5: 7, count: 7 });
+  });
+});
+
+describe('chartTotals', () => {
+  it('sums the plotted segments so the legend and the bars describe the same traffic', () => {
+    const t = chartTotals(perfChartRows([
+      pt({ count: 100, c4: 10, c5: 2 }),
+      pt({ count: 40,  c4: 0,  c5: 3 }),
+    ]));
+    expect(t).toMatchObject({ count: 140, ok: 125, c4: 10, c5: 5 });
+    expect(t.ok + t.c4 + t.c5).toBe(t.count);
+  });
+
+  it('reports the worst bucket P95 rather than averaging percentiles across buckets', () => {
+    expect(chartTotals(perfChartRows([
+      pt({ count: 10, p95: 120 }),
+      pt({ count: 10, p95: 4800 }),
+      pt({ count: 10, p95: 90 }),
+    ])).peakP95).toBe(4800);
+  });
+
+  it('weights the average by bucket volume, so a near-empty bucket cannot drag it', () => {
+    // Unweighted this would be 4025ms; the 8s bucket holds one request out of 1001.
+    const t = chartTotals(perfChartRows([
+      pt({ count: 1000, avgMs: 50 }),
+      pt({ count: 1,    avgMs: 8000 }),
+    ]));
+    expect(Math.round(t.avgMs)).toBe(58);
+  });
+
+  it('returns zeroes for an empty chart rather than dividing by zero', () => {
+    expect(chartTotals([])).toEqual({ count: 0, ok: 0, c4: 0, c5: 0, peakP95: 0, avgMs: 0 });
+  });
+
+  it('does not divide by zero when every plotted bucket is empty', () => {
+    expect(chartTotals(perfChartRows([pt({ count: 0, avgMs: 500 })])).avgMs).toBe(0);
   });
 });
 

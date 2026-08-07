@@ -54,6 +54,31 @@ export function perfChartRows(points: EndpointPerfSeries['points'] | undefined):
   }));
 }
 
+/**
+ * Totals across whatever the chart is currently drawing.
+ *
+ * Summed from the plotted rows rather than taken from the endpoint table: the default
+ * chart covers every endpoint, including the ones the merged table leaves out, so the
+ * table's figures would understate it. Summing the bars guarantees the caption and the
+ * plot are describing the same traffic whichever one is on screen.
+ *
+ * The two latency figures are NOT summed. `peakP95` is the worst bucket's P95, because
+ * percentiles cannot be averaged across buckets any more than across endpoints. `avgMs`
+ * is weighted by each bucket's request count, so a near-empty bucket at 8s cannot drag
+ * the figure up as hard as a busy one at 40ms.
+ */
+export function chartTotals(rows: PerfChartRow[]) {
+  const count = rows.reduce((s, r) => s + r.count, 0);
+  return {
+    count,
+    ok: rows.reduce((s, r) => s + r.ok, 0),
+    c4: rows.reduce((s, r) => s + r.c4, 0),
+    c5: rows.reduce((s, r) => s + r.c5, 0),
+    peakP95: rows.reduce((m, r) => Math.max(m, r.p95), 0),
+    avgMs: count > 0 ? rows.reduce((s, r) => s + r.avgMs * r.count, 0) / count : 0,
+  };
+}
+
 /** Figures for the collapsed Performance row — what the section is worth opening for. */
 export function perfTotals(endpoints: EndpointPerfRow[] | undefined) {
   const rows = endpoints ?? [];

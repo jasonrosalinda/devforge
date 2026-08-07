@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
-import type { AppMetrics, EndpointDependency, EndpointPerfPoint, RestartResult } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, EndpointDependency, EndpointPerfPoint, EndpointStatusCode, RestartResult } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 
 type CredStatus = 'checking' | 'ok' | 'error';
@@ -12,6 +12,8 @@ export interface EndpointDepsState {
   loading: boolean;
   /** The endpoint's request timeline — what the Performance chart draws. */
   series?: EndpointPerfPoint[];
+  /** Which codes its 4xx and 5xx were, busiest first. */
+  codes?: EndpointStatusCode[];
   deps?: EndpointDependency[];
   /** Bin width behind every timeline here, for the chart caption. */
   bin?: string | null | undefined;
@@ -211,12 +213,12 @@ export function useAzureMetrics(): UseAzureMetrics {
     if (alreadyAsked) return;
 
     try {
-      const { series, deps, bin, error } = await window.electronAPI.azureMetrics.fetchEndpointDetail({ appKey, endpoint, site, range, config, customStart, customEnd });
+      const { series, codes, deps, bin, error } = await window.electronAPI.azureMetrics.fetchEndpointDetail({ appKey, endpoint, site, range, config, customStart, customEnd });
       setEndpointDeps(prev => ({
         ...prev,
         // A failure leaves `deps` undefined and records the error, so expanding again can
         // retry — unlike an empty array, an error says nothing about what the endpoint calls.
-        [key]: error || !deps ? { loading: false, error: error ?? 'No endpoint detail' } : { loading: false, series: series ?? [], deps, bin },
+        [key]: error || !deps ? { loading: false, error: error ?? 'No endpoint detail' } : { loading: false, series: series ?? [], codes: codes ?? [], deps, bin },
       }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
