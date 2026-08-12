@@ -579,7 +579,7 @@ export function MetricLegend({
   // the legend leaves unlabelled: "CPU: Average 15.90% / P99 78.17% / Max 99.00%".
   const STAT_NAMES = ['Average', 'P99', 'Max'];
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 14, fontSize: 11, paddingTop: 4 }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 14, fontSize: 11, paddingTop: 4, paddingBottom: 4 }}>
       {items.map(item => {
         const off = hidden.has(item.key);
         return (

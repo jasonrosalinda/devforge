@@ -31,7 +31,7 @@ const DEP_GRID = '1fr 150px 52px 48px 52px 52px 56px';
  * the thing you click are the same thing.
  */
 export function PerformancePanel({
-  perf, fmtMs, syncId, deps, onRequestDeps,
+  perf, fmtMs, syncId, deps, onRequestDeps, captureTag,
 }: {
   perf: EndpointPerformance;
   fmtMs: (ms: number | null) => string;
@@ -40,6 +40,10 @@ export function PerformancePanel({
   /** The charted endpoint's downstream calls, fetched on selection by the card. */
   deps?: EndpointDepsState | undefined;
   onRequestDeps?: ((endpoint: string) => void) | undefined;
+  /** Tags the chart + legend below (not the endpoint table) with [data-teams-perf-chart]
+   *  so copyForTeams can screenshot it on its own, only when this panel is actually
+   *  expanded and on screen. */
+  captureTag?: string | undefined;
 }) {
   const { endpoints } = perf;
   /**
@@ -147,6 +151,11 @@ export function PerformancePanel({
               outside the {endpoints.length}-endpoint list below. Click a row to chart one.</span></>}
       </div>
 
+      {/* paddingBottom (not the legend row's own margin) is what html2canvas actually
+          measures: a trailing margin on the last child can collapse through a
+          padding/border-less parent, leaving no real slack for canvas rounding to eat
+          into — which is exactly what was slicing the bottom off the legend text. */}
+      <div style={{ paddingBottom: 4 }} {...(captureTag ? { 'data-teams-perf-chart': captureTag } : {})}>
       {/* Draws whatever endpoint is selected, fetched on selection. A skeleton while that is
           in flight, not an empty axis — an empty chart reads as "this endpoint had no
           traffic", which is a different statement from "not loaded yet". */}
@@ -196,6 +205,7 @@ export function PerformancePanel({
           <span style={{ color: PERF_LINE_COLOR }}>╌╌</span> average{' '}
           <span className="tabular-nums" style={{ color: msColor(ct.avgMs) }}>{fmtMs(ct.avgMs)}</span>
         </span>
+      </div>
       </div>
 
       {/* Out of the figure row and onto its own line, left-aligned with the paragraph below
@@ -448,7 +458,7 @@ export function PerformancePanel({
  */
 export function PerformanceRows({
   perf, expanded, onToggle, fmtMs, fmtPct, syncId, loading = false, error, unavailableMessage,
-  deps, onRequestDeps,
+  deps, onRequestDeps, captureTag,
 }: {
   /** The charted endpoint's downstream calls, and the request for them. */
   deps?: EndpointDepsState | undefined;
@@ -467,9 +477,25 @@ export function PerformanceRows({
   error?: string | null | undefined;
   /** Shown expanded when the app has no App Insights resource configured. */
   unavailableMessage?: string | undefined;
+  /** Forwarded to PerformancePanel — see its own doc for what this tags. */
+  captureTag?: string | undefined;
 }) {
   const has = hasPerfData(perf);
+  // The merged endpoint set (10 busiest + 10 worst-4xx + every 5xx) is what the table
+  // below charts, but it is a subset of the app's real traffic — `slowest` has no
+  // app-wide equivalent (only endpoint rollups carry a single worst request), so it
+  // still comes from here.
   const t = perfTotals(perf?.endpoints);
+  // Everything else on the row uses the same app-wide series the chart defaults to
+  // when nothing is selected, so the collapsed row and the "every endpoint" chart
+  // it expands into never disagree. Falls back to the merged set only when the
+  // app-wide timeline itself came back empty for the window.
+  const overall = chartTotals(perfChartRows(perf?.overallSeries ?? undefined));
+  const total = overall.count > 0 ? overall.count : t.requests;
+  const fourXx = overall.count > 0 ? overall.c4 : t.fourXx;
+  const fiveXx = overall.count > 0 ? overall.c5 : t.fiveXx;
+  const peakP95 = overall.count > 0 ? overall.peakP95 : t.worstP95;
+  const avgMs = overall.count > 0 ? overall.avgMs : t.avgMs;
 
   return (
     <>
@@ -502,49 +528,46 @@ export function PerformanceRows({
             </span>
           )}
         </td>
-        {/* Errors span both middle cells so the three figures read as one statement.
-            The total is requests to THESE endpoints rather than to the app, which the
-            tooltip states — the set is a subset of total traffic. */}
-        <td
-          colSpan={2}
-          className="text-right"
-          style={{ whiteSpace: 'nowrap' }}
-          title={has
-            ? `${t.fiveXx.toLocaleString()} server errors (5xx) and ${t.fourXx.toLocaleString()} client errors (4xx) out of ${t.requests.toLocaleString()} requests to these ${t.endpoints} endpoints — ${t.requests > 0 ? ((t.fiveXx + t.fourXx) / t.requests * 100).toFixed(2) : '0.00'}% failed.\n\nThe percentages are of traffic to this endpoint set, not to the whole app: the set is the ten busiest endpoints, the ten worst 4xx, and every endpoint with a 5xx, so it is a subset of total traffic.`
-            : undefined}
-        >
+        {/* Request and Response share one flex row instead of a fixed 40/20 column
+            split: app-wide counts run several digits longer than the merged-set
+            figures this table's colgroup was sized for, and a rigid boundary cut
+            through the middle of "Request" on a bad window. Flex sizes each side to
+            its own content and pushes them apart, so the gap always falls between
+            them rather than through either one. */}
+        <td colSpan={3} className="text-right" style={{ whiteSpace: 'nowrap', overflow: 'hidden' }}>
           {!has
             ? loading ? <CellSkeleton w={104} /> : <span className="text-muted-foreground">—</span>
-            : <>
-                {/* Labelled because the two cells hold different kinds of figure — three
-                    counts and three durations — and unlabelled trios of numbers in adjacent
-                    cells give no clue which is which. */}
-                <span style={{ color: '#6e7681' }}>Request - </span>
-                <span style={{ color: t.fiveXx > 0 ? PERF_5XX_COLOR : '#484f58', fontSize: 10 }}>{t.fiveXx.toLocaleString()} ({fmtPct(t.fiveXx, t.requests)})</span>
-                <span style={{ color: '#484f58' }}> / </span>
-                <span style={{ color: t.fourXx > 0 ? PERF_4XX_COLOR : '#484f58', fontSize: 10 }}>{t.fourXx.toLocaleString()} ({fmtPct(t.fourXx, t.requests)})</span>
-                <span style={{ color: '#484f58' }}> / </span>
-                <span style={{ color: PERF_LINE_COLOR }}>{t.requests.toLocaleString()}</span>
-              </>
-          }
-        </td>
-        <td
-          className="text-right"
-          style={{ whiteSpace: 'nowrap' }}
-          title={has
-            ? `P95 ${fmtMs(t.worstP95)} / average ${fmtMs(t.avgMs)} / slowest ${fmtMs(t.slowest)}.\n\nP95 is the worst single endpoint's P95, not a set-wide percentile — percentiles cannot be averaged across endpoints, so naming the worst is the only honest figure without the raw durations.\n\nThe average is weighted by request count, so a 3-request endpoint at 8s does not drag it up as hard as a 40k-request endpoint at 40ms.\n\nSlowest is the single slowest request to any endpoint in the set.`
-            : undefined}
-        >
-          {!has
-            ? loading ? <CellSkeleton w={88} /> : <span className="text-muted-foreground">—</span>
-            : <>
-                <span style={{ color: '#6e7681' }}>Response - </span>
-                <span className="tabular-nums" style={{ color: msColor(t.worstP95), fontSize: 10 }}>{fmtMs(t.worstP95)}</span>
-                <span style={{ color: '#484f58' }}> / </span>
-                <span className="tabular-nums" style={{ color: msColor(t.avgMs), fontSize: 10 }}>{fmtMs(t.avgMs)}</span>
-                <span style={{ color: '#484f58' }}> / </span>
-                <span className="tabular-nums" style={{ color: msColor(t.slowest), fontSize: 10 }}>{fmtMs(t.slowest)}</span>
-              </>
+            // flex-end anchors both halves to the right when they fit on one line;
+            // wrap drops Response to its own line, still right-aligned, on a
+            // narrow card or a window with enough digits that they no longer do —
+            // the fixed-width table cell can't grow to fit them, so this is what
+            // keeps a long Request from spilling out through the card's own border
+            // instead of just being cut off cleanly by it.
+            : <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 16 }}>
+                {/* Labelled because the two halves hold different kinds of figure —
+                    three counts and three durations — and unlabelled trios of numbers
+                    give no clue which is which. */}
+                <span
+                  title={`${fiveXx.toLocaleString()} server errors (5xx) and ${fourXx.toLocaleString()} client errors (4xx) out of ${total.toLocaleString()} requests to the whole app — ${total > 0 ? ((fiveXx + fourXx) / total * 100).toFixed(2) : '0.00'}% failed.\n\nApp-wide, not just the merged endpoint set listed below (the ten busiest, the ten worst 4xx, and every endpoint with a 5xx).`}
+                >
+                  <span style={{ color: '#6e7681' }}>Request - </span>
+                  <span style={{ color: fiveXx > 0 ? PERF_5XX_COLOR : '#484f58', fontSize: 10 }}>{fiveXx.toLocaleString()} ({fmtPct(fiveXx, total)})</span>
+                  <span style={{ color: '#484f58' }}> / </span>
+                  <span style={{ color: fourXx > 0 ? PERF_4XX_COLOR : '#484f58', fontSize: 10 }}>{fourXx.toLocaleString()} ({fmtPct(fourXx, total)})</span>
+                  <span style={{ color: '#484f58' }}> / </span>
+                  <span style={{ color: PERF_LINE_COLOR }}>{total.toLocaleString()}</span>
+                </span>
+                <span
+                  title={`P95 ${fmtMs(peakP95)} / average ${fmtMs(avgMs)} / slowest ${fmtMs(t.slowest)}.\n\nP95 is the worst bucket's P95 across the whole app, not a true app-wide percentile — percentiles cannot be averaged across buckets, so naming the worst is the only honest figure without the raw durations.\n\nThe average is weighted by request count, so a near-empty bucket at 8s does not drag it up as hard as a busy one at 40ms.\n\nSlowest is the single slowest request to any endpoint in the merged set below — the one figure here without an app-wide equivalent, since only endpoint rollups carry a single worst request.`}
+                >
+                  <span style={{ color: '#6e7681' }}>Response - </span>
+                  <span className="tabular-nums" style={{ color: msColor(peakP95), fontSize: 10 }}>{fmtMs(peakP95)}</span>
+                  <span style={{ color: '#484f58' }}> / </span>
+                  <span className="tabular-nums" style={{ color: msColor(avgMs), fontSize: 10 }}>{fmtMs(avgMs)}</span>
+                  <span style={{ color: '#484f58' }}> / </span>
+                  <span className="tabular-nums" style={{ color: msColor(t.slowest), fontSize: 10 }}>{fmtMs(t.slowest)}</span>
+                </span>
+              </div>
           }
         </td>
       </tr>
@@ -558,7 +581,7 @@ export function PerformanceRows({
                 : unavailableMessage
                   ? <span className="text-[10px] text-muted-foreground italic">{unavailableMessage}</span>
                   : has && perf
-                    ? <PerformancePanel perf={perf} fmtMs={fmtMs} syncId={syncId} deps={deps} onRequestDeps={onRequestDeps} />
+                    ? <PerformancePanel perf={perf} fmtMs={fmtMs} syncId={syncId} deps={deps} onRequestDeps={onRequestDeps} captureTag={captureTag} />
                     : <span className="text-[10px] text-muted-foreground italic">No request telemetry in this window</span>
             }
           </td>

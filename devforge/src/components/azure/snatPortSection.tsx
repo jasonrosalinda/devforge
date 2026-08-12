@@ -225,6 +225,19 @@ function totalIn(snat: SnatResult | null | undefined, titlePrefix: string): numb
   return chart.series.reduce((sum, s) => sum + s.series.reduce((a, p) => a + p.count, 0), 0);
 }
 
+/** Same figures the summary row and the Teams copy table both need, computed once. */
+export function snatSummary(snat: SnatResult | null | undefined) {
+  return {
+    peakAllocated: peakIn(snat, 'SNAT port usage', /alloc/i),
+    peakUsed: peakIn(snat, 'SNAT port usage', /used/i),
+    // Failed is the one that means trouble; pending sits beside it because a rising
+    // queue is what precedes failures once the plan runs out of ports.
+    failedTotal: totalIn(snat, 'Failed'),
+    pendingTotal: totalIn(snat, 'Pending'),
+    pendingPeak: peakIn(snat, 'Pending'),
+  };
+}
+
 /**
  * The SNAT rows as they sit inside the FE / API section tables: a summary row that
  * loads the charts on first expand, and the panel underneath.
@@ -242,13 +255,7 @@ export function SnatPortsRows({
   onToggle: () => void;
   syncId?: string | undefined;
 }) {
-  const peakAllocated = peakIn(snat, 'SNAT port usage', /alloc/i);
-  const peakUsed = peakIn(snat, 'SNAT port usage', /used/i);
-  // Failed is the one that means trouble; pending sits beside it because a rising
-  // queue is what precedes failures once the plan runs out of ports.
-  const failedTotal = totalIn(snat, 'Failed');
-  const pendingTotal = totalIn(snat, 'Pending');
-  const pendingPeak = peakIn(snat, 'Pending');
+  const { peakAllocated, peakUsed, failedTotal, pendingTotal, pendingPeak } = snatSummary(snat);
 
   return (
     <>

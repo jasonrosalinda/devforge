@@ -9,15 +9,17 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, ExceptionLocationSeries, ExceptionSiteRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
 import { AppRemarks, buildRemarks } from './azureAppRemarks';
-import { SnatPortsRows } from './snatPortSection';
+import { SnatPortsRows, snatSummary } from './snatPortSection';
+import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
 import { PerformanceRows } from './performanceSection';
+import { perfTotals, chartTotals, perfChartRows } from './performance';
 import { UserRows } from './userSection';
 import { ExceptionLocationChart } from './exceptionLocationChart';
 import { ExceptionSiteTable } from './exceptionSiteTable';
@@ -110,7 +112,7 @@ function ExcLocationChartRow({ sites, bucket, bin, topN, error, syncId }: {
   return (
     <tr>
       <td colSpan={4} style={{ paddingTop: 0, paddingBottom: 0 }}>
-        <ExceptionLocationChart sites={forBucket} bin={bin} topN={topN} syncId={syncId} />
+        <ExceptionLocationChart sites={forBucket} bin={bin} topN={topN} syncId={syncId} color={EXC_TABS.find(t => t.key === bucket)?.color} />
       </td>
     </tr>
   );
@@ -826,14 +828,18 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [urExpanded, setUrExpanded] = useState(false);
   const [usersExpanded, setUsersExpanded] = useState(false);
   const [usersAPIExpanded, setUsersAPIExpanded] = useState(false);
-  // Every chart on this card shares one hover group, so a spike found in the
-  // Response or Instances chart lines up against CPU/memory without eyeballing
-  // the x-axis. Keyed per card — two cards on screen must not move together.
-  const hoverSyncId = `card-${appKey}`;
+  // Every chart on this card used to share one hover group, so a spike found in the
+  // Response or Instances chart lined up against CPU/memory without eyeballing the
+  // x-axis. Turned off: Recharts' synced-tooltip broadcast re-renders every chart in
+  // the group on each mousemove, and a card with several charts open made hovering
+  // any one of them noticeably laggy. `undefined` here is what disables it — see
+  // `syncProps` in azureMetricChart.tsx, which drops `syncId` entirely when falsy.
+  const hoverSyncId: string | undefined = undefined;
   const [hiddenMetrics, setHiddenMetrics] = useState<Set<string>>(new Set());
   const [snatPortsExpanded, setSnatPortsExpanded] = useState(false);
   const [snatApiPortsExpanded, setSnatApiPortsExpanded] = useState(false);
   const [restartsExpanded, setRestartsExpanded] = useState(false);
+  const [anomalyExpanded, setAnomalyExpanded] = useState(false);
   const [restartsAPIExpanded, setRestartsAPIExpanded] = useState(false);
   // Mirrors the panel's own selection so the card knows which endpoint's dependency
   // lookup to hand back down. Held here rather than lifted out of the panel entirely:
@@ -856,12 +862,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [errTab, setErrTab] = useState<ExcTab>('generic');
   const [errAPITab, setErrAPITab] = useState<ExcTab>('generic');
   const [availExpanded, setAvailExpanded] = useState(false);
-  // Section-level collapse for the FE / API / Remarks blocks. FE and API open by
-  // default — side by side they fit without crowding the card, and they carry the
-  // figures a card is opened to read; Remarks stays closed.
+  // Clicking an instance in the legend isolates its line; clicking it again (or
+  // a signature change wiping out its row) goes back to all instances.
+  const [selectedInstanceName, setSelectedInstanceName] = useState<string | null>(null);
+  // Section-level collapse for the FE / API blocks. Open by default — side by
+  // side they fit without crowding the card, and they carry the figures a card
+  // is opened to read. Remarks has no collapse state: it's always shown.
   const [feSectionOpen, setFeSectionOpen] = useState(true);
   const [apiSectionOpen, setApiSectionOpen] = useState(true);
-  const [remarksOpen, setRemarksOpen] = useState(false);
   // Whole-card collapse. Open by default — a single app should still land fully
   // expanded; this exists so a multi-app fetch can be folded down to one line each.
   const [cardCollapsed, setCardCollapsed] = useState(false);
@@ -870,7 +878,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [visibleBlocks, setVisibleBlocks] = useState({
     remarks: true, cpu: true, memory: true, database: true, users: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
-    restarts: true, performance: true,
+    restarts: true, performance: true, anomaly: true,
     frontend: true, api: true,
   });
   const toggleBlock = (key: keyof typeof visibleBlocks) =>
@@ -1189,7 +1197,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     }
 
-    const chartEl = (card.querySelector('[data-teams-chart]') as HTMLElement | null) ?? card;
+    // A taller-than-on-screen chart is captured for Teams (see [data-teams-chart-tall]
+    // below) so the pasted image isn't dwarfed by the metrics table underneath.
+    // Resizing the live on-screen chart right before capture raced Recharts' own
+    // ResizeObserver — html2canvas would sometimes grab it mid-remeasure, half-sized.
+    // The tall version stays permanently mounted (off-screen, never toggled) so it's
+    // always already settled by the time this runs.
+    const chartEl = (card.querySelector('[data-teams-chart-tall]') as HTMLElement | null)
+      ?? (card.querySelector('[data-teams-chart]') as HTMLElement | null) ?? card;
 
     const fmtFullSgt = (d: Date) => d.toLocaleString('en-GB', {
       timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -1205,7 +1220,11 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       ? AI_STATUS_COLORS[aiRemark.status]
       : (severityColor[heuristicRemarks.severity] ?? '#333');
 
+    // Metrics get their own table (Average/P99/Max are literal there); SNAT and
+    // UptimeRobot are status summaries wedged into the same three columns, so they
+    // read as a separate "Status" table rather than odd rows inside the metrics one.
     const rows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
+    const statusRows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
     if (visibleBlocks.cpu) rows.push({
       name: 'CPU',
       avg: `${(+metrics.cpu.avg).toFixed(2)}%`, p99: `${(+metrics.cpu.p99).toFixed(2)}%`, max: `${(+metrics.cpu.max).toFixed(2)}%`,
@@ -1222,6 +1241,28 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       name: 'DB Memory',
       avg: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, p99: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, max: `${(+metrics.dbMemory!.max).toFixed(2)}%`,
     });
+    // Mirrors the gating on the SnatPortsRows usages below: one combined row when
+    // FE and API share a plan, otherwise a row per plan (API only when it has one
+    // of its own — a shared or absent API already left it out of the picture).
+    if (visibleBlocks.snat && metrics.type === 'appservice') {
+      const snatRow = (name: string, snat: typeof metrics.snat) => {
+        const { peakAllocated, peakUsed, failedTotal, pendingTotal } = snatSummary(snat);
+        statusRows.push({
+          name,
+          avg: pendingTotal != null ? `${pendingTotal.toLocaleString()} pending` : '—',
+          p99: failedTotal != null ? `${failedTotal.toLocaleString()} failed` : '—',
+          max: peakAllocated != null
+            ? `Peak - ${peakUsed != null ? peakUsed.toLocaleString() : '—'} / ${peakAllocated.toLocaleString()} - Allocated`
+            : snat ? 'no port data' : '—',
+        });
+      };
+      if (metrics.apiSharesPlan === true) {
+        snatRow('SNAT Ports', metrics.snat);
+      } else {
+        snatRow(metrics.apiSharesPlan === false ? 'SNAT Ports (FE)' : 'SNAT Ports', metrics.snat);
+        if (metrics.apiSharesPlan === false) snatRow('SNAT Ports (API)', metrics.apiSnat);
+      }
+    }
     if (visibleBlocks.uptimerobot && urMonitors.length > 0) {
       const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
       const totalIncidents = downLogs.length;
@@ -1230,7 +1271,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       const lastT = metrics.cpu.series.at(-1)?.t;
       const spanSec = firstT && lastT ? (new Date(lastT).getTime() - new Date(firstT).getTime()) / 1000 : 0;
       const uptimePct = spanSec > 0 ? Math.round((1 - totalDownSec / spanSec) * 10000) / 100 : null;
-      rows.push({
+      statusRows.push({
         name: 'UptimeRobot',
         avg: '—',
         p99: `${totalIncidents} incident${totalIncidents !== 1 ? 's' : ''}`,
@@ -1248,7 +1289,51 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       );
       const dataUrl = canvas.toDataURL('image/png');
 
-      const tableRows = rows.map(r =>
+      // Only present when that side's Performance row is actually expanded on
+      // screen — a collapsed or hidden section leaves no [data-teams-perf-chart]
+      // node to find, so it's simply left out rather than force-expanded.
+      const capturePerfChart = async (tag: 'fe' | 'api') => {
+        const el = card.querySelector(`[data-teams-perf-chart="${tag}"]`) as HTMLElement | null;
+        if (!el) return null;
+        const perfCanvas = await html2canvas(el, { backgroundColor: '#09090b', scale: 2, logging: false, useForeignObject: false });
+        return perfCanvas.toDataURL('image/png');
+      };
+      const fePerfUrl = await capturePerfChart('fe');
+      const apiPerfUrl = await capturePerfChart('api');
+      const tableStyle = 'style="border-collapse:collapse;font-family:sans-serif;font-size:13px;"';
+      // The chart already shows the shape over time; these are the same totals as the
+      // on-screen Performance row's own summary cells, one labelled figure at a time
+      // rather than packed into that row's dense "5xx (%) / 4xx (%) / total" form.
+      const perfBlock = (label: string, url: string | null, perf: EndpointPerformance | null | undefined) => {
+        if (!url) return '';
+        // Same split as the on-screen Performance row: app-wide totals for everything
+        // except "slowest", which only exists as an endpoint rollup — falls back to
+        // the merged endpoint set if the app-wide timeline came back empty.
+        const t = perfTotals(perf?.endpoints);
+        const overall = chartTotals(perfChartRows(perf?.overallSeries ?? undefined));
+        const total = overall.count > 0 ? overall.count : t.requests;
+        const fourXx = overall.count > 0 ? overall.c4 : t.fourXx;
+        const fiveXx = overall.count > 0 ? overall.c5 : t.fiveXx;
+        const peakP95 = overall.count > 0 ? overall.peakP95 : t.worstP95;
+        const avgMs = overall.count > 0 ? overall.avgMs : t.avgMs;
+        const success = Math.max(0, total - fourXx - fiveXx);
+        return (
+          `<p style="margin:0;">&nbsp;</p>` +
+          `<p style="font-weight:700;margin:0;">${label}</p>` +
+          `<p style="margin:0;"><img src="${url}" style="width:100%;display:block;"/></p>` +
+          `<p style="margin:4px 0 0;">` +
+          `<b>Request:</b> Total - ${total.toLocaleString()}` +
+          ` | Success - ${success.toLocaleString()} (${fmtPct(success, total)})` +
+          ` | 4xx - ${fourXx.toLocaleString()} (${fmtPct(fourXx, total)})` +
+          ` | 5xx - ${fiveXx.toLocaleString()} (${fmtPct(fiveXx, total)})` +
+          `</p>` +
+          `<p style="margin:2px 0 0;">` +
+          `<b>Response:</b> Average - ${fmtDuration(avgMs)} | P95 - ${fmtDuration(peakP95)} | Max - ${fmtDuration(t.slowest)}` +
+          `</p>`
+        );
+      };
+
+      const toTableRows = (list: typeof rows) => list.map(r =>
         `<tr><td style="padding:4px 10px;"><b>${r.name}</b></td><td align="right" style="padding:4px 10px;">${r.avg}</td><td align="right" style="padding:4px 10px;">${r.p99}</td><td align="right" style="padding:4px 10px;">${r.max}</td></tr>`,
       ).join('');
       const htmlBody =
@@ -1258,10 +1343,18 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         `<p style="margin:0;">&nbsp;</p>` +
         `<p style="margin:0;"><img src="${dataUrl}" style="width:100%;display:block;"/></p>` +
         `<p style="margin:0;">&nbsp;</p>` +
-        `<table border="1" cellspacing="0" style="border-collapse:collapse;font-family:sans-serif;font-size:13px;">` +
+        `<table border="1" cellspacing="0" ${tableStyle}>` +
         `<tr><td style="padding:4px 10px;"><b>Metrics</b></td><td align="right" style="padding:4px 10px;"><b>Average</b></td><td align="right" style="padding:4px 10px;"><b>P99</b></td><td align="right" style="padding:4px 10px;"><b>Max</b></td></tr>` +
-        tableRows +
+        toTableRows(rows) +
         `</table>` +
+        (statusRows.length
+          ? `<p style="margin:0;">&nbsp;</p>` +
+            `<table border="1" cellspacing="0" ${tableStyle}>` +
+            toTableRows(statusRows) +
+            `</table>`
+          : '') +
+        perfBlock('Frontend', fePerfUrl, metrics.requestInsights?.performance) +
+        perfBlock('API', apiPerfUrl, metrics.apiRequestInsights?.performance) +
         `<p style="margin:0;">&nbsp;</p>` +
         `<p style="margin:0;"><b style="color:#555;">Remarks: </b><b style="color:${remarksColor};">${remarksText || '—'}</b></p>` +
         `</div>`;
@@ -1271,6 +1364,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         '',
         'Metrics | Average | P99 | Max',
         ...rows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`),
+        ...(statusRows.length ? ['', ...statusRows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`)] : []),
         '',
         `Remarks: ${remarksText || '—'}`,
       ].join('\n');
@@ -1449,7 +1543,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 32, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>No detail records available</td></tr>
             )}
             {/* The site table when the query behind it ran; the old per-endpoint
-                list only as the fallback for payloads cached before it existed. */}
+                list only as the fallback for payloads cached before it existed.
+                Selecting a type re-targets the chart above the tab strip instead
+                of drawing a second one here — see chartSites at the call site. */}
             {isSelected && typeSites.length > 0 && (
               <tr style={{ borderTop: '1px solid rgba(255,255,255,0.03)', background: 'rgba(248,81,73,0.03)' }}>
                 <td colSpan={4} style={{ paddingLeft: 32, paddingRight: 8, paddingTop: 4, paddingBottom: 6 }}>
@@ -1582,6 +1678,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 { key: 'uptimerobot',  label: 'UptimeRobot' },
                 { key: 'snat',         label: 'SNAT Ports' },
                 { key: 'restarts',     label: 'Restarts' },
+                { key: 'anomaly',      label: 'Anomaly Detection' },
                 { key: 'frontend',     label: 'Frontend' },
                 { key: 'api',          label: 'API' },
               ] as const).map(({ key, label }) => (
@@ -1663,69 +1760,90 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         </div>
       )}
       {/* Chart — edge to edge */}
-      <div data-teams-chart>
-        {/* dbCpu/dbMemory follow the Database block toggle, so hiding those rows
-            hides their lines from the chart too. */}
-        <CombinedChart
-          cpu={metrics.cpu}
-          memory={metrics.memory}
-          dbCpu={visibleBlocks.database ? metrics.dbCpu : null}
-          dbMemory={visibleBlocks.database ? metrics.dbMemory : null}
-          downtimeIntervals={downtimeIntervals}
-          urDowntimeIntervals={urDowntimeIntervals}
-          availabilitySeries={undefined}
-          instanceHealthSeries={null}
-          apiInstanceHealthSeries={null}
-          hiddenMetrics={hiddenMetrics}
-          syncId={hoverSyncId}
-          loading={false}
-        />
-        {/* The CPU / Memory / DB figures live here rather than in the table below:
-            they belong to the lines directly above them, and clicking one drops
-            that metric out of the plot. */}
-        <MetricLegend
-          hidden={hiddenMetrics}
-          onToggle={key => setHiddenMetrics(prev => {
-            const next = new Set(prev);
-            if (!next.delete(key)) next.add(key);
-            return next;
-          })}
-          items={[
-            ...(visibleBlocks.cpu ? [{
-              key: 'cpu', label: 'CPU',
-              values: [
-                { text: `${(+metrics.cpu.avg).toFixed(2)}%`, color: CHART_COLORS.cpuAvg },
-                { text: `${(+metrics.cpu.p99).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
-                { text: `${(+metrics.cpu.max).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
-              ],
-            }] : []),
-            ...(visibleBlocks.memory ? [{
-              key: 'memory', label: 'Memory',
-              values: [
-                { text: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memAvg },
-                { text: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
-                { text: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
-              ],
-            }] : []),
-            ...(visibleBlocks.database && (metrics.dbCpu?.series?.length ?? 0) > 0 ? [{
-              key: 'dbCpu', label: 'DB CPU',
-              values: [
-                { text: `${(+metrics.dbCpu!.avg).toFixed(2)}%`, color: CHART_COLORS.dbCpuAvg },
-                { text: `${(+metrics.dbCpu!.p99).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
-                { text: `${(+metrics.dbCpu!.max).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
-              ],
-            }] : []),
-            ...(visibleBlocks.database && (metrics.dbMemory?.series?.length ?? 0) > 0 ? [{
-              key: 'dbMemory', label: 'DB Memory',
-              values: [
-                { text: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, color: CHART_COLORS.dbMemAvg },
-                { text: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
-                { text: `${(+metrics.dbMemory!.max).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
-              ],
-            }] : []),
-          ]}
-        />
-      </div>
+      {(() => {
+        // dbCpu/dbMemory follow the Database block toggle, so hiding those rows
+        // hides their lines from the chart too.
+        const chartProps = {
+          cpu: metrics.cpu,
+          memory: metrics.memory,
+          dbCpu: visibleBlocks.database ? metrics.dbCpu : null,
+          dbMemory: visibleBlocks.database ? metrics.dbMemory : null,
+          downtimeIntervals,
+          urDowntimeIntervals,
+          availabilitySeries: undefined,
+          instanceHealthSeries: null,
+          apiInstanceHealthSeries: null,
+          hiddenMetrics,
+          loading: false,
+        } as const;
+        // The CPU / Memory / DB figures live here rather than in the table below:
+        // they belong to the lines directly above them, and clicking one drops
+        // that metric out of the plot.
+        const legendItems = [
+          ...(visibleBlocks.cpu ? [{
+            key: 'cpu', label: 'CPU',
+            values: [
+              { text: `${(+metrics.cpu.avg).toFixed(2)}%`, color: CHART_COLORS.cpuAvg },
+              { text: `${(+metrics.cpu.p99).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
+              { text: `${(+metrics.cpu.max).toFixed(2)}%`, color: CHART_COLORS.cpuMax },
+            ],
+          }] : []),
+          ...(visibleBlocks.memory ? [{
+            key: 'memory', label: 'Memory',
+            values: [
+              { text: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memAvg },
+              { text: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
+              { text: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`, color: CHART_COLORS.memMax },
+            ],
+          }] : []),
+          ...(visibleBlocks.database && (metrics.dbCpu?.series?.length ?? 0) > 0 ? [{
+            key: 'dbCpu', label: 'DB CPU',
+            values: [
+              { text: `${(+metrics.dbCpu!.avg).toFixed(2)}%`, color: CHART_COLORS.dbCpuAvg },
+              { text: `${(+metrics.dbCpu!.p99).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
+              { text: `${(+metrics.dbCpu!.max).toFixed(2)}%`, color: CHART_COLORS.dbCpuMax },
+            ],
+          }] : []),
+          ...(visibleBlocks.database && (metrics.dbMemory?.series?.length ?? 0) > 0 ? [{
+            key: 'dbMemory', label: 'DB Memory',
+            values: [
+              { text: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, color: CHART_COLORS.dbMemAvg },
+              { text: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
+              { text: `${(+metrics.dbMemory!.max).toFixed(2)}%`, color: CHART_COLORS.dbMemMax },
+            ],
+          }] : []),
+        ];
+        const onLegendToggle = (key: string) => setHiddenMetrics(prev => {
+          const next = new Set(prev);
+          if (!next.delete(key)) next.add(key);
+          return next;
+        });
+        return (
+        <div data-teams-chart style={{ position: 'relative' }}>
+          <CombinedChart {...chartProps} syncId={hoverSyncId} height={200} />
+          <MetricLegend hidden={hiddenMetrics} onToggle={onLegendToggle} items={legendItems} />
+          {/* Same chart, rendered taller and kept permanently mounted (never toggled)
+              so copyForTeams — see [data-teams-chart-tall] there — has an
+              already-settled node to grab. The on-screen 200px banner reads fine at
+              its own width, but once Teams scales the pasted image down to message
+              width its height shrinks well below the metrics table's; capturing this
+              taller version instead keeps the two visually balanced. Resizing the
+              live chart in place before capture was tried first and raced Recharts'
+              own ResizeObserver, occasionally getting screenshotted half-width.
+              Shifted one full width to the right and clipped by the Card's own
+              overflow-hidden, rather than visibility:hidden — html2canvas paints the
+              real computed visibility, so a hidden node capture came back blank. */}
+          <div
+            data-teams-chart-tall
+            aria-hidden="true"
+            style={{ position: 'absolute', top: 0, left: '100%', width: '100%', pointerEvents: 'none' }}
+          >
+            <CombinedChart {...chartProps} height={320} />
+            <MetricLegend hidden={hiddenMetrics} onToggle={onLegendToggle} items={legendItems} />
+          </div>
+        </div>
+        );
+      })()}
 
       {/* Metrics + Downtime incidents */}
       <div className="px-4 pt-3 pb-3 text-xs font-medium flex flex-col gap-3">
@@ -1866,17 +1984,41 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                             Indenting here (as the removed per-instance rows did) just
                             left an empty strip beside the axis. */}
                         <td colSpan={4} style={{ padding: '8px 12px 10px 0' }}>
+                          {(() => {
+                            // Click isolates one instance's line; click it again to go
+                            // back to all of them. Falls back to all instances rather
+                            // than an empty chart if a stale selection from a previous
+                            // range/app no longer matches any current instance.
+                            const chartRows = selectedInstanceName && rows.some(r => r.name === selectedInstanceName)
+                              ? rows.filter(r => r.name === selectedInstanceName)
+                              : rows;
+                            return (
                           <InstanceHealthChart
-                            instances={rows.map(r => ({ name: r.name, label: r.label, series: r.points }))}
-                            colors={rows.map(r => r.color)}
+                            instances={chartRows.map(r => ({ name: r.name, label: r.label, series: r.points }))}
+                            colors={chartRows.map(r => r.color)}
                             height={150}
                             syncId={hoverSyncId}
                           />
+                            );
+                          })()}
                           {/* Legend doubles as the readout the removed rows carried:
-                              colour, name, role, avg, min, and lifecycle range. */}
+                              colour, name, role, avg, min, and lifecycle range — and as
+                              the chart's filter, same as the Performance endpoint list. */}
                           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '8px 18px', marginTop: 8 }}>
-                            {rows.map(r => (
-                              <div key={r.name} style={{ fontSize: 10, lineHeight: 1.4 }} title={r.name}>
+                            {rows.map(r => {
+                              const isSelected = selectedInstanceName === r.name;
+                              const dimmed = selectedInstanceName != null && !isSelected;
+                              return (
+                              <div
+                                key={r.name}
+                                onClick={() => setSelectedInstanceName(v => (v === r.name ? null : r.name))}
+                                style={{
+                                  fontSize: 10, lineHeight: 1.4, cursor: 'pointer', opacity: dimmed ? 0.4 : 1,
+                                  padding: '2px 4px', margin: '-2px -4px', borderRadius: 3,
+                                  background: isSelected ? 'rgba(255,255,255,0.06)' : 'transparent',
+                                }}
+                                title={`${r.name} — click to ${isSelected ? 'show all instances' : 'isolate this instance'}`}
+                              >
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                                   <span style={{ width: 8, height: 2, background: r.color, borderRadius: 1, flexShrink: 0 }} />
                                   <span style={{ color: r.color }}>{r.shortName}</span>
@@ -1904,7 +2046,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                   </div>
                                 )}
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                     </td>
                   </tr>
@@ -2128,6 +2271,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 onToggle={() => setSnatPortsExpanded(v => { if (!v) onRequestSnat?.(); return !v; })}
               />
             )}
+            {visibleBlocks.anomaly && (
+              <AnomalyDetectionRow
+                metrics={metrics}
+                expanded={anomalyExpanded}
+                onToggle={() => setAnomalyExpanded(v => !v)}
+              />
+            )}
             </tbody>
           </table>
           </div>
@@ -2144,12 +2294,12 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 onClick={() => setFeSectionOpen(v => !v)}
                 onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                title={feSectionOpen ? 'Collapse FE' : 'Expand FE'}
+                title={feSectionOpen ? 'Collapse Frontend' : 'Expand Frontend'}
               >
                 {/* One merged cell: the header carries only the label, so splitting it
                     across the four metric columns would just draw empty dividers. */}
                 <td colSpan={4}>
-                  FE{feSectionOpen
+                  Frontend{feSectionOpen
                     ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                     : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                 </td>
@@ -2173,6 +2323,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 loading={detailsLoading && !detailsLoaded}
                 error={metrics.requestInsights?.error}
                 unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
+                captureTag="fe"
               />
             )}
             {visibleBlocks.users && (
@@ -2205,6 +2356,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               // The Unclassified tab lists generic types, so only generic-bucket
               // sites belong under them.
               const genericSites   = (metrics.requestInsights.excSites ?? []).filter(s => s.bucket === 'generic');
+              // Selecting a type below re-targets this chart to just its throw
+              // sites instead of the whole bucket — joined on assembly+file/method
+              // since a type isn't itself a field on the location series.
+              const chartSites = errTab === 'generic' && selectedErrType
+                ? (metrics.requestInsights.excLocationSeries ?? []).filter(s =>
+                    s.bucket === 'generic' &&
+                    genericSites.some(gs => gs.type === selectedErrType && gs.assembly === s.assembly && (gs.file || gs.method) === (s.file || s.method)),
+                  )
+                : metrics.requestInsights.excLocationSeries;
               return (
                 <>
                   <tr
@@ -2236,7 +2396,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                     <>
                       <ExcTabRow value={errTab} onChange={setErrTab} counts={excCounts} />
                       <ExcLocationChartRow
-                        sites={metrics.requestInsights.excLocationSeries}
+                        sites={chartSites}
                         bucket={errTab}
                         bin={metrics.requestInsights.excLocationBin}
                         topN={metrics.requestInsights.excLocationTopN}
@@ -2325,6 +2485,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   onRequestDeps={requestApiDeps}
                   loading={detailsLoading && !detailsLoaded}
                   error={metrics.apiRequestInsights?.error}
+                  captureTag="api"
                 />
               )}
               {visibleBlocks.users && apiHasInsights && (
@@ -2351,6 +2512,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 const apiTimeoutIns     = metrics.apiRequestInsights.timeoutInsights ?? null;
                 const apiOomIns         = metrics.apiRequestInsights.oomInsights ?? null;
                 const apiGenericSites   = (metrics.apiRequestInsights.excSites ?? []).filter(s => s.bucket === 'generic');
+                // See the FE block's chartSites for why.
+                const apiChartSites = errAPITab === 'generic' && selectedErrAPIType
+                  ? (metrics.apiRequestInsights.excLocationSeries ?? []).filter(s =>
+                      s.bucket === 'generic' &&
+                      apiGenericSites.some(gs => gs.type === selectedErrAPIType && gs.assembly === s.assembly && (gs.file || gs.method) === (s.file || s.method)),
+                    )
+                  : metrics.apiRequestInsights.excLocationSeries;
                 return (
                   <>
                     <tr
@@ -2380,7 +2548,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                       <>
                         <ExcTabRow value={errAPITab} onChange={setErrAPITab} counts={apiExcCounts} />
                         <ExcLocationChartRow
-                          sites={metrics.apiRequestInsights.excLocationSeries}
+                          sites={apiChartSites}
                           bucket={errAPITab}
                           bin={metrics.apiRequestInsights.excLocationBin}
                           topN={metrics.apiRequestInsights.excLocationTopN}
@@ -2435,19 +2603,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       {visibleBlocks.remarks && (
         <div className="px-4 pb-3" data-remarks>
           {/* Same bordered card as the DB / FE / API / RCA blocks: the header carries
-              the "Remarks" label, so the body renders the text without its own prefix. */}
+              the "Remarks" label, so the body renders the text without its own prefix.
+              Not collapsible — unlike the other sections, there's nothing to hide: the
+              whole point of a remark is to be the thing you read without opening
+              anything. */}
           <div className="rounded-md border border-border overflow-hidden">
-            <div
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-muted-foreground cursor-pointer"
-              onClick={() => setRemarksOpen(v => !v)}
-              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              title={remarksOpen ? 'Collapse Remarks' : 'Expand Remarks'}
-            >
+            <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-muted-foreground">
               <span>Remarks{aiRemark ? ' (AI)' : ''}</span>
-              {remarksOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
               <button
-                onClick={e => { e.stopPropagation(); generateAiRemarks(); }}
+                onClick={() => generateAiRemarks()}
                 disabled={aiRemarkLoading}
                 className="ml-auto p-0.5 rounded hover:bg-muted flex-shrink-0 disabled:opacity-50"
                 title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
@@ -2456,17 +2620,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-blue-400' : 'text-muted-foreground'}`} />
               </button>
             </div>
-            {remarksOpen && (
-              <div className="border-t border-border px-3 py-2">
-                {aiRemark ? (
-                  <div className="text-xs" style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>
-                    {aiRemark.remarks}
-                  </div>
-                ) : (
-                  <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} hideLabel />
-                )}
-              </div>
-            )}
+            <div className="border-t border-border px-3 py-2">
+              {aiRemark ? (
+                <div className="text-xs" style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>
+                  {aiRemark.remarks}
+                </div>
+              ) : (
+                <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} hideLabel />
+              )}
+            </div>
           </div>
         </div>
       )}
