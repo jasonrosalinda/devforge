@@ -2,12 +2,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
 
-    runAudit: (url, strategy, visitMode = 'cold', runMode = 'single' || 'average') =>
-        ipcRenderer.invoke('run-lighthouse', { url, strategy, visitMode, runMode }),
-
-    clearLighthouseCache: () =>
-        ipcRenderer.invoke('clear-lighthouse-cache'),
-
     azureMetrics: {
         checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),

@@ -104,7 +104,7 @@ const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedI
 };
 
 export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpeedResultsProps>(({ config, onAuditingChange, onResultsChange, grouped = false }, ref) => {
-    const { audit, clearCache } = usePageSpeedInsight(config);
+    const { audit } = usePageSpeedInsight(config);
     const { elementRef, copyAsImage } = useCopyElementAsImage({
         fileNamePrefix: `pagespeed-result-${config.strategy}-${Date.now()}`,
     });
@@ -154,7 +154,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     }, [timerActive, auditStart]);
 
     const displayAudit = displayPageSpeedAudit(config);
-    const showAnalyzeButton = config.urls.length > 0 && (!config.browserMode ? !isNullOrEmpty(config.apiKey) : true);
+    const showAnalyzeButton = config.urls.length > 0 && !isNullOrEmpty(config.apiKey);
     const toast = Toast();
     const hasSubHead = !!(displayAudit.before && displayAudit.after);
     const isAccuracyMode = config.runMode === 'average';
@@ -222,12 +222,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         activeAuditsRef.current++;
         setAuditingWithCallback(setAuditing, true, otherAuditing);
         setResults(new Array(config.urls.length).fill(null));
-        if (config.browserMode) {
-            await clearCache();
-        }
 
         try {
-            const effectiveConcurrency = config.browserMode ? 1 : config.concurrency;
+            const effectiveConcurrency = config.concurrency;
             const urlQueue: Array<[number, string]> = [...config.urls.entries()];
 
             const worker = async () => {

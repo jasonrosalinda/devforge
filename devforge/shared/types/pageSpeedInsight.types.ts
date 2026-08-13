@@ -56,8 +56,6 @@ export type PageSpeedStrategy = "mobile" | "desktop";
 export interface PageSpeedConfiguration {
     apiKey: string;
     strategy: PageSpeedStrategy;
-    browserMode: boolean;
-    visitMode: "cold" | "warm";
     runMode: "single" | "average";
     urls: string[];
     comparisonMode: boolean;
@@ -76,7 +74,6 @@ export interface PageSpeedConfiguration {
 
 export interface UsePageSpeedInsightHooks {
     audit: (url: string, signal?: AbortSignal, runMode?: PageSpeedConfiguration['runMode']) => Promise<PageSpeedInsightResult>;
-    clearCache: () => Promise<{ success: boolean }>;
 }
 
 export interface PageSpeedApiResponse {

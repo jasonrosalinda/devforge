@@ -263,7 +263,7 @@ function renderComparisonStrategy(label, data) {
     const urls = config.urls;
 
     let md = `## ${label} (${config.strategy.toUpperCase()})\n\n`;
-    md += `- **Mode:** ${config.browserMode ? `Lighthouse (${config.visitMode})` : 'Google PageSpeed API'}\n`;
+    md += `- **Mode:** Google PageSpeed API\n`;
     md += `- **Runs:** ${config.runMode === 'average' ? '3-run average' : 'single run'}\n`;
     md += `- **URLs audited:** ${urls.length}\n\n`;
 
@@ -347,7 +347,7 @@ function renderStrategy(label, data) {
     if (config.comparisonMode) return renderComparisonStrategy(label, data);
 
     let md = `## ${label} (${config.strategy.toUpperCase()})\n\n`;
-    md += `- **Mode:** ${config.browserMode ? `Lighthouse (${config.visitMode})` : 'Google PageSpeed API'}\n`;
+    md += `- **Mode:** Google PageSpeed API\n`;
     md += `- **Runs:** ${config.runMode === 'average' ? '3-run average' : 'single run'}\n`;
     md += `- **URLs audited:** ${urls.length}\n\n`;
 

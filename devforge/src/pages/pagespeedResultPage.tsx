@@ -77,8 +77,7 @@ export default function PageSpeedResultPage() {
         mobileRef.current?.cancelAudit();
     };
 
-    const canAnalyze = desktopConfig.urls.length > 0 &&
-        (!desktopConfig.browserMode ? !isNullOrEmpty(desktopConfig.apiKey) : true);
+    const canAnalyze = desktopConfig.urls.length > 0 && !isNullOrEmpty(desktopConfig.apiKey);
 
     // Bumped by children whenever their results change, so hasResults (read from refs)
     // is re-evaluated — refs alone don't trigger a parent re-render.

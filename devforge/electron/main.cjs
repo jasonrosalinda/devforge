@@ -49,13 +49,6 @@ app.whenReady().then(() => {
     const mainWindow = createWindow();
 
     try {
-        require('./ipc/pagespeed.cjs')(mainWindow);
-        console.log('✅ pagespeed handlers registered');
-    } catch (err) {
-        console.error('❌ Failed to load pagespeed.cjs:', err);
-    }
-
-    try {
         require('./ipc/azure-metrics.cjs')(mainWindow);
         console.log('✅ azure-metrics handlers registered');
     } catch (err) {

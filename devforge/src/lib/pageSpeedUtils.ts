@@ -5,8 +5,6 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
     return {
         apiKey: '',
         strategy: strategy || 'desktop',
-        browserMode: false,
-        visitMode: 'warm',
         runMode: 'single',
         urls: [],
 

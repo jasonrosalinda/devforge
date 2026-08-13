@@ -30,20 +30,6 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
         configHasChanged(state);
     };
 
-    const onBrowserModeChange = (e: boolean) => {
-        onSetConfigState({
-            ...config,
-            browserMode: e,
-        });
-    };
-
-    const onVisitModeChange = (e: boolean) => {
-        onSetConfigState({
-            ...config,
-            visitMode: e ? "cold" : "warm",
-        });
-    };
-
     const onRunModeChange = (e: boolean) => {
         onSetConfigState({
             ...config,
@@ -209,28 +195,6 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                     <div className="flex items-center gap-2"><Wrench className="mr-1 h-4 w-4" />Mode</div>
                                 </AccordionTrigger>
                                 <AccordionContent>
-                                    <FieldLabel htmlFor="switch-browser-mode" className="my-3">
-                                        <Field orientation="horizontal">
-                                            <FieldContent>
-                                                <FieldTitle>Use Lighthouse</FieldTitle>
-                                            </FieldContent>
-                                            <Switch id="switch-browser-mode" checked={config.browserMode} onCheckedChange={onBrowserModeChange} />
-                                        </Field>
-                                    </FieldLabel>
-                                    {config.browserMode && (
-                                        <FieldLabel htmlFor="switch-visitMode-mode" className="my-3">
-                                            <Field orientation="horizontal">
-                                                <FieldContent>
-                                                    <FieldTitle>Cold Start</FieldTitle>
-                                                    <FieldDescription className="text-xs text-muted-foreground">
-                                                        Cold Start: Browser is launched fresh for each audit. <br />
-                                                        Warm Start: Browser is reused for subsequent audits.
-                                                    </FieldDescription>
-                                                </FieldContent>
-                                                <Switch id="switch-visitMode-mode" checked={config.visitMode === "cold"} onCheckedChange={(e) => onVisitModeChange(e)} />
-                                            </Field>
-                                        </FieldLabel>
-                                    )}
                                     <FieldLabel htmlFor="switch-runMode-mode" className="my-3">
                                         <Field orientation="horizontal">
                                             <FieldContent>
@@ -242,28 +206,26 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <Switch id="switch-runMode-mode" checked={config.runMode === "average"} onCheckedChange={(e) => onRunModeChange(e)} />
                                         </Field>
                                     </FieldLabel>
-                                    {!config.browserMode && (
-                                        <FieldLabel htmlFor="select-concurrency" className="my-3">
-                                            <Field orientation="horizontal">
-                                                <FieldContent>
-                                                    <FieldTitle>Parallel URLs</FieldTitle>
-                                                    <FieldDescription className="text-xs text-muted-foreground">
-                                                        Audit multiple URLs simultaneously. API mode only.
-                                                    </FieldDescription>
-                                                </FieldContent>
-                                                <select
-                                                    id="select-concurrency"
-                                                    value={config.concurrency}
-                                                    onChange={(e) => onConcurrencyChange(e.target.value)}
-                                                    className="rounded border border-input bg-background px-2 py-1 text-sm"
-                                                >
-                                                    <option value={1}>1 (safe)</option>
-                                                    <option value={2}>2</option>
-                                                    <option value={3}>3 (fastest)</option>
-                                                </select>
-                                            </Field>
-                                        </FieldLabel>
-                                    )}
+                                    <FieldLabel htmlFor="select-concurrency" className="my-3">
+                                        <Field orientation="horizontal">
+                                            <FieldContent>
+                                                <FieldTitle>Parallel URLs</FieldTitle>
+                                                <FieldDescription className="text-xs text-muted-foreground">
+                                                    Audit multiple URLs simultaneously.
+                                                </FieldDescription>
+                                            </FieldContent>
+                                            <select
+                                                id="select-concurrency"
+                                                value={config.concurrency}
+                                                onChange={(e) => onConcurrencyChange(e.target.value)}
+                                                className="rounded border border-input bg-background px-2 py-1 text-sm"
+                                            >
+                                                <option value={1}>1 (safe)</option>
+                                                <option value={2}>2</option>
+                                                <option value={3}>3 (fastest)</option>
+                                            </select>
+                                        </Field>
+                                    </FieldLabel>
                                 </AccordionContent>
                             </AccordionItem>
 

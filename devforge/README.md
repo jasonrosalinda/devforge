@@ -9,7 +9,7 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 | Tool | Description |
 |------|-------------|
 | **App Health Check** | Azure App Service + Container Apps health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor, optional network/edge diagnostics (App Gateway, Front Door, Load Balancer via Log Analytics). |
-| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
+| **PageSpeed Insights** | Run Google PageSpeed audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
 | **Unused Assets** | Scan a project folder for unused CSS classes/ids and unused JS functions. |
 | **Release Pilot** | Fetch a Confluence release runbook, parse sections/goals/schedule, surface attachment images in a lightbox, and generate a Teams-ready release summary on the clipboard. |
 | **Translation** | Localization key viewer/editor with searchable table. |
@@ -21,7 +21,6 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 - **Runtime** — Electron 35, Node 20+
 - **Frontend** — React 19, TypeScript, Vite (rolldown-vite), Tailwind CSS
 - **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts, `@tanstack/react-table`
-- **Performance** — Lighthouse 13, chrome-launcher (warm-cache + LCP capture via CDP)
 - **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
 - **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST
 - **Markdown / capture** — `marked`, `html2canvas`
@@ -38,7 +37,6 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 - Node.js 20 or newer
 - npm 10+
-- (Windows only, for Lighthouse audits) Chrome installed
 
 ### Install
 
@@ -132,14 +130,12 @@ devforge/
 ├── electron/                 # Main process + IPC handlers
 │   ├── main.js              # App entry, BrowserWindow, auto-updater wiring
 │   ├── preload.cjs          # contextBridge exposing electronAPI
-│   ├── ipc/                 # Per-feature IPC modules
-│   │   ├── pagespeed.cjs           # Lighthouse runner
-│   │   ├── pagespeed-insight.cjs   # AI Markdown report generator
-│   │   ├── azure-metrics.cjs       # Azure Monitor queries
-│   │   ├── incident-report.cjs     # Downtime report builder
-│   │   ├── confluence.cjs          # Release runbook fetch (session + REST)
-│   │   └── commands.cjs            # Shared command helpers
-│   └── utils/               # CDP / browser / Lighthouse helpers
+│   └── ipc/                 # Per-feature IPC modules
+│       ├── pagespeed-insight.cjs   # Google PageSpeed API + AI Markdown report generator
+│       ├── azure-metrics.cjs       # Azure Monitor queries
+│       ├── incident-report.cjs     # Downtime report builder
+│       ├── confluence.cjs          # Release runbook fetch (session + REST)
+│       └── commands.cjs            # Shared command helpers
 ├── src/
 │   ├── app.tsx              # App shell, providers, modals
 │   ├── pages/               # Top-level feature pages
