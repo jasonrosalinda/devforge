@@ -573,6 +573,37 @@ export interface RestartFetchResult {
   error?: string
 }
 
+/** One crash Proactive Crash Monitoring captured a stack trace for, from the
+ *  Application Crashes detector's per-event dropdown — the same trace App
+ *  Service emails out when it fires. Azure only captures these once a site has
+ *  crashed more than 3 times in 24h, and only keeps a handful per window, so
+ *  this can be a strict subset of the timeline's total crash count. */
+export interface CrashEvent {
+  t: string
+  exitCode: string
+  /** The text preceding the exception type, e.g. "CLR Exception" — kept as the
+   *  best available label when no dotted exception type could be parsed out. */
+  category: string
+  exceptionType: string | null
+  stackTrace: string
+}
+
+/** Crash timeline plus captured events for one site, from the App Service
+ *  Diagnostics Application Crashes detector. */
+export interface CrashResult {
+  detector?: string | null
+  charts: SnatChart[]
+  grainMs?: number | null
+  events: CrashEvent[]
+}
+
+/** Crash events are per site, same reasoning as RestartFetchResult. */
+export interface CrashFetchResult {
+  fe: CrashResult | null
+  api: CrashResult | null
+  error?: string
+}
+
 /** One fetch covers both sites, so expanding either section loads the pair. */
 export interface SnatFetchResult {
   fe: SnatResult
@@ -650,6 +681,7 @@ export interface IAzureMetricsAPI {
   fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
   fetchSnat: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<SnatFetchResult>
   fetchRestarts: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<RestartFetchResult>
+  fetchCrashes: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<CrashFetchResult>
   /** One endpoint's downstream calls. Per endpoint and on demand — see the handler. */
   fetchEndpointDetail: (opts: { appKey: string; endpoint: string; site: 'fe' | 'api'; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<EndpointDepsResult>
   onPartial?: (cb: (data: { key: string; result: AppMetrics }) => void) => (() => void)

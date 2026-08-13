@@ -96,7 +96,7 @@ function AzureStatusPill({
 
 export default function AppHealthCheckPage() {
   const { settings, loading: settingsLoading } = useSettings();
-  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, endpointDeps, fetchEndpointDeps, recheckCredential } = useAzureMetrics();
+  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, endpointDeps, fetchEndpointDeps, recheckCredential } = useAzureMetrics();
   const allAppKeys = settings.azure.apps.map(a => a.name);
   // The picker reads by platform name; the app key stays the identity used to fetch.
   const appLabels = Object.fromEntries(
@@ -125,6 +125,7 @@ export default function AppHealthCheckPage() {
       onRequestDetails: () => void;
       onRequestSnat: () => void;
       onRequestRestarts: () => void;
+      onRequestCrashes: () => void;
       onRequestEndpointDeps: (site: 'fe' | 'api', endpoint: string) => void;
     }> = {};
     for (const key of effectiveSelected) {
@@ -143,12 +144,13 @@ export default function AppHealthCheckPage() {
         onRequestDetails: () => fetchAppDetails(key, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined, granularity),
         onRequestSnat: () => fetchAppSnat(key, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined, granularity),
         onRequestRestarts: () => fetchAppRestarts(key, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined, granularity),
+        onRequestCrashes: () => fetchAppCrashes(key, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined, granularity),
         onRequestEndpointDeps: (site: 'fe' | 'api', endpoint: string) => fetchEndpointDeps(key, site, endpoint, 'custom', settings.azure, committedStart ?? undefined, committedEnd ?? undefined),
       };
     }
     return out;
   }, [effectiveSelected, settings.azure, committedStart, committedEnd, granularity,
-      fetchAppDetails, fetchAppSnat, fetchAppRestarts, fetchEndpointDeps]);
+      fetchAppDetails, fetchAppSnat, fetchAppRestarts, fetchAppCrashes, fetchEndpointDeps]);
 
   // The hook keys dependency lookups by `appKey|site|endpoint` so one flat map covers every
   // card. Each card only addresses its own, so the appKey prefix is stripped here rather
@@ -241,9 +243,13 @@ export default function AppHealthCheckPage() {
                   restartsLoading={restartsLoading[key] ?? false}
                   restarts={restarts[key]?.fe ?? null}
                   apiRestarts={restarts[key]?.api ?? null}
+                  crashesLoading={crashesLoading[key] ?? false}
+                  crashes={crashes[key]?.fe ?? null}
+                  apiCrashes={crashes[key]?.api ?? null}
                   endpointDeps={cardEndpointDeps[key] ?? EMPTY_DEPS}
                   onRequestEndpointDeps={props.onRequestEndpointDeps}
                   onRequestRestarts={props.onRequestRestarts}
+                  onRequestCrashes={props.onRequestCrashes}
                   uptimeRobotApiKey={settings.apiKeys.uptimeRobotApiKey}
                   uptimeRobotMonitorIds={appDef?.uptimeRobotMonitorIds}
                   rangeStart={committedStart ?? undefined}

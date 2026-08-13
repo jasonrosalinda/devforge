@@ -204,8 +204,6 @@ export function RestartPanel({
   loading: boolean;
   syncId?: string | undefined;
 }) {
-  const [showProse, setShowProse] = useState(false);
-
   if (loading && !restarts) {
     return <PanelSkeleton rows={4} chartHeight={90} />;
   }
@@ -287,37 +285,6 @@ export function RestartPanel({
         </div>
       )}
 
-      {/* Azure's own text, behind a toggle. It is several paragraphs of prose and
-          generic advice — worth keeping verbatim because it carries the reasoning and
-          the remediation links, but not worth the space once the events are parsed
-          out of it. */}
-      {findings.length > 0 && (
-        <div style={{ marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 4 }}>
-          <span
-            onClick={() => setShowProse(v => !v)}
-            style={{ color: '#6e7681', cursor: 'pointer', userSelect: 'none' }}
-            title="The detector's full write-up, including its remediation links"
-          >
-            {showProse ? <ChevronDown size={11} style={{ display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ display: 'inline', verticalAlign: 'middle' }} />}
-            {' '}Azure diagnostics text
-          </span>
-          {showProse && findings.map((f, i) => (
-            <div key={i} style={{ marginTop: 4 }}>
-              <div style={{ color: '#8b949e', fontWeight: 600, marginBottom: 2 }}>{f.message}</div>
-              {f.items.map((item, j) => (
-                <div key={j} style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: 8, marginBottom: 2 }}>
-                  <span style={{ color: '#6e7681', fontWeight: 600 }}>{item.name}</span>
-                  <span style={{ color: '#8b949e' }}>{item.text}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {restarts.detector && (
-        <div style={{ color: '#484f58', marginTop: 6, paddingLeft: 8 }}>detector: {restarts.detector}</div>
-      )}
     </div>
   );
 }

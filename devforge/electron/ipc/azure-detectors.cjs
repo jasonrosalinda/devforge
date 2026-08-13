@@ -225,15 +225,20 @@ async function getJson(url, token) {
 }
 
 /**
- * Discovers a detector for a site by keyword and returns its parsed charts.
+ * Discovers a detector for a site by keyword and returns its raw payload.
  * Resolves to null when the site publishes nothing matching.
+ *
+ * Split out from fetchDetectorCharts so a caller whose detector isn't chart-shaped
+ * (crash monitoring's dataset is a flat table of crash records, not a bucketed
+ * counter) can parse the raw dataset itself instead of going through
+ * parseDetectorCharts, which only understands the timestamp+value+labels shape.
  *
  * `timeGrain` is an ISO8601 duration (PT1M / PT5M / PT1H). Detectors are free to
  * ignore it, and some reject it outright with a 400 — a rejected grain retries at
- * the detector's own default, because losing the charts is worse than losing the
+ * the detector's own default, because losing the data is worse than losing the
  * resolution.
  */
-async function fetchDetectorCharts(token, siteResId, { keywords, titles = null, titleMatch = null, startIso, endIso, timeGrain = null, label = 'detector' }) {
+async function fetchDetectorPayload(token, siteResId, { keywords, startIso, endIso, timeGrain = null, label = 'detector' }) {
   const list = await getJson(`https://management.azure.com${siteResId}/detectors?api-version=${API_VERSION}`, token);
   if (!list) return null;
 
@@ -257,6 +262,17 @@ async function fetchDetectorCharts(token, siteResId, { keywords, titles = null, 
     payload = await getJson(url(null), token);
   }
   if (!payload) return null;
+  return { name, payload };
+}
+
+/**
+ * Discovers a detector for a site by keyword and returns its parsed charts.
+ * Resolves to null when the site publishes nothing matching.
+ */
+async function fetchDetectorCharts(token, siteResId, { keywords, titles = null, titleMatch = null, startIso, endIso, timeGrain = null, label = 'detector' }) {
+  const resolved = await fetchDetectorPayload(token, siteResId, { keywords, startIso, endIso, timeGrain, label });
+  if (!resolved) return null;
+  const { name, payload } = resolved;
   const parsed = parseDetectorCharts(payload, name, { titles, titleMatch });
   const insights = parseDetectorInsights(payload);
   if (!parsed) return insights.length ? { detector: name, charts: [], grainMs: null, insights } : null;
@@ -265,6 +281,7 @@ async function fetchDetectorCharts(token, siteResId, { keywords, titles = null, 
 
 module.exports = {
   API_VERSION,
+  fetchDetectorPayload,
   normalizeTitle,
   findDetector,
   parseDetectorCharts,

@@ -11,6 +11,7 @@ import {
 } from './anomalyDetection';
 import type { AnomalyEpisode, AnomalySeverity } from './anomalyDetection';
 import type { RemarkSeverity } from './appRemarks';
+import { CellSkeleton } from './loadingSkeleton';
 
 // 'ok' never actually comes back from describeAnomalyEpisodes (it only returns
 // non-null when there's a Warning/Critical episode) — filled in anyway so the
@@ -72,21 +73,28 @@ function explain(e: AnomalyEpisode, metrics: AppMetrics): string {
 }
 
 export function AnomalyDetectionRow({
-  metrics, expanded, onToggle,
+  metrics, expanded, onToggle, detailsLoading = false, detailsLoaded = false,
 }: {
   metrics: AppMetrics;
   expanded: boolean;
   onToggle: () => void;
+  /** FE/API 4xx and 5xx rates arrive via the separate details fetch, not the base
+   *  metrics call — see fetchAppDetails. Detection runs against every metric at
+   *  once, so it waits for that to finish rather than firing on CPU/Memory alone
+   *  and then silently changing its answer when the rest lands a moment later. */
+  detailsLoading?: boolean;
+  detailsLoaded?: boolean;
 }) {
-  const rows = detectCorrelatedAnomalies(metrics.cpu, buildExtras(metrics));
-  const episodes = groupAnomalyEpisodes(rows, inferSeriesStepMs(metrics.cpu.series));
+  const waitingForDetails = detailsLoading && !detailsLoaded;
+  const rows = waitingForDetails ? [] : detectCorrelatedAnomalies(metrics.cpu, buildExtras(metrics));
+  const episodes = waitingForDetails ? [] : groupAnomalyEpisodes(rows, inferSeriesStepMs(metrics.cpu.series));
   // Info (CPU-only) episodes are real detections but "probably a batch job, not
   // an incident" per the severity this was built from — counted for the aside
   // in the empty state, never shown as their own line.
   const reportable = episodes.filter(e => e.peakSeverity !== 'Info');
   const infoCount = episodes.length - reportable.length;
-  const hasReportable = reportable.length > 0;
-  const remark = describeAnomalyEpisodes(episodes);
+  const hasReportable = !waitingForDetails && reportable.length > 0;
+  const remark = waitingForDetails ? null : describeAnomalyEpisodes(episodes);
 
   return (
     <>
@@ -105,50 +113,53 @@ export function AnomalyDetectionRow({
             : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
         </td>
         <td className="text-right" colSpan={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden' }}>
-          {remark
-            ? <span style={{ color: REMARK_COLOR[remark.severity] }}>{remark.text}</span>
-            : <span style={{ color: '#3fb950' }}>
-                No correlated anomalies detected in this window{infoCount > 0 ? ` (${infoCount} CPU-only, not shown)` : ''}.
-              </span>}
+          {waitingForDetails ? <CellSkeleton w={160} /> : (
+            /* Bare count, not `remark.text`: the hint and time-of-latest that sentence
+               carries (for the Remarks card, which has no table backing it) would just
+               repeat what the table below already shows per-episode. */
+            remark
+              ? <span style={{ color: REMARK_COLOR[remark.severity] }}>
+                  {reportable.length} correlated pressure spike{reportable.length === 1 ? '' : 's'} detected.
+                </span>
+              : <span style={{ color: '#3fb950' }}>
+                  No correlated anomalies detected in this window{infoCount > 0 ? ` (${infoCount} CPU-only, not shown)` : ''}.
+                </span>
+          )}
         </td>
       </tr>
       {hasReportable && expanded && (
         <tr>
           <td colSpan={4} style={{ padding: 0 }}>
-            <div style={{ padding: '4px 12px 8px' }}>
-              {reportable.map((e, i) => (
-                <div
-                  key={i}
-                  style={{ padding: '4px 0', borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)' }}
-                >
-                  <div
-                    style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+              <tbody>
+                {reportable.map((e, i) => (
+                  <tr
+                    key={i}
+                    style={{ borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,0.04)' }}
                     title={`Peak composite score ${e.peakCompositeScore.toFixed(2)} over ${e.bucketCount} bucket${e.bucketCount === 1 ? '' : 's'}`}
                   >
-                    <span style={{ color: SEVERITY_COLOR[e.peakSeverity], fontWeight: 600, width: 64, flexShrink: 0 }}>
+                    <td style={{ padding: '4px 8px 4px 12px', color: SEVERITY_COLOR[e.peakSeverity], fontWeight: 600, whiteSpace: 'nowrap' }}>
                       {e.peakSeverity}
-                    </span>
-                    <span style={{ color: 'var(--muted-foreground)', flex: 1 }}>{e.metricsInvolved.join(' + ')}</span>
-                    <span style={{ color: '#8b9ab3', whiteSpace: 'nowrap' }}>{fmtRange(e)}</span>
-                  </div>
-                  {/* Which specific flags fired, translated into a where-to-look
-                      hint — e.g. "API errors + DB CPU pressure — likely slow query
-                      causing request timeouts" instead of just a metric list. */}
-                  {e.incidentType && (
-                    <div style={{ fontSize: 10, color: '#d29922', marginTop: 2, paddingLeft: 72 }}>
-                      {e.incidentType}
-                    </div>
-                  )}
-                  {/* Why: each involved metric's peak during the episode against its own
-                      window average — the anomaly is relative to that metric's trend,
-                      not a fixed line, so the raw peak percentage alone doesn't say
-                      whether it was actually unusual for that resource. */}
-                  <div style={{ fontSize: 10, color: '#6e7681', marginTop: 2, paddingLeft: 72 }}>
-                    {explain(e, metrics)}
-                  </div>
-                </div>
-              ))}
-            </div>
+                    </td>
+                    <td style={{ padding: '4px 8px', color: 'var(--muted-foreground)', whiteSpace: 'nowrap' }}>
+                      {e.metricsInvolved.join(' + ')}
+                    </td>
+                    {/* Why: each involved metric's peak during the episode against its own
+                        window average — the anomaly is relative to that metric's trend,
+                        not a fixed line, so the raw peak percentage alone doesn't say
+                        whether it was actually unusual for that resource. */}
+                    <td style={{ padding: '4px 8px', color: '#6e7681' }}>{explain(e, metrics)}</td>
+                    {/* Which specific flags fired, translated into a where-to-look
+                        hint — e.g. "API errors + DB CPU pressure — likely slow query
+                        causing request timeouts" instead of just a metric list. */}
+                    <td style={{ padding: '4px 8px', color: '#d29922' }}>{e.incidentType}</td>
+                    <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                      {fmtRange(e)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </td>
         </tr>
       )}

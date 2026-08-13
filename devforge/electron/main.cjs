@@ -1,14 +1,5 @@
-import { app, BrowserWindow, shell, ipcMain, Menu } from 'electron';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
-import updater from 'electron-updater';
-const { autoUpdater } = updater;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const require = createRequire(import.meta.url);
+const path = require('path');
+const { app, BrowserWindow, shell, ipcMain, Menu } = require('electron');
 
 const isDev = !app.isPackaged;
 
@@ -115,6 +106,7 @@ app.whenReady().then(() => {
 
     // ── Auto-updater ──────────────────────────────────────────────────────────
     if (!isDev) {
+        const { autoUpdater } = require('electron-updater');
         const send = (channel, data) => {
             if (!mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data);
         };

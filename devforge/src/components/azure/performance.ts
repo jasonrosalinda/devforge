@@ -15,6 +15,53 @@ export const PERF_4XX_COLOR  = '#f97316';
 export const PERF_5XX_COLOR  = '#f85149';
 export const PERF_LINE_COLOR = '#58a6ff';
 
+/** HTTP reason phrase plus a one-line description for the codes that actually
+ *  show up as 4xx/5xx failures on a web app. Not the full IANA registry — just
+ *  enough that a code in the failure table reads as a fact ("404 — Not Found —
+ *  resource not found.") instead of a number someone has to go look up. */
+const HTTP_STATUS_LABELS: Record<string, string> = {
+  '400': 'Bad Request — malformed request syntax.',
+  '401': 'Unauthorized — authentication required.',
+  '402': 'Payment Required — reserved for future use.',
+  '403': 'Forbidden — server understands request but refuses to authorize.',
+  '404': 'Not Found — resource not found.',
+  '405': 'Method Not Allowed — HTTP method not supported.',
+  '406': 'Not Acceptable — unacceptable content type.',
+  '407': 'Proxy Authentication Required — proxy needs auth.',
+  '408': 'Request Timeout — server timed out waiting for request.',
+  '409': 'Conflict — request conflicts with current state.',
+  '410': 'Gone — resource no longer available.',
+  '411': 'Length Required — needs Content-Length header.',
+  '412': 'Precondition Failed — precondition not met.',
+  '413': 'Content Too Large — request body too big.',
+  '414': 'URI Too Long — request URI exceeds limit.',
+  '415': 'Unsupported Media Type — media type not supported.',
+  '416': 'Range Not Satisfiable — range request invalid.',
+  '417': 'Expectation Failed — server does not support Expect header.',
+  '418': "I'm a Teapot — reserved.",
+  '421': 'Misdirected Request — request misdirected.',
+  '422': 'Unprocessable Entity — semantic errors in request.',
+  '500': 'Internal Server Error — generic server error.',
+  '501': 'Not Implemented — feature not supported.',
+  '502': 'Bad Gateway — upstream server failed.',
+  '503': 'Service Unavailable — server temporarily down.',
+  '504': 'Gateway Timeout — upstream server timed out.',
+  '505': "HTTP Version Not Supported — server doesn't support requested HTTP version.",
+  '506': 'Variant Also Negotiates — reserved.',
+  '507': 'Insufficient Storage — storage quota exceeded.',
+  '508': 'Loop Detected — loop in server processing.',
+  '509': 'Bandwidth Limit Exceeded — rate limit reached.',
+  '510': 'Not Extended — reserved.',
+  '511': 'Authentication Required — server requires authentication.',
+};
+
+/** "404" → "Not Found — resource not found.". Blank for a code with no known
+ *  reason phrase (including the '(no code)' sentinel for a failure that
+ *  carried none) — a guess would be worse than an empty cell. */
+export function httpStatusLabel(code: string): string {
+  return HTTP_STATUS_LABELS[code] ?? '';
+}
+
 /** One bar's three stacked segments plus the two latency lines for that bucket. */
 export interface PerfChartRow {
   t: string

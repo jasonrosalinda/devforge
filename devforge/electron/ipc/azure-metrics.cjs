@@ -122,6 +122,8 @@ const {
 const { fetchSnatCharts } = require('./azure-snat.cjs');
 // Restart events — same detector plumbing, but per site rather than per plan.
 const { fetchRestartCharts } = require('./azure-restarts.cjs');
+// Application Crashes detector — a crash-count timeline plus captured stack traces.
+const { fetchCrashData } = require('./azure-crashmonitoring.cjs');
 
 // ─── Pure Helpers (exported for testing) ─────────────────────────────────────
 
@@ -2218,6 +2220,54 @@ const handler = (_mainWindow) => {
       // Same reasoning as the SNAT cache: pinning a transient detector failure for
       // the whole TTL makes a re-fetch look broken.
       if (fe?.charts?.length || api?.charts?.length) setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { fe: null, api: null, error: err.message || String(err) };
+    }
+  });
+
+  // Crash monitoring, like restarts, is queried per site — a frontend crashing
+  // while its API stays up is the distinction worth seeing. Loaded on expand
+  // rather than eagerly: Restarts already gives the headline "App Crash ×N" for
+  // free, so this is a deep-dive a reader opens deliberately.
+  ipcMain.handle('azure-metrics:fetch-crashes', async (_event, { appKey, range, config, customStart, customEnd, granularity }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { fe: null, api: null };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { fe: null, api: null };
+
+    const gran = granularity || ((customStart && customEnd) ? getCustomGranularity(customStart, customEnd) : getGranularity(range));
+    const cacheKey = `${appKey}:crashes:${customStart ?? range}:${customEnd ?? ''}:${gran}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const cred = new DefaultAzureCredential();
+      const token = await getToken(cred);
+      const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+      const startIso = startTime.toISOString();
+      const endIso = endTime.toISOString();
+
+      const forSite = async (siteApp, isAppService) => {
+        if (!isAppService) return null;
+        try {
+          return await fetchCrashData(token, resourceId(config.subscriptionId, siteApp), startIso, endIso, gran);
+        } catch { return null; }
+      };
+
+      const apiIsAppService = !!app.apiName && (app.apiType || 'appservice') === 'appservice';
+      const [fe, api] = await Promise.all([
+        forSite(app, (app.type || 'appservice') === 'appservice'),
+        apiIsAppService
+          ? forSite({ type: 'appservice', resourceGroup: app.resourceGroup, name: app.apiName }, true)
+          : Promise.resolve(null),
+      ]);
+
+      const result = { fe, api };
+      // Same reasoning as the restart/SNAT caches: pinning a transient detector
+      // failure for the whole TTL makes a re-fetch look broken. A resolved answer
+      // with zero crashes is real and cacheable — only a totally absent result
+      // (detector not published) is worth leaving uncached for a retry.
+      if (fe || api) setCached(cacheKey, result);
       return result;
     } catch (err) {
       return { fe: null, api: null, error: err.message || String(err) };

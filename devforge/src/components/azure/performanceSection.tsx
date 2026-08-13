@@ -6,7 +6,7 @@ import { CellSkeleton, PanelSkeleton, SkeletonBlock } from './loadingSkeleton';
 import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import {
   perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
-  PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR,
+  PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR, httpStatusLabel,
 } from './performance';
 
 /** Row layout, shared by the header and the endpoint rows so the columns line up. */
@@ -22,6 +22,11 @@ const ROW_CAP = 20;
 
 /** The dependency block's own layout — call and target both need room to be readable. */
 const DEP_GRID = '1fr 150px 52px 48px 52px 52px 56px';
+
+/** The failure-codes block's own layout, same grid-of-divs shape as the
+ *  dependency block above rather than a bordered table. Reason gets most of
+ *  the width now that it carries a description, not just a reason phrase. */
+const CODE_GRID = '48px 3fr 1fr';
 
 /**
  * The Performance section's body: one endpoint charted, every endpoint listed.
@@ -413,34 +418,38 @@ export function PerformancePanel({
               {' across '}{codes.length} code{codes.length === 1 ? '' : 's'}
             </span>
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 10 }}>
-            {codes.map(c => {
-              const color = c.cls === '5xx' ? PERF_5XX_COLOR : PERF_4XX_COLOR;
-              const classTotal = c.cls === '5xx' ? ct.c5 : ct.c4;
-              return (
-                <span
-                  key={`${c.cls}|${c.code}`}
-                  style={{ whiteSpace: 'nowrap', color }}
-                  title={`${c.count.toLocaleString()} × ${c.code} — ${
-                    classTotal > 0 ? `${(c.count / classTotal * 100).toFixed(1)}% of this endpoint's ${c.cls}` : c.cls
-                  }\navg ${fmtMs(c.avgMs)} · P95 ${fmtMs(c.p95)}${
-                    // Says whether it is still happening. A code that stopped an hour ago and
-                    // one still arriving are the same number on the bar.
-                    c.lastSeen ? `\nlast seen ${new Date(c.lastSeen).toLocaleString()}` : ''
-                  }`}
-                >
-                  <span className="tabular-nums" style={{ fontWeight: 600 }}>{c.code}</span>
-                  <span style={{ color: '#484f58' }}> ×</span>{' '}
-                  <span className="tabular-nums">{c.count.toLocaleString()}</span>
-                  {/* The share is of its own class, not of all failures: 404s and 500s are
-                      different questions, and one percentage over both answers neither. */}
+          <div style={{ display: 'grid', gridTemplateColumns: CODE_GRID, gap: 6, color: '#6e7681', fontWeight: 600, marginBottom: 1 }}>
+            <span>code</span>
+            <span>reason</span>
+            <span>count</span>
+          </div>
+          {codes.map(c => {
+            const color = c.cls === '5xx' ? PERF_5XX_COLOR : PERF_4XX_COLOR;
+            const classTotal = c.cls === '5xx' ? ct.c5 : ct.c4;
+            return (
+              <div
+                key={`${c.cls}|${c.code}`}
+                style={{ display: 'grid', gridTemplateColumns: CODE_GRID, gap: 6, marginBottom: 1 }}
+                title={`avg ${fmtMs(c.avgMs)} · P95 ${fmtMs(c.p95)}${
+                  // Says whether it is still happening. A code that stopped an hour ago and
+                  // one still arriving are the same number on the bar.
+                  c.lastSeen ? `\nlast seen ${new Date(c.lastSeen).toLocaleString()}` : ''
+                }`}
+              >
+                <span className="tabular-nums" style={{ color, fontWeight: 600 }}>{c.code}</span>
+                <span style={{ color: '#8b9ab3' }}>{httpStatusLabel(c.code)}</span>
+                <span className="tabular-nums" style={{ color, whiteSpace: 'nowrap' }}>
+                  {c.count.toLocaleString()}
+                  {/* The share is of its own class, not of all failures: 404s and 500s
+                      are different questions, and one percentage over both answers
+                      neither. */}
                   {classTotal > 0 && (
                     <span style={{ color: '#484f58' }}> ({(c.count / classTotal * 100).toFixed(1)}% of {c.cls})</span>
                   )}
                 </span>
-              );
-            })}
-          </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

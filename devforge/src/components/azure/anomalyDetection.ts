@@ -412,7 +412,7 @@ export function describeAnomalyEpisodes(episodes: AnomalyEpisode[]): RemarkResul
   const hint = latest.incidentType ? ` — ${latest.incidentType}.` : '.';
   const text = reportable.length === 1
     ? `Correlated pressure spike across ${joinList(latest.metricsInvolved)} at ${fmtEpisodeTime(latest.startT)} (${latestLabel})${hint}`
-    : `${reportable.length} correlated pressure spikes detected; most recent across ${joinList(latest.metricsInvolved)} at ${fmtEpisodeTime(latest.startT)} (${latestLabel})${hint}`;
+    : `${reportable.length} correlated pressure spikes detected${hint}`;
 
   return { text, severity };
 }

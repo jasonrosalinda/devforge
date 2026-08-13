@@ -9,7 +9,7 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, ExceptionLocationSeries, ExceptionSiteRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ExceptionLocationSeries, ExceptionSiteRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import { AppRemarks, buildRemarks } from './azureAppRemarks';
 import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
+import { CrashMonitoringRows } from './crashMonitoringSection';
 import { PerformanceRows } from './performanceSection';
 import { perfTotals, chartTotals, perfChartRows } from './performance';
 import { UserRows } from './userSection';
@@ -782,11 +783,19 @@ interface AzureAppCardProps {
    *  hook keeps them in their own map so a fast cached result cannot be dropped. */
   restarts?: RestartResult | null;
   apiRestarts?: RestartResult | null;
+  /** The crash-monitoring detector round trip is in flight. Unlike restarts this is
+   *  fired only on expand — see onRequestCrashes. */
+  crashesLoading?: boolean;
+  /** Crash-monitoring detector results for this app. Same reasoning as `restarts`:
+   *  passed in rather than read off `metrics`, kept in the hook's own map. */
+  crashes?: CrashResult | null;
+  apiCrashes?: CrashResult | null;
   /** Per-endpoint dependency lookups for this card, keyed by `${site}|${endpoint}`. */
   endpointDeps?: Record<string, EndpointDepsState>;
   onRequestEndpointDeps?: ((site: 'fe' | 'api', endpoint: string) => void) | undefined;
   onRequestSnat?: () => void;
   onRequestRestarts?: () => void;
+  onRequestCrashes?: () => void;
   azureSettings: AzureSettings;
   uptimeRobotApiKey?: string | undefined;
   uptimeRobotMonitorIds?: string[] | undefined;
@@ -805,7 +814,7 @@ const AI_STATUS_COLORS = { healthy: '#3fb950', warning: '#d29922', critical: '#f
  */
 export const AzureAppCard = React.memo(AzureAppCardInner);
 
-function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, snatLoading = false, onRequestSnat, restartsLoading = false, restarts, apiRestarts, onRequestRestarts, endpointDeps = {}, onRequestEndpointDeps, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
+function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, snatLoading = false, onRequestSnat, restartsLoading = false, restarts, apiRestarts, onRequestRestarts, crashesLoading = false, crashes, apiCrashes, onRequestCrashes, endpointDeps = {}, onRequestEndpointDeps, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
   const { elementRef: cardRef, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     // No timestamp here: the hook appends its own, and Date.now() in a prop gave the
     // copy callback a new identity on every single render.
@@ -841,6 +850,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [restartsExpanded, setRestartsExpanded] = useState(false);
   const [anomalyExpanded, setAnomalyExpanded] = useState(false);
   const [restartsAPIExpanded, setRestartsAPIExpanded] = useState(false);
+  const [crashesExpanded, setCrashesExpanded] = useState(false);
+  const [crashesAPIExpanded, setCrashesAPIExpanded] = useState(false);
   // Mirrors the panel's own selection so the card knows which endpoint's dependency
   // lookup to hand back down. Held here rather than lifted out of the panel entirely:
   // the panel owns the selection, this is only the echo needed to address the cache.
@@ -878,7 +889,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [visibleBlocks, setVisibleBlocks] = useState({
     remarks: true, cpu: true, memory: true, database: true, users: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
-    restarts: true, performance: true, anomaly: true,
+    restarts: true, crashes: true, performance: true, anomaly: true,
     frontend: true, api: true,
   });
   const toggleBlock = (key: keyof typeof visibleBlocks) =>
@@ -1678,6 +1689,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 { key: 'uptimerobot',  label: 'UptimeRobot' },
                 { key: 'snat',         label: 'SNAT Ports' },
                 { key: 'restarts',     label: 'Restarts' },
+                { key: 'crashes',      label: 'Crash Monitoring' },
                 { key: 'anomaly',      label: 'Anomaly Detection' },
                 { key: 'frontend',     label: 'Frontend' },
                 { key: 'api',          label: 'API' },
@@ -2276,6 +2288,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 metrics={metrics}
                 expanded={anomalyExpanded}
                 onToggle={() => setAnomalyExpanded(v => !v)}
+                detailsLoading={detailsLoading}
+                detailsLoaded={detailsLoaded}
               />
             )}
             </tbody>
@@ -2433,6 +2447,20 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 syncId={hoverSyncId}
               />
             )}
+            {/* Crash Monitoring sits right below Restarts: a crash here is often the
+                same event Restarts just counted as "App Crash" — this is where a
+                reader goes to read what actually faulted. The total loads eagerly
+                with the card, same as Restarts; expanding only re-asks when the
+                eager fetch left us with nothing. */}
+            {visibleBlocks.crashes && metrics.type === 'appservice' && (
+              <CrashMonitoringRows
+                crashes={crashes}
+                loading={crashesLoading}
+                expanded={crashesExpanded}
+                onToggle={() => setCrashesExpanded(v => { if (!v && !crashes) onRequestCrashes?.(); return !v; })}
+                syncId={hoverSyncId}
+              />
+            )}
             {/* Only when the API is on its own plan (or there is no API) — a shared
                 plan puts one section in the main table instead. */}
             {visibleBlocks.snat && metrics.type === 'appservice' && metrics.apiSharesPlan !== true && (
@@ -2574,6 +2602,16 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   loading={restartsLoading}
                   expanded={restartsAPIExpanded}
                   onToggle={() => setRestartsAPIExpanded(v => { if (!v && !apiRestarts) onRequestRestarts?.(); return !v; })}
+                  syncId={hoverSyncId}
+                />
+              )}
+              {/* Below Restarts, as in the FE block above. */}
+              {visibleBlocks.crashes && (appConfig?.apiType || 'appservice') === 'appservice' && (
+                <CrashMonitoringRows
+                  crashes={apiCrashes}
+                  loading={crashesLoading}
+                  expanded={crashesAPIExpanded}
+                  onToggle={() => setCrashesAPIExpanded(v => { if (!v && !apiCrashes) onRequestCrashes?.(); return !v; })}
                   syncId={hoverSyncId}
                 />
               )}

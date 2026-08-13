@@ -14,6 +14,13 @@ import {
 } from 'recharts';
 import type { MetricSeries } from '@shared/types/azureMetrics.types';
 
+// Every ResponsiveContainer below is given `debounce={100}`: content-visibility
+// toggling a card into relevance while scrolling un-skips its layout and fires
+// this container's ResizeObserver the same as a real resize would. Without the
+// debounce, every chart on every card that crosses into view recomputes its full
+// SVG synchronously in the same scroll frame — the source of the scroll jank on a
+// page with many cards mounted at once.
+
 interface DowntimeInterval {
   start: number;
   end: number;
@@ -197,7 +204,7 @@ export function SeriesChart({
   const singleValued = series.every(p => p.v === p.m);
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       <AreaChart data={series} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: -20 }}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
@@ -268,7 +275,7 @@ export function InstanceHealthChart({
     : 0;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       {/* No negative left margin: the YAxis gets an explicit width sized to "100%"
           instead. Offsetting a default 60px axis leftwards is what previously either
           clipped the labels or left a wide empty gutter, depending on the offset. */}
@@ -380,7 +387,7 @@ export function EndpointSeriesChart({
     : 0;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       <LineChart data={rows} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
         <XAxis
           dataKey="t"
@@ -521,7 +528,7 @@ export function EndpointPerfChart({
   };
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       <ComposedChart data={rows} {...syncProps(syncId)} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
         <XAxis
           dataKey="t"
@@ -642,7 +649,7 @@ export function EventBarChart({
     : 0;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       <BarChart data={rows} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
         <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
         {/* allowDecimals=false: half an event does not exist, and an axis reading
@@ -766,7 +773,7 @@ export function CombinedChart({
   };
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
       <AreaChart data={merged} {...syncProps(syncId)} margin={{ top: 4, right: 25, bottom: 0, left: -16 }}>
         <defs>
           <linearGradient id="gCpuMax" x1="0" y1="0" x2="0" y2="1">

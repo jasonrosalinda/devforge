@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
-import type { AppMetrics, EndpointDependency, EndpointPerfPoint, EndpointStatusCode, RestartResult } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, CrashResult, EndpointDependency, EndpointPerfPoint, EndpointStatusCode, RestartResult } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 
 type CredStatus = 'checking' | 'ok' | 'error';
@@ -40,6 +40,11 @@ interface UseAzureMetrics {
   restartsLoading: Record<string, boolean>;
   /** Restart detector results per app. Kept out of `metrics` — see fetchAppRestarts. */
   restarts: Record<string, { fe: RestartResult | null; api: RestartResult | null }>;
+  crashesLoading: Record<string, boolean>;
+  /** Crash-monitoring detector results per app. Kept out of `metrics` — see
+   *  fetchAppCrashes. Loads eagerly with the card, same as `restarts`. */
+  crashes: Record<string, { fe: CrashResult | null; api: CrashResult | null }>;
+  fetchAppCrashes: (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => Promise<void>;
   /** Per-endpoint dependency lookups, keyed by `${appKey}|${site}|${endpoint}`. */
   endpointDeps: Record<string, EndpointDepsState>;
   fetchEndpointDeps: (appKey: string, site: 'fe' | 'api', endpoint: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string) => Promise<void>;
@@ -58,6 +63,8 @@ export function useAzureMetrics(): UseAzureMetrics {
   const [snatLoaded, setSnatLoaded] = useState<Record<string, boolean>>({});
   const [restartsLoading, setRestartsLoading] = useState<Record<string, boolean>>({});
   const [restarts, setRestarts] = useState<Record<string, { fe: RestartResult | null; api: RestartResult | null }>>({});
+  const [crashesLoading, setCrashesLoading] = useState<Record<string, boolean>>({});
+  const [crashes, setCrashes] = useState<Record<string, { fe: CrashResult | null; api: CrashResult | null }>>({});
   // Guard in a ref, not in `restartsLoaded`: fetchMetrics fires this for every app as
   // soon as the metrics land, and a state-based guard would leave fetchAppRestarts with
   // a changing identity, so fetchMetrics could not depend on it without re-creating
@@ -67,6 +74,7 @@ export function useAzureMetrics(): UseAzureMetrics {
   // identity on each result, which re-renders every memoized card on the page.
   const detailsRequested = useRef<Set<string>>(new Set());
   const snatRequested = useRef<Set<string>>(new Set());
+  const crashesRequested = useRef<Set<string>>(new Set());
   const [endpointDeps, setEndpointDeps] = useState<Record<string, EndpointDepsState>>({});
   const fetchIdRef = useRef(0);
 
@@ -155,6 +163,26 @@ export function useAzureMetrics(): UseAzureMetrics {
     }
   }, []);
 
+  // Restarts' storage shape (its own map, kept out of `metrics`) but Restarts'
+  // fetch trigger too: a total crash count is a headline figure worth scanning
+  // across every card, not a deep-dive worth a click first — same reasoning as
+  // fetchAppRestarts above.
+  const fetchAppCrashes = useCallback(async (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => {
+    if (crashesRequested.current.has(appKey)) return;
+    crashesRequested.current.add(appKey);
+    setCrashesLoading(prev => ({ ...prev, [appKey]: true }));
+    try {
+      const { fe, api } = await window.electronAPI.azureMetrics.fetchCrashes({ appKey, range, config, customStart, customEnd, granularity });
+      setCrashes(prev => ({ ...prev, [appKey]: { fe: fe ?? null, api: api ?? null } }));
+    } catch (err: unknown) {
+      crashesRequested.current.delete(appKey);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Crash monitoring fetch failed: ${msg}`);
+    } finally {
+      setCrashesLoading(prev => ({ ...prev, [appKey]: false }));
+    }
+  }, []);
+
   const fetchMetrics = useCallback(async (appKeys: string[], range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => {
     if (credStatus === 'error') return;
     if (!appKeys.length) return;
@@ -167,9 +195,12 @@ export function useAzureMetrics(): UseAzureMetrics {
     setSnatLoaded({});
     setRestartsLoading({});
     setRestarts({});
+    setCrashesLoading({});
+    setCrashes({});
     restartsRequested.current.clear();
     detailsRequested.current.clear();
     snatRequested.current.clear();
+    crashesRequested.current.clear();
     setEndpointDeps({});
     try {
       const data = await window.electronAPI.azureMetrics.fetch({ appKeys, range, config, customStart, customEnd, granularity });
@@ -181,10 +212,13 @@ export function useAzureMetrics(): UseAzureMetrics {
         // Restart summaries AND the App Insights details load with the card rather than on
         // expand. Performance and Users are the two rows a reader scans first, and a row
         // reading '—' until clicked cannot be scanned — the same reasoning as restarts.
-        // Neither is awaited: each row renders its skeleton until its own result lands.
+        // Crash totals load the same way, for the same reason: a total is a headline
+        // figure worth scanning across every card, not a deep-dive worth a click first.
+        // None of these are awaited: each row renders its skeleton until its own result lands.
         for (const key of appKeys) {
           void fetchAppRestarts(key, range, config, customStart, customEnd, granularity);
           void fetchAppDetails(key, range, config, customStart, customEnd, granularity);
+          void fetchAppCrashes(key, range, config, customStart, customEnd, granularity);
         }
       }
     } catch (err: unknown) {
@@ -195,7 +229,7 @@ export function useAzureMetrics(): UseAzureMetrics {
         setLoading(false);
       }
     }
-  }, [credStatus, fetchAppRestarts, fetchAppDetails]);
+  }, [credStatus, fetchAppRestarts, fetchAppDetails, fetchAppCrashes]);
 
   // Per endpoint and on demand: only one endpoint is charted at a time, so fetching every
   // endpoint's calls to render one was most of the work wasted. Stable ([] deps) because
@@ -249,6 +283,5 @@ export function useAzureMetrics(): UseAzureMetrics {
     }
   }, []);
 
-
-  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, snatLoaded, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, endpointDeps, fetchEndpointDeps, recheckCredential };
+  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, snatLoaded, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, endpointDeps, fetchEndpointDeps, recheckCredential };
 }
