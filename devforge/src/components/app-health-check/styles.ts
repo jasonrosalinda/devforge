@@ -1,18 +1,28 @@
 // Shared constants + helpers for the App Health Check page.
 
+import { UI } from '@/lib/chart-colors';
+
+/**
+ * Page palette. Was a fixed GitHub-dark ramp, which left this page as a dark
+ * island once the rest of the app became theme-aware — a black legend panel on a
+ * white page in light mode. Now an alias layer over the shared semantic tokens,
+ * so the names stay put for the five files that use them.
+ */
 export const C = {
-  bg:         '#07090f',
-  surface:    '#0d1117',
-  border:     '#21262d',
-  text:       '#e6edf3',
-  textSub:    '#8b9ab3',
-  textMuted:  '#484f58',
-  accent:     '#58a6ff',
-  green:      '#3fb950',
-  yellow:     '#d29922',
-  red:        '#f85149',
-  btnBg:      '#21262d',
-  btnActive:  '#1f6feb',
+  bg:          UI.background,
+  surface:     'hsl(var(--card))',
+  border:      UI.border,
+  text:        UI.text,
+  textSub:     UI.textMuted,
+  textMuted:   UI.textDim,
+  accent:      UI.info,
+  green:       UI.success,
+  yellow:      UI.warning,
+  red:         UI.error,
+  btnBg:       'hsl(var(--muted))',
+  btnActive:   UI.info,
+  errorBg:     'hsl(var(--error) / 0.1)',
+  errorBorder: 'hsl(var(--error) / 0.3)',
 } as const;
 
 export const GRANULARITIES: { label: string; value: string; maxSpanHours: number }[] = [
@@ -53,5 +63,7 @@ export const inputStyle: React.CSSProperties = {
   background: C.btnBg,
   color: C.text,
   fontSize: 12,
-  colorScheme: 'dark',
+  // 'light dark' lets the native date picker follow the active theme; it was
+  // pinned to 'dark', which rendered a dark picker on the light background.
+  colorScheme: 'light dark',
 };

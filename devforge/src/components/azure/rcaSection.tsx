@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
 import { Loader2, Share2, AlertTriangle, ScanSearch, Check, FileText, FileType2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Textarea } from '@/components/ui/textarea';
 import { RichTextField } from './richTextField';
 import { Input } from '@/components/ui/input';
@@ -13,6 +14,7 @@ import {
   type RcaFields, type RcaTrackerFields,
 } from './rcaHtml';
 import { RCA_STYLES, type RcaStatus } from './rcaDialog';
+import { UI } from '@/lib/chart-colors';
 
 interface RcaSectionProps {
   open: boolean;
@@ -178,7 +180,7 @@ export function RcaSection({
           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           title={open ? 'Collapse Root Cause Analysis Generator' : 'Expand Root Cause Analysis Generator'}
         >
-          <ScanSearch className="h-3.5 w-3.5" style={{ color: '#58a6ff' }} />
+          <ScanSearch className="h-3.5 w-3.5" style={{ color: UI.info }} />
           <span>Root Cause Analysis Generator</span>
           {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
           <button
@@ -193,8 +195,8 @@ export function RcaSection({
             <Sparkles
               className="w-3.5 h-3.5"
               style={status === 'running' ? {
-                color: '#58a6ff',
-                filter: 'drop-shadow(0 0 6px #58a6ff)',
+                color: UI.info,
+                filter: `drop-shadow(0 0 6px ${UI.info})`,
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
               } : undefined}
             />
@@ -223,8 +225,8 @@ export function RcaSection({
                   return (
                     <div key={i} className="flex items-start gap-2 text-xs leading-relaxed">
                       {active
-                        ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[#58a6ff]" />
-                        : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#3fb950]" />}
+                        ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-info" />
+                        : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />}
                       <span className={active ? 'text-foreground' : 'text-muted-foreground'}>{s}</span>
                     </div>
                   );
@@ -302,7 +304,7 @@ export function RcaSection({
                       <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                         {f.label}
                         {readOnly && (
-                          <span className="ml-1 font-normal normal-case tracking-normal text-[9px]" style={{ color: '#8b9ab3' }}>
+                          <span className="ml-1 font-normal normal-case tracking-normal text-[9px]" style={{ color: UI.textMuted }}>
                             · {PERIOD_SOURCE_LABEL[periodSource]}
                           </span>
                         )}
@@ -349,15 +351,21 @@ export function RcaSection({
             </div>
 
             <div className="flex items-center justify-end gap-2 border-t border-border pt-3" data-html2canvas-ignore="true">
-              <Button variant="outline" size="sm" disabled={!hasContent} onClick={onExportPdf}>
-                <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
-              </Button>
-              <Button variant="outline" size="sm" disabled={!hasContent} onClick={onExportWord}>
-                <FileType2 className="mr-1.5 h-3.5 w-3.5" /> Word
-              </Button>
-              <Button variant="default" size="sm" disabled={!hasContent} onClick={onCopyTeams}>
-                <Share2 className="mr-1.5 h-3.5 w-3.5" /> Copy for Teams
-              </Button>
+              <Hint label="Save this RCA as a PDF">
+                <Button variant="outline" size="sm" disabled={!hasContent} onClick={onExportPdf}>
+                  <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
+                </Button>
+              </Hint>
+              <Hint label="Save this RCA as a Word document you can edit">
+                <Button variant="outline" size="sm" disabled={!hasContent} onClick={onExportWord}>
+                  <FileType2 className="mr-1.5 h-3.5 w-3.5" /> Word
+                </Button>
+              </Hint>
+              <Hint label="Copy the RCA as rich text, ready to paste into Teams">
+                <Button variant="default" size="sm" disabled={!hasContent} onClick={onCopyTeams}>
+                  <Share2 className="mr-1.5 h-3.5 w-3.5" /> Copy for Teams
+                </Button>
+              </Hint>
             </div>
             </div>
             )}

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { CrashEvent, CrashResult } from '@shared/types/azureMetrics.types';
 import { EventBarChart } from './azureMetricChart';
 import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
+import { UI } from '@/lib/chart-colors';
 
 /**
  * Proactive crash-monitoring, from the portal's Application Crashes detector.
@@ -17,7 +18,7 @@ import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
  * Per site, so the frontend and the API each get their own row.
  */
 
-const CRASH_COLOR = '#f85149';
+const CRASH_COLOR = UI.error;
 
 /** Total crashes in the window, from the timeline. Pure.
  *
@@ -93,18 +94,18 @@ function CrashEventGroupRow({ group }: { group: CrashEventGroup }) {
       >
         <span style={{ color: CRASH_COLOR, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {group.exceptionType || group.category || 'Unknown exception'}
-          {group.times.length > 1 ? <span style={{ color: '#484f58' }}> ×{group.times.length}</span> : null}
+          {group.times.length > 1 ? <span style={{ color: UI.textDim }}> ×{group.times.length}</span> : null}
         </span>
-        <span style={{ color: '#6e7681', whiteSpace: 'nowrap' }}>
+        <span style={{ color: UI.textDim, whiteSpace: 'nowrap' }}>
           {group.stackTrace && (showStack ? <ChevronDown size={11} style={{ display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ display: 'inline', verticalAlign: 'middle' }} />)}
           {' '}{group.exitCode || '—'}
         </span>
       </div>
-      <div className="tabular-nums" style={{ color: '#6e7681', marginTop: 2 }}>
+      <div className="tabular-nums" style={{ color: UI.textDim, marginTop: 2 }}>
         {group.times.map(t => fmtEventTime(t)).join(', ')}
       </div>
       {showStack && group.stackTrace && (
-        <pre style={{ margin: '3px 0 0 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#8b949e', fontFamily: 'inherit' }}>{group.stackTrace}</pre>
+        <pre style={{ margin: '3px 0 0 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: UI.textMuted, fontFamily: 'inherit' }}>{group.stackTrace}</pre>
       )}
     </div>
   );
@@ -134,7 +135,7 @@ export function CrashPanel({
   return (
     <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
       {total === 0 && (
-        <div style={{ color: '#3fb950', padding: '4px 0' }}>No crashes in this window.</div>
+        <div style={{ color: UI.success, padding: '4px 0' }}>No crashes in this window.</div>
       )}
 
       {plotted.length > 0 && (
@@ -151,7 +152,7 @@ export function CrashPanel({
           actually captured a stack trace for. The two numbers are both real and can
           legitimately differ — this line is here so that gap doesn't read as a bug. */}
       {total > 0 && (
-        <div style={{ color: '#6e7681', margin: '4px 0 2px' }}>
+        <div style={{ color: UI.textDim, margin: '4px 0 2px' }}>
           {total.toLocaleString()} crash{total === 1 ? '' : 'es'} total this window
           {events.length > 0
             ? <> — {events.length} with a captured stack trace below. Proactive Crash Monitoring only records a trace once a site has crashed more than 3 times in 24h, and only keeps the most recent handful.</>
@@ -166,7 +167,7 @@ export function CrashPanel({
           {byType.map(c => (
             <span key={c.cause} style={{ whiteSpace: 'nowrap' }}>
               <span style={{ color: CRASH_COLOR, fontWeight: 600 }}>{c.count.toLocaleString()}</span>
-              <span style={{ color: '#6e7681' }}> {c.cause}</span>
+              <span style={{ color: UI.textDim }}> {c.cause}</span>
             </span>
           ))}
         </div>
@@ -174,7 +175,7 @@ export function CrashPanel({
 
       {groups.length > 0 && (
         <div style={{ marginTop: 6 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6e7681', marginBottom: 2 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: UI.textDim, marginBottom: 2 }}>
             <span>Exception (times in SGT)</span><span>Exit code</span>
           </div>
           {groups.map((g, i) => (
@@ -184,13 +185,13 @@ export function CrashPanel({
       )}
 
       {total > 0 && events.length === 0 && (
-        <div style={{ color: '#6e7681', marginTop: 6 }}>
+        <div style={{ color: UI.textDim, marginTop: 6 }}>
           No stack traces captured yet — Proactive Crash Monitoring only records them once a site has crashed more than 3 times in 24h.
         </div>
       )}
 
       {crashes.detector && (
-        <div style={{ color: '#484f58', marginTop: 6, paddingLeft: 8 }}>detector: {crashes.detector}</div>
+        <div style={{ color: UI.textDim, marginTop: 6, paddingLeft: 8 }}>detector: {crashes.detector}</div>
       )}
     </div>
   );
@@ -228,8 +229,8 @@ export function CrashMonitoringRows({
             ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
             : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
         </td>
-        <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap', color: '#8b9ab3', overflow: 'hidden', textOverflow: 'ellipsis' }} />
-        <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap', color: total === 0 ? '#3fb950' : 'hsl(var(--destructive))' }}>
+        <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap', color: UI.textMuted, overflow: 'hidden', textOverflow: 'ellipsis' }} />
+        <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap', color: total === 0 ? UI.success : 'hsl(var(--destructive))' }}>
           {loading && !crashes ? <CellSkeleton w={58} /> : crashes ? `${total.toLocaleString()} crash${total === 1 ? '' : 'es'}` : '—'}
         </td>
       </tr>

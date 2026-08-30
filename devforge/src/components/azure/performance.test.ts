@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals } from './performance';
+import { UI } from '@/lib/chart-colors';
 import type { EndpointPerfRow } from '@shared/types/azureMetrics.types';
 
 const pt = (over: Partial<{ t: string; count: number; c4: number; c5: number; avgMs: number; p95: number }> = {}) =>
@@ -134,10 +135,11 @@ describe('hasPerfData', () => {
 
 describe('msColor', () => {
   it('crosses to amber at 1s and to red at 5s', () => {
-    expect(msColor(999)).toBe('#3fb950');
-    expect(msColor(1000)).toBe('#d29922');
-    expect(msColor(4999)).toBe('#d29922');
-    expect(msColor(5000)).toBe('#f85149');
+    expect(msColor(999)).toBe(UI.success);
+    expect(msColor(1000)).toBe(UI.warning);
+    expect(msColor(4999)).toBe(UI.warning);
+    expect(msColor(5000)).toBe(UI.error);
+    expect(new Set([UI.success, UI.warning, UI.error]).size).toBe(3);
   });
 });
 

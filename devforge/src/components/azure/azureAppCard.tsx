@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch } from 'lucide-react';
 import { marked } from 'marked';
+import { Hint } from '@/components/ui/hint';
 import { toast } from 'sonner';
 import { RcaDialog, type RcaStatus } from './rcaDialog';
 import { RcaSection } from './rcaSection';
@@ -29,6 +30,7 @@ import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { useIpReputation } from '@/hooks/useIpReputation';
+import { UI, resolveCssColor } from '@/lib/chart-colors';
 
 
 // ─── Exception tabs: Unclassified / Timeout / Socket / OOM ───────────────────
@@ -38,6 +40,8 @@ import { useIpReputation } from '@/hooks/useIpReputation';
 const EXC_TABS = [
   // 'generic' is the internal key, matching GENERIC_MATCH / errorTypesGeneric in
   // the query layer; the label says what it means to a reader.
+  // Literal hex: these four are one categorical scale shown as tabs and as chart
+  // series, so all four hues have to stay mutually distinct and theme-stable.
   { key: 'generic', label: 'Unclassified', color: '#f85149' },
   { key: 'timeout', label: 'Timeout', color: '#d29922' },
   { key: 'socket',  label: 'Socket',  color: '#06b6d4' },
@@ -46,7 +50,7 @@ const EXC_TABS = [
 type ExcTab = typeof EXC_TABS[number]['key'];
 
 const SOCKET_ACCENT  = '#06b6d4';
-const TIMEOUT_ACCENT = '#d29922';
+const TIMEOUT_ACCENT = '#d29922';   // pairs with EXC_TABS' timeout hue
 
 export const getMeaningfulFrame = (raw: string) => {
   try {
@@ -104,7 +108,7 @@ function ExcLocationChartRow({ sites, bucket, bin, topN, error, syncId }: {
     if (!error) return null;
     return (
       <tr>
-        <td colSpan={4} style={{ paddingLeft: 20, paddingTop: 2, paddingBottom: 2, fontSize: 9, color: '#d29922' }}>
+        <td colSpan={4} style={{ paddingLeft: 20, paddingTop: 2, paddingBottom: 2, fontSize: 9, color: UI.warning }}>
           Throw-site chart unavailable: {error}
         </td>
       </tr>
@@ -163,9 +167,9 @@ function socketMetricVerdict(counters: SocketCounters | null | undefined) {
   if (!est || !tw) return null;
   if (est.avg <= 0 && tw.avg <= 0) return null;
   const ratio = est.avg > 0 ? tw.avg / est.avg : Infinity;
-  if (ratio >= 2)   return { ratio, color: '#f85149', text: 'TimeWait ≫ Established — outbound sockets are closed and re-opened per call, not pooled. Root cause is client lifetime (new HttpClient/connection per request), not load.' };
-  if (ratio >= 0.5) return { ratio, color: '#d29922', text: 'Elevated TimeWait against Established — partial socket reuse. Connection churn is consuming SNAT ports faster than they are released.' };
-  return { ratio, color: '#3fb950', text: 'TimeWait low against Established — outbound sockets are being reused. No pooling defect visible in the counters.' };
+  if (ratio >= 2)   return { ratio, color: UI.error, text: 'TimeWait ≫ Established — outbound sockets are closed and re-opened per call, not pooled. Root cause is client lifetime (new HttpClient/connection per request), not load.' };
+  if (ratio >= 0.5) return { ratio, color: UI.warning, text: 'Elevated TimeWait against Established — partial socket reuse. Connection churn is consuming SNAT ports faster than they are released.' };
+  return { ratio, color: UI.success, text: 'TimeWait low against Established — outbound sockets are being reused. No pooling defect visible in the counters.' };
 }
 
 const SOCKET_METRIC_HELP: Record<string, string> = {
@@ -182,7 +186,7 @@ function SocketSection({ label, title, children }: { label: string; title?: stri
   return (
     <tr style={{ borderTop: '1px solid rgba(255,255,255,0.03)', fontSize: 9 }}>
       <td colSpan={4} style={{ paddingLeft: 24, paddingTop: 4, paddingBottom: 4 }}>
-        {label !== '' && <div style={{ color: '#6e7681', fontWeight: 600, marginBottom: 3 }} title={title}>{label}</div>}
+        {label !== '' && <div style={{ color: UI.textDim, fontWeight: 600, marginBottom: 3 }} title={title}>{label}</div>}
         {children}
       </td>
     </tr>
@@ -250,7 +254,7 @@ function renderTimeoutTab(
     return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, fontStyle: 'italic', color: 'var(--muted-foreground)', paddingBottom: 4 }}>Timeout breakdown unavailable — expand the card to load details.</td></tr>;
   }
   if ((summary?.trueCount ?? 0) === 0 && types.length === 0) {
-    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No application-level timeouts in this window.</td></tr>;
+    return <tr style={{ fontSize: 9 }}><td colSpan={4} style={{ paddingLeft: 24, color: UI.success, paddingBottom: 4 }}>No application-level timeouts in this window.</td></tr>;
   }
 
   const samplingX = summary && summary.records > 0 ? summary.trueCount / summary.records : 1;
@@ -299,9 +303,9 @@ function renderTimeoutTab(
             return (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
                 <span style={{ color: TIMEOUT_ACCENT, width: 44, flexShrink: 0 }}>{layer}</span>
-                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.type}>{t.type}</span>
+                <span style={{ color: UI.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.type}>{t.type}</span>
                 <MiniBar pct={pct} color={TIMEOUT_ACCENT} />
-                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
+                <span className="tabular-nums" style={{ color: UI.error, width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
               </div>
             );
           })}
@@ -314,7 +318,7 @@ function renderTimeoutTab(
       {endpointGroups.length > 0 && (
         <SocketSection label="">
           <div
-            style={{ display: 'flex', gap: 8, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}
+            style={{ display: 'flex', gap: 8, color: UI.textDim, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}
             title={[
               summary ? `${summary.trueCount.toLocaleString()} timeouts across ${summary.operations.toLocaleString()} endpoint${summary.operations === 1 ? '' : 's'}${samplingX >= 1.5 ? `, reconstructed from ${summary.records.toLocaleString()} sampled records (App Insights kept 1 in ${samplingX.toFixed(1)})` : ''}.` : null,
               burstLabel,
@@ -344,7 +348,7 @@ function renderTimeoutTab(
                     title={layerInfo?.hint || undefined}
                   >
                     <span style={{ color: TIMEOUT_ACCENT, fontWeight: 600, overflowWrap: 'anywhere' }}>{d?.type ?? '—'}</span>
-                    {layerInfo?.heading && <span style={{ color: '#8b949e' }}>({layerInfo.heading})</span>}
+                    {layerInfo?.heading && <span style={{ color: UI.textMuted }}>({layerInfo.heading})</span>}
                   </div>
 
                   {/* endpoint */}
@@ -354,7 +358,7 @@ function renderTimeoutTab(
                           window) and its own line (the exception message), so the
                           row stays two lines without losing either. */}
                       <span
-                        style={{ color: '#cdd9e5' }}
+                        style={{ color: UI.text }}
                         title={[
                           g.endpoint,
                           d?.innermostMessage || d?.outerMessage || null,
@@ -369,10 +373,10 @@ function renderTimeoutTab(
                       {d?.method && d.method !== frame?.method && (
                         <span style={{ color: '#a371f7' }} title="Method that threw">{d.method}</span>
                       )}
-                      {d?.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                      {d?.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? UI.error : UI.textDim }} title="handledAt">{d.handledAt}</span>}
                     </div>
                     {frame && (
-                      <div style={{ color: '#3fb950', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title="Most meaningful stack frame">
+                      <div style={{ color: UI.success, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title="Most meaningful stack frame">
                         {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
                       </div>
                     )}
@@ -381,7 +385,7 @@ function renderTimeoutTab(
                   {/* total */}
                   <span
                     className="tabular-nums"
-                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600 }}
+                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: UI.error, fontWeight: 600 }}
                     title={`${g.count.toLocaleString()} occurrences from this endpoint, counted over the whole window (not from the 50-record detail sample).`}
                   >{g.count.toLocaleString()}</span>
                 </div>
@@ -392,7 +396,7 @@ function renderTimeoutTab(
 
           {/* Only when the endpoint list is short of the true count */}
           {hiddenEndpoints > 0 && (
-            <div style={{ color: '#484f58', marginTop: 2 }}>
+            <div style={{ color: UI.textDim, marginTop: 2 }}>
               Showing the {endpointGroups.length} largest of {summary!.operations} endpoints — narrow the time range to see the rest.
             </div>
           )}
@@ -415,7 +419,7 @@ function renderOomTab(
   if ((summary?.trueCount ?? 0) === 0) {
     return (
       <tr style={{ fontSize: 9 }}>
-        <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No out-of-memory exceptions in this window.</td>
+        <td colSpan={4} style={{ paddingLeft: 24, color: UI.success, paddingBottom: 4 }}>No out-of-memory exceptions in this window.</td>
       </tr>
     );
   }
@@ -449,7 +453,7 @@ function renderOomTab(
             {/* No exception column: every row in this tab is the same type, so it
                 carried no information. The Timeout tab keeps one because its rows
                 span SQL, HTTP and Redis. */}
-            <div style={{ display: 'flex', gap: 8, color: '#6e7681', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}>
+            <div style={{ display: 'flex', gap: 8, color: UI.textDim, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 2, marginBottom: 3 }}>
               <span style={{ flex: 1, minWidth: 0 }}>endpoint</span>
               <span style={{ width: 46, textAlign: 'right', flexShrink: 0 }}>total</span>
             </div>
@@ -472,12 +476,12 @@ function renderOomTab(
                             is always the same framework boilerplate, so it earned no
                             line of its own. */}
                         <span
-                          style={{ color: '#cdd9e5' }}
+                          style={{ color: UI.text }}
                           title={[d.operation_Name, d.innermostMessage || d.outerMessage, d.assembly].filter(Boolean).join('\n\n')}
                         >{d.operation_Name || '(unknown path)'}</span>
-                        {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                        {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? UI.error : UI.textDim }} title="handledAt">{d.handledAt}</span>}
                         {siteList.length > 1 && (
-                          <span style={{ color: '#8b949e' }} title="Distinct stack frames that ran out of memory under this endpoint">
+                          <span style={{ color: UI.textMuted }} title="Distinct stack frames that ran out of memory under this endpoint">
                             {siteList.length} sites
                           </span>
                         )}
@@ -485,7 +489,7 @@ function renderOomTab(
                       {siteList.map((s, k) => (
                         <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span
-                            style={{ color: '#3fb950', fontFamily: 'monospace', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            style={{ color: UI.success, fontFamily: 'monospace', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                             title={s.frame ? 'Most meaningful stack frame — the allocation site' : 'Method that threw'}
                           >
                             {s.frame
@@ -493,7 +497,7 @@ function renderOomTab(
                               : (s.method || '(unknown site)')}
                           </span>
                           {siteList.length > 1 && (
-                            <span className="tabular-nums" style={{ color: '#8b949e', width: 40, textAlign: 'right', flexShrink: 0 }}>
+                            <span className="tabular-nums" style={{ color: UI.textMuted, width: 40, textAlign: 'right', flexShrink: 0 }}>
                               {Math.round(s.count * samplingX).toLocaleString()}
                             </span>
                           )}
@@ -505,7 +509,7 @@ function renderOomTab(
                         data rather than "once" */}
                     <span
                       className="tabular-nums"
-                      style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600 }}
+                      style={{ width: 46, textAlign: 'right', flexShrink: 0, color: UI.error, fontWeight: 600 }}
                       title={samplingX >= 1.5
                         ? `${weighted.toLocaleString()} occurrences, from ${count} sampled record${count === 1 ? '' : 's'}`
                         : `${weighted.toLocaleString()} occurrence${weighted === 1 ? '' : 's'}`}
@@ -518,7 +522,7 @@ function renderOomTab(
                 50-record detail cap. Only speak up when the two disagree. */}
             {(summary?.operations ?? 0) > grouped.size && (
               <div
-                style={{ color: '#484f58', marginTop: 2 }}
+                style={{ color: UI.textDim, marginTop: 2 }}
                 title="Narrow the time range to see the others."
               >
                 Showing {grouped.size} of {summary!.operations} endpoints — the rest fall outside the 50 newest records.
@@ -552,7 +556,7 @@ function renderSocketTab(
   if (!hasAny) {
     return (
       <tr style={{ fontSize: 9 }}>
-        <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
+        <td colSpan={4} style={{ paddingLeft: 24, color: UI.success, paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
       </tr>
     );
   }
@@ -573,12 +577,12 @@ function renderSocketTab(
         <SocketSection label="Socket exceptions">
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'baseline' }}>
             <span style={{ color: SOCKET_ACCENT, fontWeight: 700, fontSize: 11 }}>{summary.trueCount.toLocaleString()}</span>
-            <span style={{ color: '#8b949e' }} title="Sum of itemCount — corrected for App Insights ingestion sampling. The raw record count is what the KQL returned.">
+            <span style={{ color: UI.textMuted }} title="Sum of itemCount — corrected for App Insights ingestion sampling. The raw record count is what the KQL returned.">
               {summary.records.toLocaleString()} records{samplingX >= 1.5 ? ` · sampling ×${samplingX.toFixed(1)}` : ''}
             </span>
-            <span style={{ color: '#8b949e' }}>{summary.instances.toLocaleString()} instance{summary.instances === 1 ? '' : 's'}</span>
-            <span style={{ color: '#8b949e' }}>{summary.operations.toLocaleString()} operation{summary.operations === 1 ? '' : 's'}</span>
-            {summary.firstSeen && <span style={{ color: '#484f58' }}>{fmtTime(summary.firstSeen)} → {fmtTime(summary.lastSeen)}</span>}
+            <span style={{ color: UI.textMuted }}>{summary.instances.toLocaleString()} instance{summary.instances === 1 ? '' : 's'}</span>
+            <span style={{ color: UI.textMuted }}>{summary.operations.toLocaleString()} operation{summary.operations === 1 ? '' : 's'}</span>
+            {summary.firstSeen && <span style={{ color: UI.textDim }}>{fmtTime(summary.firstSeen)} → {fmtTime(summary.lastSeen)}</span>}
           </div>
         </SocketSection>
       )}
@@ -586,7 +590,7 @@ function renderSocketTab(
       {/* Zero state still reached when only the plan counters have data */}
       {(summary?.records ?? 0) === 0 && (
         <tr style={{ fontSize: 9 }}>
-          <td colSpan={4} style={{ paddingLeft: 24, color: '#3fb950', paddingTop: 4, paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
+          <td colSpan={4} style={{ paddingLeft: 24, color: UI.success, paddingTop: 4, paddingBottom: 4 }}>No socket-layer exceptions in this window.</td>
         </tr>
       )}
 
@@ -601,12 +605,12 @@ function renderSocketTab(
                 style={{
                   flex: 1, minWidth: 1,
                   height: `${Math.max(p.count > 0 ? 8 : 1, (p.count / tlMax) * 100)}%`,
-                  background: p.count === 0 ? 'rgba(255,255,255,0.05)' : p.count >= tlMax * 0.6 ? '#f85149' : SOCKET_ACCENT,
+                  background: p.count === 0 ? 'rgba(255,255,255,0.05)' : p.count >= tlMax * 0.6 ? UI.error : SOCKET_ACCENT,
                 }}
               />
             ))}
           </div>
-          <div style={{ color: '#484f58', marginTop: 2 }}>
+          <div style={{ color: UI.textDim, marginTop: 2 }}>
             peak {tlMax.toLocaleString()}{tlPeak ? ` @ ${fmtTime(tlPeak.t)}` : ''} · {tlNonZero}/{timeline.length} buckets active
             {burst ? ' — concentrated spike, look for a traffic or deploy event' : ' — steady across the window, points at a connection leak rather than a spike'}
           </div>
@@ -620,10 +624,10 @@ function renderSocketTab(
             const pct = byType[0]!.trueCount > 0 ? (t.trueCount / byType[0]!.trueCount) * 100 : 0;
             return (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
-                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.exType}>{t.exType}</span>
+                <span style={{ color: UI.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.exType}>{t.exType}</span>
                 <span style={{ color: '#a371f7', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Assembly: ${t.assembly}`}>{t.assembly || '—'}</span>
                 <MiniBar pct={pct} color={SOCKET_ACCENT} />
-                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
+                <span className="tabular-nums" style={{ color: UI.error, width: 52, textAlign: 'right', flexShrink: 0 }}>{t.trueCount.toLocaleString()}</span>
               </div>
             );
           })}
@@ -637,22 +641,22 @@ function renderSocketTab(
             const pct = instTotal > 0 ? (inst.trueCount / instTotal) * 100 : 0;
             return (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
-                <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${inst.instance}${inst.roleName ? ` · ${inst.roleName}` : ''}`}>{inst.instance}</span>
-                <MiniBar pct={pct} color={pct >= 60 ? '#f85149' : SOCKET_ACCENT} />
-                <span className="tabular-nums" style={{ color: '#8b949e', width: 40, textAlign: 'right', flexShrink: 0 }}>{pct.toFixed(0)}%</span>
-                <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{inst.trueCount.toLocaleString()}</span>
+                <span style={{ color: UI.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${inst.instance}${inst.roleName ? ` · ${inst.roleName}` : ''}`}>{inst.instance}</span>
+                <MiniBar pct={pct} color={pct >= 60 ? UI.error : SOCKET_ACCENT} />
+                <span className="tabular-nums" style={{ color: UI.textMuted, width: 40, textAlign: 'right', flexShrink: 0 }}>{pct.toFixed(0)}%</span>
+                <span className="tabular-nums" style={{ color: UI.error, width: 52, textAlign: 'right', flexShrink: 0 }}>{inst.trueCount.toLocaleString()}</span>
               </div>
             );
           })}
           {byInst.length > 1 && (
-            <div style={{ color: topShare >= 60 ? '#f0883e' : '#484f58', marginTop: 2 }}>
+            <div style={{ color: topShare >= 60 ? UI.warning : UI.textDim, marginTop: 2 }}>
               {topShare >= 60
                 ? `${topShare.toFixed(0)}% on ${topInst?.instance} — worker-local port exhaustion. Restarting or scaling out only moves the problem; the leak is per-instance.`
                 : 'Spread across instances — plan-wide connection pressure rather than one bad worker.'}
             </div>
           )}
           {byInst.length === 1 && (
-            <div style={{ color: '#484f58', marginTop: 2 }}>Single instance reporting — scale out will not dilute this.</div>
+            <div style={{ color: UI.textDim, marginTop: 2 }}>Single instance reporting — scale out will not dilute this.</div>
           )}
         </SocketSection>
       )}
@@ -662,11 +666,11 @@ function renderSocketTab(
         <SocketSection label="Downstream targets (correlated by operation_Id)">
           {targets.map((t, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
-              <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.target}>{t.target}</span>
+              <span style={{ color: UI.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.target}>{t.target}</span>
               <span style={{ color: '#a371f7', width: 60, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Dependency type: ${t.depType}`}>{t.depType || '—'}</span>
-              <span style={{ color: '#d29922', width: 34, flexShrink: 0 }} title="resultCode">{t.resultCode || '—'}</span>
-              <span className="tabular-nums" style={{ color: '#58a6ff', width: 62, textAlign: 'right', flexShrink: 0 }} title="p95 duration">{fmtDuration(t.p95)}</span>
-              <span className="tabular-nums" style={{ color: '#f85149', width: 52, textAlign: 'right', flexShrink: 0 }}>{t.count.toLocaleString()}</span>
+              <span style={{ color: UI.warning, width: 34, flexShrink: 0 }} title="resultCode">{t.resultCode || '—'}</span>
+              <span className="tabular-nums" style={{ color: UI.info, width: 62, textAlign: 'right', flexShrink: 0 }} title="p95 duration">{fmtDuration(t.p95)}</span>
+              <span className="tabular-nums" style={{ color: UI.error, width: 52, textAlign: 'right', flexShrink: 0 }}>{t.count.toLocaleString()}</span>
             </div>
           ))}
         </SocketSection>
@@ -677,9 +681,9 @@ function renderSocketTab(
         <SocketSection label={`Outbound socket / TCP counters — plan ${counters?.planName || '(unknown)'}`}>
           {sm!.map((m, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
-              <span style={{ color: '#cdd9e5', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={SOCKET_METRIC_HELP[m.name] ?? m.name}>{m.name}</span>
-              <span className="tabular-nums" style={{ color: '#8b949e', width: 70, textAlign: 'right', flexShrink: 0 }} title="Average">avg {Math.round(m.avg).toLocaleString()}</span>
-              <span className="tabular-nums" style={{ color: '#58a6ff', width: 70, textAlign: 'right', flexShrink: 0 }} title="Maximum">max {Math.round(m.max).toLocaleString()}</span>
+              <span style={{ color: UI.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={SOCKET_METRIC_HELP[m.name] ?? m.name}>{m.name}</span>
+              <span className="tabular-nums" style={{ color: UI.textMuted, width: 70, textAlign: 'right', flexShrink: 0 }} title="Average">avg {Math.round(m.avg).toLocaleString()}</span>
+              <span className="tabular-nums" style={{ color: UI.info, width: 70, textAlign: 'right', flexShrink: 0 }} title="Maximum">max {Math.round(m.max).toLocaleString()}</span>
             </div>
           ))}
           {verdict && (
@@ -687,7 +691,7 @@ function renderSocketTab(
               TimeWait / Established = {Number.isFinite(verdict.ratio) ? verdict.ratio.toFixed(2) : '∞'} — {verdict.text}
             </div>
           )}
-          <div style={{ color: '#484f58', marginTop: 2 }}>
+          <div style={{ color: UI.textDim, marginTop: 2 }}>
             Counters are published on the App Service Plan, so they cover every site sharing it — not this site alone. Azure allocates a fixed SNAT port budget per worker (128 ports per unique destination by default), and a TIME_WAIT socket holds its port for ~4 minutes, so churn — not concurrency — is what exhausts the budget.
           </div>
         </SocketSection>
@@ -710,33 +714,33 @@ function renderSocketTab(
                 <div key={j} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      <span style={{ color: '#cdd9e5' }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
+                      <span style={{ color: UI.text }} title={d.operation_Name}>{d.operation_Name || '(unknown path)'}</span>
                       {/* Hidden when it duplicates the stack frame printed below */}
                       {d.method && d.method !== frame?.method && (
                         <span style={{ color: '#a371f7' }} title="Method that threw">{d.method}</span>
                       )}
-                      {d.cloud_RoleInstance && <span style={{ color: '#484f58' }} title="Instance">@{d.cloud_RoleInstance}</span>}
-                      {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? '#f85149' : '#484f58' }} title="handledAt">{d.handledAt}</span>}
+                      {d.cloud_RoleInstance && <span style={{ color: UI.textDim }} title="Instance">@{d.cloud_RoleInstance}</span>}
+                      {d.handledAt && <span style={{ color: d.handledAt.toLowerCase() === 'unhandled' ? UI.error : UI.textDim }} title="handledAt">{d.handledAt}</span>}
                     </div>
-                    <div style={{ color: '#f85149', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.innermostMessage || d.outerMessage}>
+                    <div style={{ color: UI.error, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.innermostMessage || d.outerMessage}>
                       {d.innermostMessage || d.outerMessage || '—'}
                     </div>
                     {(d.innermostType || d.innermostMethod || d.assembly) && (
-                      <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      <div style={{ color: UI.textDim, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         {d.innermostType && <span title="Innermost type">{d.innermostType}</span>}
                         {d.assembly && <span style={{ color: '#a371f7', opacity: 0.7 }} title="Assembly">{d.assembly}</span>}
                         {d.innermostMethod && <span style={{ color: '#a371f7', opacity: 0.7 }} title="Innermost method">{d.innermostMethod}</span>}
                       </div>
                     )}
                     {frame && (
-                      <div style={{ color: '#3fb950', fontFamily: 'monospace' }} title="Most meaningful stack frame">
+                      <div style={{ color: UI.success, fontFamily: 'monospace' }} title="Most meaningful stack frame">
                         {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
                       </div>
                     )}
                   </div>
                   <span
                     className="tabular-nums"
-                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600, marginTop: 1 }}
+                    style={{ width: 46, textAlign: 'right', flexShrink: 0, color: UI.error, fontWeight: 600, marginTop: 1 }}
                     title={weight > count ? `${weight.toLocaleString()} occurrences, from ${count} sampled record${count === 1 ? '' : 's'}` : `${weight.toLocaleString()} occurrence${weight === 1 ? '' : 's'}`}
                   >{weight.toLocaleString()}</span>
                 </div>
@@ -757,8 +761,8 @@ export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP9
 }
 
 const STATUS_COLORS: Record<Status, string> = {
-  healthy:  '#3fb950',
-  warning:  '#d29922',
+  healthy:  UI.success,
+  warning:  UI.warning,
   critical: 'hsl(var(--destructive))',
 };
 
@@ -804,7 +808,7 @@ interface AzureAppCardProps {
 }
 
 
-const AI_STATUS_COLORS = { healthy: '#3fb950', warning: '#d29922', critical: '#f85149' } as const;
+const AI_STATUS_COLORS = { healthy: UI.success, warning: UI.warning, critical: UI.error } as const;
 
 /**
  * Wrapped in memo because the page holds every card's async state in one place: a restart
@@ -819,7 +823,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     // No timestamp here: the hook appends its own, and Date.now() in a prop gave the
     // copy callback a new identity on every single render.
     fileNamePrefix: `azure-${appKey}`,
-    backgroundColor: '#09090b',
+    backgroundColor: UI.background,
   });
 
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
@@ -1225,7 +1229,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     const appName = metrics.label || appKey;
 
     const heuristicRemarks = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
-    const severityColor: Record<string, string> = { ok: '#3fb950', warning: '#d29922', critical: '#f85149' };
+    const severityColor: Record<string, string> = { ok: UI.success, warning: UI.warning, critical: UI.error };
     const remarksText = aiRemark ? aiRemark.remarks : heuristicRemarks.text;
     const remarksColor = aiRemark
       ? AI_STATUS_COLORS[aiRemark.status]
@@ -1292,8 +1296,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
 
     try {
       const html2canvas = await loadHtml2Canvas();
+      // html2canvas parses this string with its own CSS parser and cannot see the
+      // app's custom properties: `hsl(var(--background))` reaches its hsl parser with a
+      // var() token where the hue belongs and throws "Unsupported angle type". Flatten
+      // the token to a literal first.
+      const captureBackground = resolveCssColor(UI.background);
       const canvas: HTMLCanvasElement = await html2canvas(chartEl, {
-        backgroundColor: '#09090b', scale: 2, logging: false, useForeignObject: false,
+        backgroundColor: captureBackground, scale: 2, logging: false, useForeignObject: false,
       });
       const imageBlob = await new Promise<Blob>((resolve, reject) =>
         canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png'),
@@ -1306,7 +1315,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       const capturePerfChart = async (tag: 'fe' | 'api') => {
         const el = card.querySelector(`[data-teams-perf-chart="${tag}"]`) as HTMLElement | null;
         if (!el) return null;
-        const perfCanvas = await html2canvas(el, { backgroundColor: '#09090b', scale: 2, logging: false, useForeignObject: false });
+        const perfCanvas = await html2canvas(el, { backgroundColor: captureBackground, scale: 2, logging: false, useForeignObject: false });
         return perfCanvas.toDataURL('image/png');
       };
       const fePerfUrl = await capturePerfChart('fe');
@@ -1459,7 +1468,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
 
   // Map instance name → palette color matching chart line order
   const instanceColorMap = new Map<string, string>(
-    (metrics.instanceHealthSeries ?? []).map((inst, i): [string, string] => [inst.name, INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? '#8b9ab3'])
+    (metrics.instanceHealthSeries ?? []).map((inst, i): [string, string] => [inst.name, INSTANCE_PALETTE[i % INSTANCE_PALETTE.length] ?? UI.textMuted])
   );
 
   const planMeta = metrics.plan
@@ -1503,7 +1512,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     outage:             'Outage',
   };
   const CAUSE_COLOR: Record<string, string> = {
-    instance_crash:     '#f0883e',
+    instance_crash:     UI.warning,
     full_outage:        'hsl(var(--destructive))',
     dependency_failure: '#a371f7',
     outage:             'hsl(var(--destructive))',
@@ -1537,7 +1546,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               onMouseEnter={ev => { if ((details?.length ?? 0) > 0) ev.currentTarget.style.background = isSelected ? 'rgba(248,81,73,0.1)' : 'rgba(255,255,255,0.02)'; }}
               onMouseLeave={ev => { ev.currentTarget.style.background = isSelected ? 'rgba(248,81,73,0.06)' : 'transparent'; }}
             >
-              <td colSpan={3} className="truncate" style={{ color: isSelected ? '#f85149' : 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={e.type}>
+              <td colSpan={3} className="truncate" style={{ color: isSelected ? UI.error : 'var(--muted-foreground)', paddingLeft: 20, maxWidth: 0 }} title={e.type}>
                 {(details?.length ?? 0) > 0 && (isSelected
                   ? <ChevronDown size={9} style={{ marginRight: 3, display: 'inline', verticalAlign: 'middle', flexShrink: 0 }} />
                   : <ChevronRight size={9} style={{ marginRight: 3, display: 'inline', verticalAlign: 'middle', flexShrink: 0 }} />
@@ -1546,7 +1555,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               </td>
               <td
                 className="text-right tabular-nums"
-                style={{ color: shown > 10 ? '#f85149' : shown > 3 ? '#d29922' : '#484f58' }}
+                style={{ color: shown > 10 ? UI.error : shown > 3 ? UI.warning : UI.textDim }}
                 title={e.trueCount != null && e.trueCount !== e.count ? `${e.trueCount.toLocaleString()} occurrences, from ${e.count.toLocaleString()} sampled records` : undefined}
               >{shown.toLocaleString()}</td>
             </tr>
@@ -1587,20 +1596,20 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                             )}
                           </div>
                           {(d.innermostType || d.innermostMethod) && (
-                            <div style={{ color: '#484f58', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            <div style={{ color: UI.textDim, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                               {d.innermostType && <span title="Innermost type">{d.innermostType}</span>}
                               {d.innermostMethod && <span style={{ color: '#a371f7', opacity: 0.7 }} title="Innermost method">{d.innermostMethod}</span>}
                             </div>
                           )}
                           {frame && (
-                            <div style={{ color: '#3fb950', fontFamily: 'monospace' }} title="Most meaningful stack frame">
+                            <div style={{ color: UI.success, fontFamily: 'monospace' }} title="Most meaningful stack frame">
                               {frame.method}{frame.fileName ? ` @ ${frame.fileName}${frame.line ? `:${frame.line}` : ''}` : ''}
                             </div>
                           )}
                         </div>
                         <span
                           className="tabular-nums"
-                          style={{ width: 46, textAlign: 'right', flexShrink: 0, color: '#f85149', fontWeight: 600, marginTop: 1 }}
+                          style={{ width: 46, textAlign: 'right', flexShrink: 0, color: UI.error, fontWeight: 600, marginTop: 1 }}
                           title={`${count.toLocaleString()} sampled record${count === 1 ? '' : 's'}`}
                         >{count.toLocaleString()}</span>
                       </div>
@@ -1657,7 +1666,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           ] as const).filter(t => t.show).map(({ tag, ai }) => (
             <span key={tag} className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{
               background: ai ? 'rgba(88,166,255,0.12)' : 'rgba(255,255,255,0.06)',
-              color:      ai ? '#58a6ff'               : '#8b9ab3',
+              color:      ai ? UI.info               : UI.textMuted,
               border:     `1px solid ${ai ? 'rgba(88,166,255,0.3)' : 'rgba(255,255,255,0.1)'}`,
             }}>
               {tag}
@@ -1669,11 +1678,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
             <span className="text-[10px] text-muted-foreground">{seriesStart} → {seriesEnd}</span>
           )}
           <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" title="Toggle visible blocks" data-html2canvas-ignore="true">
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-              </Button>
-            </DropdownMenuTrigger>
+            <Hint label="Choose which blocks this card shows — remarks, CPU, memory and the rest">
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" data-html2canvas-ignore="true">
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+            </Hint>
             <DropdownMenuContent align="end" className="w-44" data-html2canvas-ignore="true">
               <DropdownMenuLabel className="text-xs">Visible blocks</DropdownMenuLabel>
               <DropdownMenuSeparator />
@@ -1703,53 +1714,56 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+          <Hint label={incidentReportLoading ? 'Generating the incident report…' : 'Download a Markdown incident report — written to be fed straight to an AI agent'}>
           <Button
             variant="ghost"
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
             onClick={() => handleIncidentReport()}
             disabled={incidentReportLoading}
-            title={incidentReportLoading ? 'Generating incident report…' : 'Download Incident Report (Markdown — feed to AI agent)'}
             data-html2canvas-ignore="true"
             style={undefined}
           >
             <Sparkles
               className="w-3.5 h-3.5"
               style={incidentReportLoading ? {
-                color: '#d29922',
-                filter: 'drop-shadow(0 0 6px #d29922)',
+                color: UI.warning,
+                filter: `drop-shadow(0 0 6px ${UI.warning})`,
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
               } : undefined}
             />
           </Button>
+          </Hint>
+          <Hint label={rcaStatus === 'running' ? 'Downtime RCA analysis running…' : 'Open the downtime RCA — add investigation notes, then have Claude draft the report'}>
           <Button
             variant="ghost"
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-foreground"
             onClick={openRcaDialog}
-            title={rcaStatus === 'running' ? 'Downtime RCA analysis running…' : 'Downtime RCA Report (AI) — add investigation notes, then generate'}
             data-html2canvas-ignore="true"
           >
             <ScanSearch
               className="w-3.5 h-3.5"
               style={rcaStatus === 'running' ? {
-                color: '#58a6ff',
-                filter: 'drop-shadow(0 0 6px #58a6ff)',
+                color: UI.info,
+                filter: `drop-shadow(0 0 6px ${UI.info})`,
                 animation: 'sparkle-glow 1.2s ease-in-out infinite',
               } : undefined}
             />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            onClick={copyForTeams}
-            style={{ visibility: (isCopying || isTeamsCopying) ? 'hidden' : 'visible' }}
-            title="Copy for Teams (status header + chart image + metrics table)"
-            data-html2canvas-ignore="true"
-          >
-            <Share2 className="w-3.5 h-3.5" />
-          </Button>
+          </Hint>
+          <Hint label="Copy for Teams — status header, chart image and metrics table in one paste">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={copyForTeams}
+              style={{ visibility: (isCopying || isTeamsCopying) ? 'hidden' : 'visible' }}
+              data-html2canvas-ignore="true"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+            </Button>
+          </Hint>
         </div>
       </div>
 
@@ -1884,7 +1898,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   .map(i => ({ ...i, role: 'api' as const })),
               ];
               const hasInstances = allInstances.length > 0;
-              const hc = (v: number | null) => v == null ? '#8b9ab3' : v >= 99 ? '#3fb950' : v >= 90 ? '#d29922' : 'hsl(var(--destructive))';
+              const hc = (v: number | null) => v == null ? UI.textMuted : v >= 99 ? UI.success : v >= 90 ? UI.warning : 'hsl(var(--destructive))';
 
               // Derived once and used by both the collapsed header summary and the
               // expanded chart, so the latest-health figures in the two can never
@@ -1948,7 +1962,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   label: seriesRoleName ? `${seriesRoleName}: ${shortName}` : shortName,
                   shortName, seriesRoleName, avg, minVal, latest, points,
                   lifecycle, stillActive,
-                  color: INSTANCE_PALETTE[colorIdx] ?? '#8b9ab3',
+                  color: INSTANCE_PALETTE[colorIdx] ?? UI.textMuted,
                 };
               }).filter(r => r.avg !== null || r.points.length > 0);
 
@@ -1981,7 +1995,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                 {r.latest != null ? `${r.latest.toFixed(2)}%` : '—'}
                               </span>
                               {!r.stillActive && r.lifecycle && (
-                                <span style={{ color: '#d29922', fontSize: 9, flexShrink: 0 }} title="Stopped reporting before the window ended.">stopped</span>
+                                <span style={{ color: UI.warning, fontSize: 9, flexShrink: 0 }} title="Stopped reporting before the window ended.">stopped</span>
                               )}
                             </span>
                           ))}
@@ -2035,21 +2049,21 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                   <span style={{ width: 8, height: 2, background: r.color, borderRadius: 1, flexShrink: 0 }} />
                                   <span style={{ color: r.color }}>{r.shortName}</span>
                                   {r.seriesRoleName && (
-                                    <span style={{ fontSize: 9, color: '#484f58', fontWeight: 600, letterSpacing: '0.04em' }}>{r.seriesRoleName}</span>
+                                    <span style={{ fontSize: 9, color: UI.textDim, fontWeight: 600, letterSpacing: '0.04em' }}>{r.seriesRoleName}</span>
                                   )}
                                   <span className="tabular-nums" style={{ color: hc(r.avg) }}>
                                     {r.avg != null ? `${r.avg.toFixed(2)}%` : '—'}
                                   </span>
-                                  <span className="tabular-nums" style={{ color: '#6e7681' }}>
+                                  <span className="tabular-nums" style={{ color: UI.textDim }}>
                                     min {r.minVal != null ? `${r.minVal.toFixed(2)}%` : '—'}
                                   </span>
                                 </div>
                                 {r.lifecycle && (
-                                  <div style={{ fontSize: 9, color: '#6e7681', fontWeight: 400, marginTop: 1, paddingLeft: 13 }}>
+                                  <div style={{ fontSize: 9, color: UI.textDim, fontWeight: 400, marginTop: 1, paddingLeft: 13 }}>
                                     {r.lifecycle}
                                     {!r.stillActive && (
                                       <span
-                                        style={{ marginLeft: 4, color: '#d29922' }}
+                                        style={{ marginLeft: 4, color: UI.warning }}
                                         title="No traffic in the final buckets of the range — this instance stopped reporting before the window ended."
                                       >
                                         stopped
@@ -2073,9 +2087,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               const totalDownSec = downLogs.reduce((s, l) => s + l.duration, 0);
               const spanSec = spanMinutes * 60;
               const uptimePct = spanSec > 0 ? Math.round((1 - totalDownSec / spanSec) * 10000) / 100 : null;
-              const uptimeColor = uptimePct == null ? '#8b9ab3' : uptimePct >= 99 ? '#3fb950' : uptimePct >= 95 ? '#d29922' : 'hsl(var(--destructive))';
+              const uptimeColor = uptimePct == null ? UI.textMuted : uptimePct >= 99 ? UI.success : uptimePct >= 95 ? UI.warning : 'hsl(var(--destructive))';
               const fmtDur = (sec: number) => fmtDuration(sec * 1000);
-              const incidentColor = totalIncidents === 0 ? '#3fb950' : '#f85149';
+              const incidentColor = totalIncidents === 0 ? UI.success : UI.error;
               return (
                 <>
                   <tr
@@ -2089,7 +2103,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                     </td>
                     <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap' }}>
                       <span style={{ color: incidentColor }}>{totalIncidents} incident{totalIncidents !== 1 ? 's' : ''}</span>
-                      {totalDownSec > 0 && <span style={{ color: '#484f58' }}> · </span>}
+                      {totalDownSec > 0 && <span style={{ color: UI.textDim }}> · </span>}
                       {totalDownSec > 0 && <span style={{ color: incidentColor }}>{fmtDur(totalDownSec)} down</span>}
                     </td>
                     <td className="text-right tabular-nums" style={{ color: uptimeColor, whiteSpace: 'nowrap' }}>
@@ -2100,13 +2114,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                     <tr>
                       <td colSpan={4} style={{ padding: 0 }}>
                         <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                          {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3' }}>{urLoading ? 'Loading monitors…' : 'Loading incident details…'}</div>}
+                          {(urLoading || incidentDetailLoading) && <div style={{ padding: '6px 10px', fontSize: 10, color: UI.textMuted }}>{urLoading ? 'Loading monitors…' : 'Loading incident details…'}</div>}
                           {urError && <div style={{ padding: '6px 10px', fontSize: 10, color: 'hsl(var(--destructive))' }}>{urError}</div>}
                           {!urLoading && urMonitors.length === 0 && !urError && (
-                            <div style={{ padding: '6px 10px', fontSize: 10, color: '#8b9ab3', fontStyle: 'italic' }}>No monitors found</div>
+                            <div style={{ padding: '6px 10px', fontSize: 10, color: UI.textMuted, fontStyle: 'italic' }}>No monitors found</div>
                           )}
                           {!urLoading && !incidentDetailLoading && (() => {
-                            const muted = '#8b9ab3';
+                            const muted = UI.textMuted;
                             const iMet = incidentDetailMetrics ?? metrics;
                             const cpuSeries = iMet.cpu.series;
                             const memSeries = iMet.memory.series;
@@ -2167,18 +2181,18 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
                                   <thead>
                                     <tr>
-                                      <td colSpan={16} style={{ padding: '3px 10px', fontSize: 9, fontWeight: 700, color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)', borderTop: '1px solid rgba(255,255,255,0.04)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>{dateKey}</td>
+                                      <td colSpan={16} style={{ padding: '3px 10px', fontSize: 9, fontWeight: 700, color: UI.textDim, borderBottom: '1px solid rgba(255,255,255,0.04)', borderTop: '1px solid rgba(255,255,255,0.04)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>{dateKey}</td>
                                     </tr>
-                                    <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                                    <tr style={{ color: UI.textDim, fontWeight: 700 }}>
                                       <td rowSpan={2} style={{ padding: '3px 10px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Time (SGT)</td>
                                       <td rowSpan={2} style={{ padding: '3px 6px', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>Dur</td>
                                       <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Cause</td>
                                       <td rowSpan={2} style={{ padding: '3px 6px', verticalAlign: 'bottom' }}>Monitored</td>
-                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>Before (5min)</td>
-                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#8b9ab3', borderBottom: '1px solid rgba(255,255,255,0.04)', borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>During</td>
-                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: '#484f58', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>After (5min)</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: UI.textDim, borderBottom: '1px solid rgba(255,255,255,0.04)' }}>Before (5min)</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: UI.textMuted, borderBottom: '1px solid rgba(255,255,255,0.04)', borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>During</td>
+                                      <td colSpan={4} style={{ padding: '2px 6px', textAlign: 'center', color: UI.textDim, borderBottom: '1px solid rgba(255,255,255,0.04)' }}>After (5min)</td>
                                     </tr>
-                                    <tr style={{ color: '#484f58', fontWeight: 700 }}>
+                                    <tr style={{ color: UI.textDim, fontWeight: 700 }}>
                                       {['Instances','RPM','CPU','Mem','Instances','RPM','CPU','Mem','Instances','RPM','CPU','Mem'].map((h, i) => (
                                         <td key={i} style={{ padding: '2px 6px', textAlign: i % 4 !== 0 ? 'right' : undefined, ...(i === 4 ? { borderLeft: '1px solid rgba(255,255,255,0.06)' } : {}), ...(i === 7 ? { borderRight: '1px solid rgba(255,255,255,0.06)' } : {}) }}>{h}</td>
                                       ))}
@@ -2209,8 +2223,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                       const reqBeforeRPM = reqBefore > 0 ? Math.round(reqBefore / 4 * 10) / 10 : 0;
                                       const reqDuringRPM = reqDuring > 0 ? Math.round(reqDuring / duringMin * 10) / 10 : 0;
                                       const reqAfterRPM  = reqAfter  > 0 ? Math.round(reqAfter  / 5 * 10) / 10 : 0;
-                                      const cpuColor = cpuDuring > 90 ? 'hsl(var(--destructive))' : cpuDuring > 70 ? '#d29922' : muted;
-                                      const memColor = memDuring == null ? muted : memDuring > 95 ? 'hsl(var(--destructive))' : memDuring > 80 ? '#d29922' : muted;
+                                      const cpuColor = cpuDuring > 90 ? 'hsl(var(--destructive))' : cpuDuring > 70 ? UI.warning : muted;
+                                      const memColor = memDuring == null ? muted : memDuring > 95 ? 'hsl(var(--destructive))' : memDuring > 80 ? UI.warning : muted;
                                       const urCause = (() => {
                                         if (failDuring === 0) return null;
                                         const availPts = (iMet.availability?.series ?? []).filter(s => { const t = new Date(s.t).getTime(); return t >= ivStart && t <= ivEnd; });
@@ -2234,27 +2248,27 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                                       return (
                                         <tr key={logKey} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                                           <td style={{ padding: '4px 10px', color: muted, whiteSpace: 'nowrap' }}>{startLabel} → {endLabel}</td>
-                                          <td style={{ padding: '4px 6px', color: '#d29922', whiteSpace: 'nowrap' }}>{dur}</td>
+                                          <td style={{ padding: '4px 6px', color: UI.warning, whiteSpace: 'nowrap' }}>{dur}</td>
                                           <td style={{ padding: '4px 6px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                             {urCause
                                               ? <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: '0.04em', padding: '1px 4px', borderRadius: 3, background: `${urCauseColor}22`, border: `1px solid ${urCauseColor}55`, color: urCauseColor }}>{CAUSE_LABEL[urCause]}</span>
-                                              : reasons.length > 0 ? <span style={{ color: muted }}>{reasons.join(' · ')}</span> : <span style={{ color: '#484f58' }}>—</span>}
+                                              : reasons.length > 0 ? <span style={{ color: muted }}>{reasons.join(' · ')}</span> : <span style={{ color: UI.textDim }}>—</span>}
                                           </td>
                                           <td style={{ padding: '4px 6px', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            <span style={{ color: '#58a6ff' }}>{url}</span>
+                                            <span style={{ color: UI.info }}>{url}</span>
                                           </td>
-                                          <td style={{ padding: '4px 6px' }}>{instBefore.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instBefore.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqBefore > 0 ? reqBeforeRPM : '—'}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuBefore != null ? `${cpuBefore.toFixed(1)}%` : '—'}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memBefore != null ? `${memBefore.toFixed(1)}%` : '—'}</td>
-                                          <td style={{ padding: '4px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>{instDuring.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instDuring.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; const hc = (inst.avg ?? 100) < 50 ? 'hsl(var(--destructive))' : (inst.avg ?? 100) < 90 ? '#d29922' : '#3fb950'; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: hc }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: muted }}>{reqDuring > 0 ? reqDuringRPM : <span style={{ color: '#484f58' }}>—</span>}</td>
+                                          <td style={{ padding: '4px 6px' }}>{instBefore.length === 0 ? <span style={{ color: UI.textDim }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instBefore.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: UI.textDim }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: UI.textDim }}>{reqBefore > 0 ? reqBeforeRPM : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: UI.textDim, whiteSpace: 'nowrap' }}>{cpuBefore != null ? `${cpuBefore.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: UI.textDim, whiteSpace: 'nowrap' }}>{memBefore != null ? `${memBefore.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>{instDuring.length === 0 ? <span style={{ color: UI.textDim }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instDuring.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; const hc = (inst.avg ?? 100) < 50 ? 'hsl(var(--destructive))' : (inst.avg ?? 100) < 90 ? UI.warning : UI.success; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: hc }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: muted }}>{reqDuring > 0 ? reqDuringRPM : <span style={{ color: UI.textDim }}>—</span>}</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: cpuColor, whiteSpace: 'nowrap' }}>{cpuDuring.toFixed(1)}%</td>
                                           <td style={{ padding: '4px 6px', textAlign: 'right', color: memColor, whiteSpace: 'nowrap', borderRight: '1px solid rgba(255,255,255,0.06)' }}>{memDuring != null ? `${memDuring.toFixed(1)}%` : '—'}</td>
-                                          <td style={{ padding: '4px 6px' }}>{instAfter.length === 0 ? <span style={{ color: '#484f58' }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instAfter.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: '#484f58' }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: '#484f58' }}>{reqAfter > 0 ? reqAfterRPM : '—'}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{cpuAfter != null ? `${cpuAfter.toFixed(1)}%` : '—'}</td>
-                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: '#484f58', whiteSpace: 'nowrap' }}>{memAfter != null ? `${memAfter.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px' }}>{instAfter.length === 0 ? <span style={{ color: UI.textDim }}>—</span> : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{instAfter.map((inst, ii) => { const lc = instanceColorMap.get(inst.name) ?? INSTANCE_PALETTE[ii % INSTANCE_PALETTE.length]; return <div key={ii} title={inst.name} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9 }}><span style={{ color: lc }}>●</span><span style={{ color: UI.textDim }}>{inst.avg}% / {inst.min}%</span></div>; })}</div>}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', whiteSpace: 'nowrap', color: UI.textDim }}>{reqAfter > 0 ? reqAfterRPM : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: UI.textDim, whiteSpace: 'nowrap' }}>{cpuAfter != null ? `${cpuAfter.toFixed(1)}%` : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', color: UI.textDim, whiteSpace: 'nowrap' }}>{memAfter != null ? `${memAfter.toFixed(1)}%` : '—'}</td>
                                         </tr>
                                       );
                                     })}
@@ -2359,7 +2373,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               const excCounts  = excBucketCounts(metrics.requestInsights);
               const errorCount = excCounts.total;
               if (errorCount === 0 && !hasDetail) return null;
-              const errColor = errorCount === 0 ? '#3fb950' : errorCount <= 10 ? '#d29922' : '#f85149';
+              const errColor = errorCount === 0 ? UI.success : errorCount <= 10 ? UI.warning : UI.error;
               // Generic tab = neither socket-layer nor timeout, split server-side. Falls back
               // to the unsplit list when the split queries did not run (older cache).
               const genericTypes   = metrics.requestInsights.errorTypesGeneric ?? errorTypes;
@@ -2533,7 +2547,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 const apiHasDetail  = apiErrorTypes.length > 0;
                 const apiExcCounts  = excBucketCounts(metrics.apiRequestInsights);
                 const apiErrorCount = apiExcCounts.total;
-                const apiErrColor = apiErrorCount === 0 ? '#3fb950' : apiErrorCount <= 10 ? '#d29922' : '#f85149';
+                const apiErrColor = apiErrorCount === 0 ? UI.success : apiErrorCount <= 10 ? UI.warning : UI.error;
                 const apiGenericTypes   = metrics.apiRequestInsights.errorTypesGeneric ?? apiErrorTypes;
                 const apiGenericDetails = metrics.apiRequestInsights.errorDetailsGeneric ?? metrics.apiRequestInsights.errorDetails ?? [];
                 const apiSocketIns      = metrics.apiRequestInsights.socketInsights ?? null;
@@ -2655,7 +2669,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
                 data-html2canvas-ignore="true"
               >
-                <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-blue-400' : 'text-muted-foreground'}`} />
+                <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-info' : 'text-muted-foreground'}`} />
               </button>
             </div>
             <div className="border-t border-border px-3 py-2">

@@ -4,6 +4,7 @@ import { ThemeModeToggle } from "../ui/theme-mode-toggle"
 import { QuickTimeConverter } from "./quick-time-converter"
 import { ChevronLeft, Download, ScrollText, Search, Settings, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Hint } from "@/components/ui/hint";
 import { Input } from "@/components/ui/input"
 import { useState, useEffect } from "react"
 import type { LucideIcon } from "lucide-react"
@@ -65,15 +66,17 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
             <div className="flex w-full items-center gap-2 px-4 lg:px-6 py-2">
 
                 {onBack && (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onBack}
-                        className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground"
-                    >
-                        <ChevronLeft className="w-4 h-4" />
-                        <span className="text-sm">Back</span>
-                    </Button>
+                    <Hint label="Back to the tool list">
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={onBack}
+                            className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground"
+                        >
+                            <ChevronLeft className="w-4 h-4" />
+                            <span className="text-sm">Back</span>
+                        </Button>
+                    </Hint>
                 )}
 
                 {onBack && <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-4" />}
@@ -128,21 +131,27 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                     </div>
 
                     {!isDesktop &&
-                        <Button variant="ghost" size="sm" asChild className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground">
-                            <a href={downloadUrl} target="_blank" rel="noreferrer">
-                                <Download className="w-4 h-4" />
-                            </a>
-                        </Button>
+                        <Hint label="Download the desktop app">
+                            <Button variant="ghost" size="sm" asChild className="flex items-center gap-1 px-2 text-muted-foreground hover:text-foreground">
+                                <a href={downloadUrl} target="_blank" rel="noreferrer">
+                                    <Download className="w-4 h-4" />
+                                </a>
+                            </Button>
+                        </Hint>
                     }
                     {onOpenReleaseNotes && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenReleaseNotes} title="Release Notes">
-                            <ScrollText className="w-4 h-4" />
-                        </Button>
+                        <Hint label="What changed in this and earlier versions">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenReleaseNotes}>
+                                <ScrollText className="w-4 h-4" />
+                            </Button>
+                        </Hint>
                     )}
                     {onOpenSettings && (
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenSettings} title="Settings">
-                            <Settings className="w-4 h-4" />
-                        </Button>
+                        <Hint label="API keys, Azure apps and other settings">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenSettings}>
+                                <Settings className="w-4 h-4" />
+                            </Button>
+                        </Hint>
                     )}
                     <ThemeModeToggle />
                 </div>

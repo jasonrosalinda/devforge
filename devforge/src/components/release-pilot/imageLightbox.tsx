@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Copy } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 
 export interface LightboxImage {
   src: string;
@@ -68,9 +69,11 @@ export function ImageLightbox({ image, onClose, onCopy }: ImageLightboxProps) {
               <div className="flex shrink-0 items-center gap-2">
                 {meta && <span className="text-xs font-mono text-muted-foreground">{meta}</span>}
                 {onCopy && (
-                  <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={() => onCopy(image.src)} title="Copy image (full resolution) — paste into Teams">
-                    <Copy className="h-3.5 w-3.5" /> Copy image
-                  </Button>
+                  <Hint label="Copy this screenshot at full resolution, ready to paste into Teams">
+                    <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={() => onCopy(image.src)}>
+                      <Copy className="h-3.5 w-3.5" /> Copy image
+                    </Button>
+                  </Hint>
                 )}
               </div>
             </div>

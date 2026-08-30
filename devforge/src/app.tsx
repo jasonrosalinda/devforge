@@ -2,6 +2,7 @@ import { useState, useRef, useCallback } from "react";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
 import { ThemeProvider } from "@/components/provider/theme-provider";
 import { SidebarProvider } from "@/components/ui/sidebar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { Home } from "lucide-react";
 import { SettingsProvider } from "@/context/settings-context";
@@ -103,6 +104,9 @@ export default function App() {
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       <SettingsProvider>
+      {/* App-wide tooltip defaults. Hovering one hinted control then another inside
+          200ms skips the second delay, so scanning a toolbar doesn't stutter. */}
+      <TooltipProvider delayDuration={300} skipDelayDuration={200}>
       <SidebarProvider>
         <style>{LAUNCH_STYLES}</style>
 
@@ -160,6 +164,7 @@ export default function App() {
 
         </div>
       </SidebarProvider>
+      </TooltipProvider>
       </SettingsProvider>
     </ThemeProvider>
   );

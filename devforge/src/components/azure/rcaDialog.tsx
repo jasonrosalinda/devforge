@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check, FileText, Sparkles } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Textarea } from '@/components/ui/textarea';
 import { splitQuickSummary } from './rcaHtml';
 
@@ -48,7 +49,7 @@ export function RcaDialog({
       <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col gap-3">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
-            <ScanSearch className="h-4 w-4 text-[#58a6ff]" />
+            <ScanSearch className="h-4 w-4 text-info" />
             Downtime RCA Report (AI) — {title}
           </DialogTitle>
         </DialogHeader>
@@ -85,11 +86,13 @@ export function RcaDialog({
                 </span>
               </div>
               <div className="flex justify-end">
-                <Button variant="default" size="sm" onClick={() => onGenerate(notes)}>
-                  {status === 'error'
-                    ? <><RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry analysis</>
-                    : <><Sparkles className="mr-1.5 h-3.5 w-3.5" /> Generate RCA</>}
-                </Button>
+                <Hint label={status === 'error' ? 'Run the analysis again' : 'Send the metrics and your notes to Claude and draft the root-cause analysis'}>
+                  <Button variant="default" size="sm" onClick={() => onGenerate(notes)}>
+                    {status === 'error'
+                      ? <><RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry analysis</>
+                      : <><Sparkles className="mr-1.5 h-3.5 w-3.5" /> Generate RCA</>}
+                  </Button>
+                </Hint>
               </div>
             </div>
           ) : status === 'running' ? (
@@ -106,15 +109,15 @@ export function RcaDialog({
                   return (
                     <li key={i} className="flex items-start gap-2 text-xs leading-relaxed">
                       {active
-                        ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[#58a6ff]" />
-                        : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#3fb950]" />}
+                        ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-info" />
+                        : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />}
                       <span className={active ? 'text-foreground' : 'text-muted-foreground'}>{s}</span>
                     </li>
                   );
                 })}
                 {markdown && (
                   <li className="flex items-start gap-2 text-xs leading-relaxed">
-                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[#58a6ff]" />
+                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-info" />
                     <span className="text-foreground">Generating analysis…</span>
                   </li>
                 )}
@@ -151,15 +154,21 @@ export function RcaDialog({
         </div>
 
         <div className="flex items-center justify-end gap-2">
-          <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExport}>
-            <Download className="mr-1.5 h-3.5 w-3.5" /> Export MD
-          </Button>
-          <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExportPdf}>
-            <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
-          </Button>
-          <Button variant="default" size="sm" disabled={status !== 'done'} onClick={onCopyTeams}>
-            <Share2 className="mr-1.5 h-3.5 w-3.5" /> Copy for Teams
-          </Button>
+          <Hint label="Save the RCA as a Markdown file">
+            <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExport}>
+              <Download className="mr-1.5 h-3.5 w-3.5" /> Export MD
+            </Button>
+          </Hint>
+          <Hint label="Save the RCA as a PDF">
+            <Button variant="outline" size="sm" disabled={status !== 'done'} onClick={onExportPdf}>
+              <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
+            </Button>
+          </Hint>
+          <Hint label="Copy the RCA as rich text, ready to paste into Teams">
+            <Button variant="default" size="sm" disabled={status !== 'done'} onClick={onCopyTeams}>
+              <Share2 className="mr-1.5 h-3.5 w-3.5" /> Copy for Teams
+            </Button>
+          </Hint>
         </div>
 
         <style>{RCA_STYLES}</style>
@@ -172,18 +181,18 @@ export function RcaDialog({
  *  looks identical in both places. */
 export const RCA_STYLES = `
           .rca-summary {
-            border: 1px solid rgba(88, 166, 255, .35); border-left: 3px solid #58a6ff;
+            border: 1px solid hsl(var(--info) / .35); border-left: 3px solid hsl(var(--info));
             border-radius: 6px; background: rgba(88, 166, 255, .08);
             padding: 12px 14px; margin-bottom: 16px;
           }
           .rca-summary-label {
             display: flex; align-items: center; gap: 6px;
             font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-            color: #58a6ff; margin-bottom: 6px;
+            color: hsl(var(--info)); margin-bottom: 6px;
           }
           .rca-summary-copy {
             margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
-            font: inherit; letter-spacing: .04em; color: #58a6ff;
+            font: inherit; letter-spacing: .04em; color: hsl(var(--info));
             background: transparent; border: 1px solid rgba(88, 166, 255, .4);
             border-radius: 4px; padding: 2px 6px; cursor: pointer;
           }
@@ -209,7 +218,7 @@ export const RCA_STYLES = `
           .rca-content table { width: 100%; border-collapse: collapse; margin: .5rem 0; font-size: 12px; }
           .rca-content th, .rca-content td { border: 1px solid hsl(var(--border)); padding: 5px 8px; text-align: left; vertical-align: top; }
           .rca-content th { background: hsl(var(--muted)); font-weight: 600; }
-          .rca-content a { color: #58a6ff; }
+          .rca-content a { color: hsl(var(--info)); }
           .rca-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .75rem; color: hsl(var(--muted-foreground)); margin: .5rem 0; }
           .rca-content hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 1rem 0; }
 `;

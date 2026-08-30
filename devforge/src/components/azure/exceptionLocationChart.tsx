@@ -13,6 +13,7 @@
 import { useMemo } from 'react';
 import { EndpointSeriesChart } from './azureMetricChart';
 import type { ExceptionLocationSeries } from '@shared/types/azureMetrics.types';
+import { UI } from '@/lib/chart-colors';
 
 /** Last path segment of a stack frame's source path — `/src/src/App/Foo.razor`
  *  → `Foo.razor`. The full path goes in the row's tooltip; at legend width it
@@ -89,21 +90,21 @@ export function ExceptionLocationChart({
 
   return (
     <div style={{ paddingLeft: 20, paddingTop: 6, paddingBottom: 6 }}>
-      <div style={{ fontSize: 9, color: '#6e7681', fontWeight: 600, marginBottom: 2 }}>
+      <div style={{ fontSize: 9, color: UI.textDim, fontWeight: 600, marginBottom: 2 }}>
         Exceptions over time
         {bin ? <span style={{ fontWeight: 400 }}> · per {bin}</span> : null}
       </div>
 
       <EndpointSeriesChart
         series={[{ url: 'Exceptions', series: overallSeries }]}
-        colors={[color ?? '#f85149']}
+        colors={[color ?? UI.error]}
         {...(bin ? { binLabel: bin } : {})}
         height={height}
         {...(syncId ? { syncId } : {})}
       />
 
       {topN != null && ranked.length >= topN && (
-        <div style={{ fontSize: 9, color: '#6e7681', marginTop: 3 }}>
+        <div style={{ fontSize: 9, color: UI.textDim, marginTop: 3 }}>
           Showing the {topN} highest-volume throw sites — narrow the time range to see the rest.
         </div>
       )}

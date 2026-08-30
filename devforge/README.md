@@ -9,10 +9,18 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 | Tool | Description |
 |------|-------------|
 | **App Health Check** | Azure App Service + Container Apps health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor, optional network/edge diagnostics (App Gateway, Front Door, Load Balancer via Log Analytics). |
-| **PageSpeed Insights** | Run Google PageSpeed audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
+| **PageSpeed Insights** | Run Google PageSpeed audits. Single, branch-comparison, and multi-run modes (1-10 runs per URL, average or median). Save/restore/clear run history. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. See [docs/pagespeed-insights.md](docs/pagespeed-insights.md). |
 | **Unused Assets** | Scan a project folder for unused CSS classes/ids and unused JS functions. |
 | **Release Pilot** | Fetch a Confluence release runbook, parse sections/goals/schedule, surface attachment images in a lightbox, and generate a Teams-ready release summary on the clipboard. |
 | **Translation** | Localization key viewer/editor with searchable table. |
+
+---
+
+## Documentation
+
+| Guide | Contents |
+|-------|----------|
+| [PageSpeed Insights](docs/pagespeed-insights.md) | Work instruction: API key setup, single / comparison / accuracy runs, reading results, Copy for Teams, Claude Analysis, fix briefs, history, troubleshooting. |
 
 ---
 

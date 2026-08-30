@@ -13,6 +13,11 @@ import {
   ReferenceArea,
 } from 'recharts';
 import type { MetricSeries } from '@shared/types/azureMetrics.types';
+import { CHART_COLORS, INSTANCE_PALETTE, PERF_COLORS, UI } from '@/lib/chart-colors';
+
+// Re-exported so the dashboard sections can keep importing the palettes from the
+// chart module they already depend on; `@/lib/chart-colors` is the definition.
+export { CHART_COLORS, INSTANCE_PALETTE };
 
 // Every ResponsiveContainer below is given `debounce={100}`: content-visibility
 // toggling a card into relevance while scrolling un-skips its layout and fires
@@ -54,26 +59,7 @@ interface CombinedChartProps {
   height?: number;
 }
 
-export const CHART_COLORS = {
-  cpuAvg:  '#c4b5fd',
-  cpuMax:  '#a78bfa',
-  memAvg:  '#fdba74',
-  memMax:  '#f97316',
-  avail:   '#3fb950',
-  // Database. CPU and memory get separate hues for the same reason the app's do
-  // (purple vs orange) — two shades of one colour are unreadable once four lines
-  // overlap. None of these appear in INSTANCE_PALETTE below, which the per-instance
-  // health lines draw from: #2dd4bf and #22d3ee are in it, so the teal is 0d9488.
-  dbCpuAvg: '#5eead4',   // teal-300
-  dbCpuMax: '#0d9488',   // teal-600
-  dbMemAvg: '#a5b4fc',   // indigo-300
-  dbMemMax: '#4f46e5',   // indigo-600
-};
 
-export const INSTANCE_PALETTE = [
-  '#38bdf8', '#f472b6', '#facc15', '#60a5fa', '#22d3ee',
-  '#e879f9', '#2dd4bf', '#a3e635', '#93c5fd', '#d946ef',
-];
 
 const SGT = { timeZone: 'Asia/Singapore' } as const;
 
@@ -191,7 +177,7 @@ export function SeriesChart({
   syncId?: string | undefined;
 }) {
   if (!series.length) {
-    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>No time-series data</div>;
+    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim, fontSize: 10 }}>No time-series data</div>;
   }
   const first = series[0]!.t;
   const last = series[series.length - 1]!.t;
@@ -212,11 +198,11 @@ export function SeriesChart({
             <stop offset="95%" stopColor={color} stopOpacity={0} />
           </linearGradient>
         </defs>
-        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
-        <YAxis tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v: number) => fmt(v)} width={48} />
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: UI.textMuted, fontSize: 10 }} minTickGap={40} />
+        <YAxis tick={{ fill: UI.textMuted, fontSize: 10 }} tickFormatter={(v: number) => fmt(v)} width={48} />
         <Tooltip
-          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-          labelStyle={{ color: '#8b9ab3' }}
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
           formatter={(val: unknown, key: unknown) => [fmt(Number(val)), String(key)]}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         />
@@ -249,7 +235,7 @@ export function InstanceHealthChart({
   const withData = instances.filter(i => i.series.length > 0);
   if (!withData.length) {
     return (
-      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim, fontSize: 10 }}>
         No per-instance time-series data
       </div>
     );
@@ -283,7 +269,7 @@ export function InstanceHealthChart({
         <XAxis
           dataKey="t"
           tickFormatter={(v: string) => formatTick(v, spanMs)}
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           minTickGap={40}
         />
         {/* Pinned 0–100: these are health percentages, and an auto-scaled axis makes
@@ -293,13 +279,13 @@ export function InstanceHealthChart({
         <YAxis
           domain={[0, 100]}
           ticks={[0, 25, 50, 75, 100]}
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           tickFormatter={(v: number) => `${v}%`}
           width={45}
         />
         <Tooltip
-          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-          labelStyle={{ color: '#8b9ab3' }}
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
           formatter={(val: unknown, key: unknown) => {
             const idx = Number(String(key).replace('i', ''));
             return [`${Number(val).toFixed(2)}%`, withData[idx]?.label ?? String(key)];
@@ -312,7 +298,7 @@ export function InstanceHealthChart({
             type="monotone"
             dataKey={`i${idx}`}
             name={inst.label}
-            stroke={colors[idx % colors.length] ?? '#8b9ab3'}
+            stroke={colors[idx % colors.length] ?? UI.textMuted}
             strokeWidth={1.5}
             dot={false}
             connectNulls={false}
@@ -375,7 +361,7 @@ export function EndpointSeriesChart({
   const withData = series.filter(s => s.series.length > 0);
   if (!withData.length) {
     return (
-      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim, fontSize: 10 }}>
         Select an endpoint below to plot it
       </div>
     );
@@ -392,19 +378,19 @@ export function EndpointSeriesChart({
         <XAxis
           dataKey="t"
           tickFormatter={(v: string) => formatTick(v, spanMs)}
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           minTickGap={40}
         />
         {/* Auto-scaled: these are request counts, and the range between the busiest
             and quietest endpoint in a top-10 set is routinely two orders of magnitude. */}
         <YAxis
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           tickFormatter={(v: number) => v >= 1000 ? `${Math.round(v / 1000)}k` : String(v)}
           width={45}
         />
         <Tooltip
-          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-          labelStyle={{ color: '#8b9ab3' }}
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
           formatter={(val: unknown, key: unknown) => {
             const idx = Number(String(key).replace('u', ''));
             const label = withData[idx]?.url ?? String(key);
@@ -418,7 +404,7 @@ export function EndpointSeriesChart({
             type="monotone"
             dataKey={`u${idx}`}
             name={s.url}
-            stroke={colors[idx] ?? '#8b9ab3'}
+            stroke={colors[idx] ?? UI.textMuted}
             strokeWidth={1.5}
             dot={false}
             connectNulls={false}
@@ -449,7 +435,7 @@ export function EndpointSeriesChart({
  */
 export function EndpointPerfChart({
   rows, binLabel, height = 170, syncId, msFormatter,
-  okColor = '#2ea043', fourXxColor = '#f97316', fiveXxColor = '#f85149', lineColor = '#58a6ff',
+  okColor = PERF_COLORS.ok, fourXxColor = PERF_COLORS.fourXx, fiveXxColor = PERF_COLORS.fiveXx, lineColor = PERF_COLORS.line,
   segmentLabels, showFourXx = true, countNoun = 'Requests',
 }: {
   rows: Array<{ t: string; ok: number; c4: number; c5: number; count: number; avgMs: number; p95: number }>;
@@ -473,7 +459,7 @@ export function EndpointPerfChart({
 }) {
   if (!rows.length) {
     return (
-      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim, fontSize: 10 }}>
         No timeline for this endpoint
       </div>
     );
@@ -502,7 +488,7 @@ export function EndpointPerfChart({
 
     const line = (name: string, value: string, color: string, indent = false) => (
       <div key={name} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, paddingLeft: indent ? 10 : 0 }}>
-        <span style={{ color: indent ? '#6e7681' : '#8b9ab3' }}>
+        <span style={{ color: indent ? UI.textDim : UI.textMuted }}>
           {indent && <span style={{ color, marginRight: 4 }}>■</span>}{name}
         </span>
         <span className="tabular-nums" style={{ color, fontWeight: indent ? 400 : 600 }}>{value}</span>
@@ -510,17 +496,17 @@ export function EndpointPerfChart({
     );
 
     return (
-      <div style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 11, padding: '6px 8px', minWidth: 168 }}>
-        <div style={{ color: '#8b9ab3', marginBottom: 4 }}>
+      <div style={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 11, padding: '6px 8px', minWidth: 168 }}>
+        <div style={{ color: UI.textMuted, marginBottom: 4 }}>
           {new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         </div>
-        {line(countNoun, `${row.count.toLocaleString()}${per}`, '#cdd9e5')}
+        {line(countNoun, `${row.count.toLocaleString()}${per}`, UI.text)}
         {line(segmentLabels?.ok ?? 'successful', row.ok.toLocaleString(), okColor, true)}
         {/* Applicable classes always shown, including at zero: "4xx 0" is a fact about the
             bucket, whereas an absent line reads as "not measured". */}
-        {showFourXx && line(segmentLabels?.c4 ?? '4xx', row.c4.toLocaleString(), row.c4 ? fourXxColor : '#484f58', true)}
-        {line(segmentLabels?.c5 ?? '5xx', row.c5.toLocaleString(), row.c5 ? fiveXxColor : '#484f58', true)}
-        <div style={{ borderTop: '1px solid #21262d', margin: '4px 0' }} />
+        {showFourXx && line(segmentLabels?.c4 ?? '4xx', row.c4.toLocaleString(), row.c4 ? fourXxColor : UI.textDim, true)}
+        {line(segmentLabels?.c5 ?? '5xx', row.c5.toLocaleString(), row.c5 ? fiveXxColor : UI.textDim, true)}
+        <div style={{ borderTop: `1px solid ${UI.border}`, margin: '4px 0' }} />
         {line('P95', fmtMs(row.p95), lineColor)}
         {line('Average', fmtMs(row.avgMs), lineColor)}
       </div>
@@ -533,14 +519,14 @@ export function EndpointPerfChart({
         <XAxis
           dataKey="t"
           tickFormatter={(v: string) => formatTick(v, spanMs)}
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           minTickGap={40}
         />
         {/* Left: requests per bucket. Auto-scaled — a top endpoint and a 5xx-only
             endpoint differ by orders of magnitude and both need to be readable. */}
         <YAxis
           yAxisId="count"
-          tick={{ fill: '#8b9ab3', fontSize: 10 }}
+          tick={{ fill: UI.textMuted, fontSize: 10 }}
           tickFormatter={(v: number) => v >= 1000 ? `${Math.round(v / 1000)}k` : String(v)}
           width={42}
         />
@@ -549,7 +535,7 @@ export function EndpointPerfChart({
         <YAxis
           yAxisId="ms"
           orientation="right"
-          tick={{ fill: '#58a6ff', fontSize: 10 }}
+          tick={{ fill: UI.info, fontSize: 10 }}
           tickFormatter={(v: number) => fmtMs(v)}
           width={52}
         />
@@ -595,15 +581,15 @@ export function MetricLegend({
             onClick={() => onToggle(item.key)}
             title={`${item.label}: ${item.values.map((v, i) => `${STAT_NAMES[i] ?? ''} ${v.text}`.trim()).join(' / ')}`}
             style={{
-              color: '#6e7681', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
+              color: UI.textDim, whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
               opacity: off ? 0.4 : 1, textDecoration: off ? 'line-through' : 'none',
             }}
           >
             <span style={{ fontWeight: 700 }}>{item.label}</span>
-            <span style={{ color: '#484f58' }}> - </span>
+            <span style={{ color: UI.textDim }}> - </span>
             {item.values.map((v, i) => (
               <span key={i}>
-                {i > 0 && <span style={{ color: '#484f58' }}> / </span>}
+                {i > 0 && <span style={{ color: UI.textDim }}> / </span>}
                 <span style={{ color: v.color, fontWeight: 600 }}>{v.text}</span>
               </span>
             ))}
@@ -634,7 +620,7 @@ export function EventBarChart({
 }) {
   const withData = series.filter(s => s.series.some(p => p.count > 0));
   if (!withData.length) {
-    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681', fontSize: 10 }}>No events in this window</div>;
+    return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim, fontSize: 10 }}>No events in this window</div>;
   }
 
   const maps = withData.map(s => new Map(s.series.map(p => [p.t, p.count])));
@@ -651,14 +637,14 @@ export function EventBarChart({
   return (
     <ResponsiveContainer width="100%" height={height} debounce={100}>
       <BarChart data={rows} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
-        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: UI.textMuted, fontSize: 10 }} minTickGap={40} />
         {/* allowDecimals=false: half an event does not exist, and an axis reading
             0 / 0.5 / 1 for a single restart is noise. */}
-        <YAxis tick={{ fill: '#8b9ab3', fontSize: 10 }} width={30} allowDecimals={false} />
+        <YAxis tick={{ fill: UI.textMuted, fontSize: 10 }} width={30} allowDecimals={false} />
         <Tooltip
           cursor={{ fill: 'rgba(255,255,255,0.04)' }}
-          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-          labelStyle={{ color: '#8b9ab3' }}
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
           formatter={(val: unknown, key: unknown) => {
             const idx = Number(String(key).replace('e', ''));
             return [`${Number(val).toLocaleString()} ${valueLabel}`, withData[idx]?.name ?? String(key)];
@@ -666,7 +652,7 @@ export function EventBarChart({
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT'}
         />
         {withData.map((s, i) => (
-          <Bar key={s.name} dataKey={`e${i}`} name={s.name} stackId="events" fill={colors[i] ?? '#8b9ab3'} isAnimationActive={false} />
+          <Bar key={s.name} dataKey={`e${i}`} name={s.name} stackId="events" fill={colors[i] ?? UI.textMuted} isAnimationActive={false} />
         ))}
       </BarChart>
     </ResponsiveContainer>
@@ -684,7 +670,7 @@ export function CombinedChart({
     return (
       <div style={{
         height: 200,
-        background: 'linear-gradient(90deg, #1a1f2e 25%, #222840 50%, #1a1f2e 75%)',
+        background: 'linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--muted) / 0.6) 50%, hsl(var(--muted)) 75%)',
         backgroundSize: '200% 100%',
         animation: 'shimmer 1.5s infinite',
         borderRadius: 6,
@@ -810,11 +796,11 @@ export function CombinedChart({
           ))}
         </defs>
 
-        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: '#8b9ab3', fontSize: 10 }} minTickGap={40} />
-        <YAxis domain={[0, 100]} tick={{ fill: '#8b9ab3', fontSize: 10 }} tickFormatter={(v: number) => `${v}%`} />
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: UI.textMuted, fontSize: 10 }} minTickGap={40} />
+        <YAxis domain={[0, 100]} tick={{ fill: UI.textMuted, fontSize: 10 }} tickFormatter={(v: number) => `${v}%`} />
         <Tooltip
-          contentStyle={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-          labelStyle={{ color: '#8b9ab3' }}
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
           itemSorter={item => TOOLTIP_ORDER[String(item.dataKey)] ?? 99}
           formatter={(val: unknown, name: unknown) => [`${Number(val).toFixed(1)}%`, String(name)]}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT'}
@@ -878,6 +864,7 @@ export function CombinedChart({
             type="monotone"
             dataKey={inst.key}
             name={inst.label}
+            /* Fallback repeats INSTANCE_PALETTE[0] as a literal so the type stays non-optional. */
             stroke={INSTANCE_PALETTE[inst.colorIdx % INSTANCE_PALETTE.length] ?? '#38bdf8'}
             fill={`url(#gInst_${inst.key})`}
             strokeWidth={1}

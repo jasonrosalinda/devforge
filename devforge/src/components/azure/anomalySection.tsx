@@ -12,20 +12,21 @@ import {
 import type { AnomalyEpisode, AnomalySeverity } from './anomalyDetection';
 import type { RemarkSeverity } from './appRemarks';
 import { CellSkeleton } from './loadingSkeleton';
+import { UI } from '@/lib/chart-colors';
 
 // 'ok' never actually comes back from describeAnomalyEpisodes (it only returns
 // non-null when there's a Warning/Critical episode) — filled in anyway so the
 // lookup type-checks against RemarkResult's full severity type without a cast.
 const REMARK_COLOR: Record<RemarkSeverity, string> = {
   critical: 'hsl(var(--destructive))',
-  warning: '#d29922',
-  ok: '#3fb950',
+  warning: UI.warning,
+  ok: UI.success,
 };
 
 const SEVERITY_COLOR: Record<AnomalySeverity, string> = {
   Critical: 'hsl(var(--destructive))',
-  Warning: '#d29922',
-  Info: '#8b9ab3',
+  Warning: UI.warning,
+  Info: UI.textMuted,
 };
 
 function fmtTime(iso: string): string {
@@ -121,7 +122,7 @@ export function AnomalyDetectionRow({
               ? <span style={{ color: REMARK_COLOR[remark.severity] }}>
                   {reportable.length} correlated pressure spike{reportable.length === 1 ? '' : 's'} detected.
                 </span>
-              : <span style={{ color: '#3fb950' }}>
+              : <span style={{ color: UI.success }}>
                   No correlated anomalies detected in this window{infoCount > 0 ? ` (${infoCount} CPU-only, not shown)` : ''}.
                 </span>
           )}
@@ -148,12 +149,12 @@ export function AnomalyDetectionRow({
                         window average — the anomaly is relative to that metric's trend,
                         not a fixed line, so the raw peak percentage alone doesn't say
                         whether it was actually unusual for that resource. */}
-                    <td style={{ padding: '4px 8px', color: '#6e7681' }}>{explain(e, metrics)}</td>
+                    <td style={{ padding: '4px 8px', color: UI.textDim }}>{explain(e, metrics)}</td>
                     {/* Which specific flags fired, translated into a where-to-look
                         hint — e.g. "API errors + DB CPU pressure — likely slow query
                         causing request timeouts" instead of just a metric list. */}
-                    <td style={{ padding: '4px 8px', color: '#d29922' }}>{e.incidentType}</td>
-                    <td style={{ padding: '4px 12px 4px 8px', color: '#8b9ab3', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                    <td style={{ padding: '4px 8px', color: UI.warning }}>{e.incidentType}</td>
+                    <td style={{ padding: '4px 12px 4px 8px', color: UI.textMuted, whiteSpace: 'nowrap', textAlign: 'right' }}>
                       {fmtRange(e)}
                     </td>
                   </tr>

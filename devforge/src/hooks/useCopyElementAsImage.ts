@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Toast } from "@/components/ui/toast";
+import { resolveCssColor } from "@/lib/chart-colors";
 
 interface UseCopyElementAsImageOptions {
     scale?: number;
@@ -34,7 +35,7 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
 ) => {
     const {
         scale = 2,
-        backgroundColor = "#020817",
+        backgroundColor,
         fileNamePrefix = "image",
     } = options ?? {};
 
@@ -50,10 +51,21 @@ export const useCopyElementAsImage = <T extends HTMLElement>(
         try {
             const html2canvas = await loadHtml2Canvas();
 
+            // html2canvas rasterises to a flat colour and cannot resolve custom
+            // properties, so the active theme's --background is read off the live
+            // element and passed as a literal. Without this the capture keeps a
+            // hardcoded dark backdrop and light-mode content comes out unreadable.
+            // A caller-supplied token goes through the same flattening: html2canvas
+            // parses the option with its own CSS parser, so an `hsl(var(--x))` token
+            // reaches it unresolved and throws "Unsupported angle type".
+            const resolvedBackground = backgroundColor
+                ? resolveCssColor(backgroundColor)
+                : getComputedStyle(document.body).backgroundColor || "#ffffff";
+
             const canvas: HTMLCanvasElement = await html2canvas(
                 elementRef.current,
                 {
-                    backgroundColor,
+                    backgroundColor: resolvedBackground,
                     scale,
                     logging: false,
                     useForeignObject: false,

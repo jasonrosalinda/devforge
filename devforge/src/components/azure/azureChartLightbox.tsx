@@ -3,6 +3,7 @@
 
 import { useEffect } from "react";
 import type { AzureTileImage } from "@/hooks/useAzureCapture";
+import { UI } from '@/lib/chart-colors';
 
 interface ChartLightboxProps {
     image: AzureTileImage;
@@ -48,7 +49,7 @@ export default function ChartLightbox({ image, onClose }: ChartLightboxProps) {
                     maxHeight: '82vh',
                     borderRadius: 10,
                     boxShadow: '0 0 80px rgba(0,0,0,0.9)',
-                    border: '1px solid #243044',
+                    border: `1px solid ${UI.border}`,
                     cursor: 'default',
                 }}
             />
@@ -73,15 +74,15 @@ export default function ChartLightbox({ image, onClose }: ChartLightboxProps) {
                             gap: 6,
                             fontSize: 13,
                             fontFamily: 'monospace',
-                            color: '#e2e8f0',
+                            color: UI.text,
                             background: 'rgba(59,130,246,0.1)',
                             border: '1px solid rgba(59,130,246,0.2)',
                             padding: '6px 12px',
                             borderRadius: 8,
                         }}>
-                            <span style={{ color: '#4b6280' }}>●</span>
+                            <span style={{ color: UI.textDim }}>●</span>
                             <span style={{ fontWeight: 500 }}>{legend.metric}</span>
-                            <span style={{ color: '#60a5fa', fontWeight: 600 }}>{legend.value}</span>
+                            <span style={{ color: UI.info, fontWeight: 600 }}>{legend.value}</span>
                         </div>
                     ))}
                 </div>
@@ -93,10 +94,10 @@ export default function ChartLightbox({ image, onClose }: ChartLightboxProps) {
                 alignItems: 'center',
                 gap: 16,
             }}>
-                <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#94a3b8', fontWeight: 500 }}>
+                <span style={{ fontFamily: 'monospace', fontSize: 13, color: UI.textMuted, fontWeight: 500 }}>
                     {image.title || label}
                 </span>
-                <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#4b6280' }}>
+                <span style={{ fontFamily: 'monospace', fontSize: 11, color: UI.textDim }}>
                     ESC or click backdrop to close
                 </span>
             </div>

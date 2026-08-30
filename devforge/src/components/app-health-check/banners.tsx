@@ -1,11 +1,12 @@
 import { C } from './styles';
+import { Hint } from '@/components/ui/hint';
 
 export function NotConfiguredBanner() {
   return (
     <div style={{
       padding: '12px 16px',
-      background: '#0d1117',
-      border: '1px solid #21262d',
+      background: C.surface,
+      border: `1px solid ${C.border}`,
       borderRadius: 8,
       fontSize: 13,
       color: C.textSub,
@@ -19,8 +20,8 @@ export function CredErrorBanner() {
   return (
     <div style={{
       padding: '12px 16px',
-      background: '#1c0a0a',
-      border: '1px solid #3d1f1f',
+      background: C.errorBg,
+      border: `1px solid ${C.errorBorder}`,
       borderRadius: 8,
       display: 'flex', alignItems: 'flex-start', gap: 12,
     }}>
@@ -31,15 +32,17 @@ export function CredErrorBanner() {
           Run the command below in your terminal, then relaunch DevForge:
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-          <code style={{ fontSize: 12, color: '#79c0ff', background: '#0d1117', padding: '3px 8px', borderRadius: 4, border: `1px solid ${C.border}` }}>
+          <code style={{ fontSize: 12, color: C.accent, background: C.surface, padding: '3px 8px', borderRadius: 4, border: `1px solid ${C.border}` }}>
             az login
           </code>
-          <button
-            onClick={() => navigator.clipboard.writeText('az login')}
-            style={{ fontSize: 11, color: C.textSub, background: C.btnBg, border: `1px solid ${C.border}`, borderRadius: 4, padding: '3px 8px', cursor: 'pointer' }}
-          >
-            Copy
-          </button>
+          <Hint label="Copy the az login command to the clipboard">
+            <button
+              onClick={() => navigator.clipboard.writeText('az login')}
+              style={{ fontSize: 11, color: C.textSub, background: C.btnBg, border: `1px solid ${C.border}`, borderRadius: 4, padding: '3px 8px', cursor: 'pointer' }}
+            >
+              Copy
+            </button>
+          </Hint>
         </div>
       </div>
     </div>

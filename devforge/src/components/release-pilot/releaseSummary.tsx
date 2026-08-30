@@ -749,7 +749,7 @@ export function ReleaseSummary({ sections, goals = [], releaseTitle, releaseLabe
       <div className="rounded-lg border border-border overflow-auto max-h-[calc(100vh-380px)] p-4">
         <div className="flex flex-col gap-4">
           {closure && (
-            <h2 className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">Release Closure</h2>
+            <h2 className="text-2xl font-bold text-success">Release Closure</h2>
           )}
           {notice && (
             <div className="border-b border-border pb-4">

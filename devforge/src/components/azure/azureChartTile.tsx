@@ -3,6 +3,7 @@
 
 import { useState } from "react";
 import type { AzureTileImage } from "@/hooks/useAzureCapture";
+import { UI } from '@/lib/chart-colors';
 
 interface ChartTileProps {
     image:   AzureTileImage;
@@ -29,8 +30,8 @@ export default function ChartTile({ image, index, onZoom }: ChartTileProps) {
                 borderRadius: 10,
                 overflow:     'hidden',
                 cursor:       onZoom ? 'zoom-in' : 'default',
-                background:   '#0d1520',
-                border:       `1px solid ${hovered ? '#3b82f6' : '#1a2535'}`,
+                background:   UI.surface,
+                border:       `1px solid ${hovered ? UI.info : UI.border}`,
                 boxShadow:    hovered ? '0 8px 28px rgba(59,130,246,0.15)' : '0 2px 8px rgba(0,0,0,0.3)',
                 transform:    hovered ? 'translateY(-2px)' : 'translateY(0)',
                 transition:   'all 0.18s ease',
@@ -49,13 +50,13 @@ export default function ChartTile({ image, index, onZoom }: ChartTileProps) {
                 alignItems:     'center',
                 justifyContent: 'space-between',
                 padding:        '7px 12px',
-                borderTop:      '1px solid #1a2535',
-                background:     '#0a0d16',
+                borderTop:      `1px solid ${UI.border}`,
+                background:     UI.background,
             }}>
                 <span style={{
                     fontSize:    11,
                     fontFamily:  'monospace',
-                    color:       '#4b6280',
+                    color:       UI.textDim,
                     letterSpacing: 0.5,
                 }}>
                     {label}
@@ -63,7 +64,7 @@ export default function ChartTile({ image, index, onZoom }: ChartTileProps) {
                 <span style={{
                     fontSize:   10,
                     fontFamily: 'monospace',
-                    color:      '#1e2d40',
+                    color:      UI.textDim,
                 }}>
                     #{index + 1}
                 </span>

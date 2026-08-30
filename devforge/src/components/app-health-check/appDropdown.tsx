@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { C } from './styles';
+import { Hint } from '@/components/ui/hint';
 
 type Props = {
   selected: string[];
@@ -24,6 +25,7 @@ export function AppDropdown({ selected, allKeys, onChange, labels = {} }: Props)
 
   return (
     <div style={{ position: 'relative' }}>
+      <Hint label="Choose which app services to chart">
       <button
         onClick={() => setOpen(o => !o)}
         style={{
@@ -40,6 +42,7 @@ export function AppDropdown({ selected, allKeys, onChange, labels = {} }: Props)
         {label}
         <span style={{ fontSize: 10, color: C.textSub }}>▾</span>
       </button>
+      </Hint>
       {open && (
         <>
           <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setOpen(false)} />
@@ -50,8 +53,12 @@ export function AppDropdown({ selected, allKeys, onChange, labels = {} }: Props)
             boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 12px 8px', borderBottom: `1px solid ${C.border}` }}>
-              <button onClick={() => onChange([...allKeys])} style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Select all</button>
-              <button onClick={() => onChange([])} style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Deselect all</button>
+              <Hint label="Chart every configured app">
+                <button onClick={() => onChange([...allKeys])} style={{ fontSize: 11, color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Select all</button>
+              </Hint>
+              <Hint label="Clear the selection">
+                <button onClick={() => onChange([])} style={{ fontSize: 11, color: C.textSub, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Deselect all</button>
+              </Hint>
             </div>
             {allKeys.map(key => {
               const name = labels[key] || key;

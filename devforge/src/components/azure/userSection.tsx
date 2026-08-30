@@ -5,6 +5,7 @@ import type { IpReputation } from '@/lib/ipapiIs';
 import { SeriesChart } from './azureMetricChart';
 import { IpRepBadges } from './ipRepBadges';
 import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
+import { UI, PERF_COLORS } from '@/lib/chart-colors';
 import {
   userStats, topClientShare, looksAutomated, hasUserData, entityChartSeries, plottableKeys, USERS_COLOR,
 } from './users';
@@ -15,7 +16,7 @@ type UsersTab = 'clients' | 'agents';
 /** One client holding this much of the listed traffic is a machine, not an audience. */
 const CONCENTRATION_WARN_PCT = 50;
 
-const TAB_COLOR: Record<UsersTab, string> = { clients: USERS_COLOR, agents: '#3fb950' };
+const TAB_COLOR: Record<UsersTab, string> = { clients: USERS_COLOR, agents: UI.success };
 const TAB_LABEL: Record<UsersTab, string> = { clients: 'Clients', agents: 'User Agents' };
 
 const fmtSgt = (t: string) =>
@@ -26,7 +27,7 @@ function RateCell({ rpm, count, color = USERS_COLOR }: { rpm: number; count: num
   return (
     <span className="flex-shrink-0 tabular-nums" style={{ color }} title={`${rpm} requests per minute, ${count.toLocaleString()} requests in total`}>
       {rpm} rpm
-      <span style={{ color: '#484f58' }}> / {count.toLocaleString()}</span>
+      <span style={{ color: UI.textDim }}> / {count.toLocaleString()}</span>
     </span>
   );
 }
@@ -91,7 +92,7 @@ export function UserPanel({
             height={130}
             syncId={syncId}
           />
-          <div style={{ color: '#484f58', paddingLeft: 8, marginBottom: 5 }}>
+          <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
             {charted
               ? <>
                   Requests per {users.bin ?? 'bucket'} from <span style={{ color: accent }}>{selected}</span> —
@@ -129,7 +130,7 @@ export function UserPanel({
         })}
         {concentrated && tab === 'clients' && (
           <span
-            style={{ color: '#d29922', alignSelf: 'center', marginLeft: 4 }}
+            style={{ color: UI.warning, alignSelf: 'center', marginLeft: 4 }}
             title={`The busiest address made ${share}% of the requests these ten clients account for. Real traffic spread across ten clients sits nearer 10-20%; this concentration is one machine.`}
           >
             {share}% from one address
@@ -168,23 +169,23 @@ export function UserPanel({
                     </span>
                     <span className="truncate opacity-70" style={{ color: 'var(--muted-foreground)' }}>
                       {c.userAgent || '(unknown)'}
-                      {c.agents > 1 && <span style={{ color: '#d29922' }}> +{c.agents - 1} more agents</span>}
+                      {c.agents > 1 && <span style={{ color: UI.warning }}> +{c.agents - 1} more agents</span>}
                     </span>
                   </div>
                   <div className="flex flex-col items-end flex-shrink-0">
                     <RateCell rpm={c.rpm} count={c.count} />
-                    <span className="tabular-nums" style={{ color: '#484f58' }}>
+                    <span className="tabular-nums" style={{ color: UI.textDim }}>
                       {c.urlCount.toLocaleString()} endpoint{c.urlCount === 1 ? '' : 's'}
                       {/* Only when non-zero: a client with no errors should not carry two
                           dashes, and one collecting 404s should be impossible to miss. */}
-                      {c.fourXx > 0 && <span style={{ color: '#f97316' }}> · {c.fourXx.toLocaleString()} 4xx</span>}
-                      {c.fiveXx > 0 && <span style={{ color: '#f85149' }}> · {c.fiveXx.toLocaleString()} 5xx</span>}
+                      {c.fourXx > 0 && <span style={{ color: PERF_COLORS.fourXx }}> · {c.fourXx.toLocaleString()} 4xx</span>}
+                      {c.fiveXx > 0 && <span style={{ color: UI.error }}> · {c.fiveXx.toLocaleString()} 5xx</span>}
                     </span>
                   </div>
                 </div>
                 );
               })}
-              <div style={{ color: '#484f58', marginTop: 2 }}>
+              <div style={{ color: UI.textDim, marginTop: 2 }}>
                 Ranked by request count — click one to chart its requests. Badges are ipapi.is reputation for the
                 address; an address with no badge has not resolved yet.
               </div>
@@ -215,14 +216,14 @@ export function UserPanel({
                     title={`${u.userAgent || '(unknown)'}\n${u.count.toLocaleString()} requests at ${u.rpm} rpm${auto ? '\n\nMatches a known crawler or scripted-client pattern.' : ''}${canPlot ? `\n\nClick to ${on ? 'clear the chart' : 'chart this agent'}` : '\n\nNo timeline for this agent'}`}
                   >
                     <span className="truncate flex-1 min-w-0" style={{ color: 'var(--muted-foreground)' }}>
-                      {auto && <span style={{ color: '#d29922', marginRight: 4, fontWeight: 600 }}>auto</span>}
+                      {auto && <span style={{ color: UI.warning, marginRight: 4, fontWeight: 600 }}>auto</span>}
                       {u.userAgent || '(unknown)'}
                     </span>
                     <RateCell rpm={u.rpm} count={u.count} color={TAB_COLOR.agents} />
                   </div>
                 );
               })}
-              <div style={{ color: '#484f58', marginTop: 2 }}>
+              <div style={{ color: UI.textDim, marginTop: 2 }}>
                 Ranked by request count — click one to chart its requests. 'auto' marks a known crawler or
                 scripted-client pattern.
               </div>
@@ -280,7 +281,7 @@ export function UserRows({
           title={has ? `Typical bucket, across ${s.buckets} buckets` : undefined}
         >
           {has
-            ? <><span style={{ color: '#6e7681' }}>Avg - </span>{s.avg.toLocaleString()}</>
+            ? <><span style={{ color: UI.textDim }}>Avg - </span>{s.avg.toLocaleString()}</>
             : loading ? <CellSkeleton w={38} /> : '—'}
         </td>
         <td
@@ -289,7 +290,7 @@ export function UserRows({
           title="99th percentile bucket — sits just under the max unless one bucket is a genuine outlier"
         >
           {has
-            ? <><span style={{ color: '#6e7681' }}>P99 - </span>{s.p99.toLocaleString()}</>
+            ? <><span style={{ color: UI.textDim }}>P99 - </span>{s.p99.toLocaleString()}</>
             : loading ? <CellSkeleton w={34} /> : '—'}
         </td>
         <td
@@ -298,7 +299,7 @@ export function UserRows({
           title={s.peak ? `Peak at ${fmtSgt(s.peak.t)} SGT` : undefined}
         >
           {has
-            ? <><span style={{ color: '#6e7681' }}>Peak - </span>{s.max.toLocaleString()}</>
+            ? <><span style={{ color: UI.textDim }}>Peak - </span>{s.max.toLocaleString()}</>
             : loading ? <CellSkeleton w={42} /> : '—'}
         </td>
       </tr>

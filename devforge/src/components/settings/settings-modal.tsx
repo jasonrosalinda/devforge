@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Trash2, Plus, Pencil, Check, X } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -137,9 +138,11 @@ const [newMonitorId, setNewMonitorId] = useState('');
 
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">Services</span>
-              <Button size="sm" variant="outline" onClick={startAddApp} className="h-7 text-xs gap-1">
-                <Plus className="w-3 h-3" /> Add Service
-              </Button>
+              <Hint label="Register another Azure app service so it shows up in the health check">
+                <Button size="sm" variant="outline" onClick={startAddApp} className="h-7 text-xs gap-1">
+                  <Plus className="w-3 h-3" /> Add Service
+                </Button>
+              </Hint>
             </div>
 
             {/* App form (add/edit) */}
@@ -166,10 +169,12 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   {(editingApp.platformUrls ?? []).map((url, idx) => (
                     <div key={idx} className="flex items-center gap-1">
                       <span className="text-xs font-mono flex-1 px-2 py-1 rounded border border-border bg-muted/30 truncate" title={url}>{url}</span>
-                      <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive flex-shrink-0"
-                        onClick={() => setEditingApp(a => { if (!a) return null; const urls = (a.platformUrls ?? []).filter((_, i) => i !== idx); const n = { ...a }; if (urls.length) n.platformUrls = urls; else delete n.platformUrls; return n; })}>
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
+                      <Hint label="Remove this URL" side="left">
+                        <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive flex-shrink-0"
+                          onClick={() => setEditingApp(a => { if (!a) return null; const urls = (a.platformUrls ?? []).filter((_, i) => i !== idx); const n = { ...a }; if (urls.length) n.platformUrls = urls; else delete n.platformUrls; return n; })}>
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      </Hint>
                     </div>
                   ))}
                   <div className="flex gap-1">
@@ -180,11 +185,13 @@ const [newMonitorId, setNewMonitorId] = useState('');
                       placeholder="https://mims-cpd.com"
                       className="text-xs font-mono h-7"
                     />
-                    <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0"
-                      disabled={!newPlatformUrl.trim()}
-                      onClick={addPlatformUrl}>
-                      <Plus className="w-3 h-3" />
-                    </Button>
+                    <Hint label="Add this URL to the platform's Services Affected list">
+                      <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0"
+                        disabled={!newPlatformUrl.trim()}
+                        onClick={addPlatformUrl}>
+                        <Plus className="w-3 h-3" />
+                      </Button>
+                    </Hint>
                   </div>
                   <span className="text-[10px] text-muted-foreground">Public URLs for this platform — used as "Services Affected" in the RCA report.</span>
                 </div>
@@ -369,7 +376,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                       value={editingApp.sloMs ?? ''}
                       onChange={e => { const v = Number(e.target.value); setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v > 0) n.sloMs = v; else delete n.sloMs; return n; }); }}
                       placeholder={String(DEFAULT_SLO_MS)}
-                      className="text-xs"
+                      className="text-xs [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                     />
                     <span className="text-[10px] text-muted-foreground">A successful response slower than this counts as a policy failure in the Errors signal. Defaults to {DEFAULT_SLO_MS}ms.</span>
                   </div>
@@ -383,10 +390,12 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   {(editingApp.uptimeRobotMonitorIds ?? []).map((id, idx) => (
                     <div key={idx} className="flex items-center gap-1">
                       <span className="text-xs font-mono flex-1 px-2 py-1 rounded border border-border bg-muted/30">{id}</span>
-                      <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive flex-shrink-0"
-                        onClick={() => setEditingApp(a => { if (!a) return null; const ids = (a.uptimeRobotMonitorIds ?? []).filter((_, i) => i !== idx); const n = { ...a }; if (ids.length) n.uptimeRobotMonitorIds = ids; else delete n.uptimeRobotMonitorIds; return n; })}>
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
+                      <Hint label="Remove this monitor ID" side="left">
+                        <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive flex-shrink-0"
+                          onClick={() => setEditingApp(a => { if (!a) return null; const ids = (a.uptimeRobotMonitorIds ?? []).filter((_, i) => i !== idx); const n = { ...a }; if (ids.length) n.uptimeRobotMonitorIds = ids; else delete n.uptimeRobotMonitorIds; return n; })}>
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      </Hint>
                     </div>
                   ))}
                   <div className="flex gap-1">
@@ -397,27 +406,33 @@ const [newMonitorId, setNewMonitorId] = useState('');
                       placeholder="799912345"
                       className="text-xs font-mono h-7"
                     />
-                    <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0"
-                      disabled={!newMonitorId.trim()}
-                      onClick={() => { setEditingApp(a => { if (!a) return null; return { ...a, uptimeRobotMonitorIds: [...(a.uptimeRobotMonitorIds ?? []), newMonitorId.trim()] }; }); setNewMonitorId(''); }}>
-                      <Plus className="w-3 h-3" />
-                    </Button>
+                    <Hint label="Add this UptimeRobot monitor to the service">
+                      <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0"
+                        disabled={!newMonitorId.trim()}
+                        onClick={() => { setEditingApp(a => { if (!a) return null; return { ...a, uptimeRobotMonitorIds: [...(a.uptimeRobotMonitorIds ?? []), newMonitorId.trim()] }; }); setNewMonitorId(''); }}>
+                        <Plus className="w-3 h-3" />
+                      </Button>
+                    </Hint>
                   </div>
                   <span className="text-[10px] text-muted-foreground">UptimeRobot → My Monitors → select monitor → ID in URL</span>
                 </div>
 
                 <div className="flex gap-2 justify-end">
-                  <Button size="sm" variant="ghost" onClick={cancelEditApp} className="h-7 text-xs gap-1">
-                    <X className="w-3 h-3" /> Cancel
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={commitApp}
-                    disabled={!editingApp.name || !editingApp.resourceGroup}
-                    className="h-7 text-xs gap-1"
-                  >
-                    <Check className="w-3 h-3" /> {editingIndex === null ? 'Add' : 'Save'}
-                  </Button>
+                  <Hint label="Discard these changes and close the form">
+                    <Button size="sm" variant="ghost" onClick={cancelEditApp} className="h-7 text-xs gap-1">
+                      <X className="w-3 h-3" /> Cancel
+                    </Button>
+                  </Hint>
+                  <Hint label={!editingApp.name || !editingApp.resourceGroup ? 'Name and resource group are required' : 'Keep this service in the list — nothing is written until you Save the settings'}>
+                    <Button
+                      size="sm"
+                      onClick={commitApp}
+                      disabled={!editingApp.name || !editingApp.resourceGroup}
+                      className="h-7 text-xs gap-1"
+                    >
+                      <Check className="w-3 h-3" /> {editingIndex === null ? 'Add' : 'Save'}
+                    </Button>
+                  </Hint>
                 </div>
               </div>
             )}
@@ -439,12 +454,16 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   )}
                 </div>
                 <div className="flex gap-1">
-                  <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => startEditApp(app, idx)}>
-                    <Pencil className="w-3 h-3" />
-                  </Button>
-                  <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive" onClick={() => removeApp(idx)}>
-                    <Trash2 className="w-3 h-3" />
-                  </Button>
+                  <Hint label="Edit this service">
+                    <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => startEditApp(app, idx)}>
+                      <Pencil className="w-3 h-3" />
+                    </Button>
+                  </Hint>
+                  <Hint label="Remove this service" side="left">
+                    <Button size="icon" variant="ghost" className="h-6 w-6 text-destructive hover:text-destructive" onClick={() => removeApp(idx)}>
+                      <Trash2 className="w-3 h-3" />
+                    </Button>
+                  </Hint>
                 </div>
               </div>
             ))}
@@ -465,6 +484,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   placeholder="AIza..."
                   className="text-xs font-mono pr-8"
                 />
+                <Hint label={showPagespeed ? 'Hide this key' : 'Show this key in plain text'} side="left">
                 <button
                   type="button"
                   onClick={() => setShowPagespeed(v => !v)}
@@ -472,8 +492,9 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 >
                   {showPagespeed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
+                </Hint>
               </div>
-              <p className="text-xs text-muted-foreground">Used by PageSpeed Insights tool. Get your key at <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Google PageSpeed Insights API</a>.</p>
+              <p className="text-xs text-muted-foreground">Used by PageSpeed Insights tool. Get your key at <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">Google PageSpeed Insights API</a>.</p>
             </div>
 
             <Separator />
@@ -488,9 +509,11 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   placeholder="ur1234567-xxxxxxxxxxxxxxxxxxxxxxxx"
                   className="text-xs font-mono pr-8"
                 />
+                <Hint label={showUptimeRobot ? 'Hide this key' : 'Show this key in plain text'} side="left">
                 <button type="button" onClick={() => setShowUptimeRobot(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                   {showUptimeRobot ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
+                </Hint>
               </div>
               <p className="text-xs text-muted-foreground">Used to fetch monitor status and downtime logs per app. UptimeRobot → Integration & API → Main API Keys → Read-only API key</p>
             </div>
@@ -535,6 +558,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   placeholder="ATATT3x..."
                   className="text-xs font-mono pr-8"
                 />
+                <Hint label={showAtlassianToken ? 'Hide this key' : 'Show this key in plain text'} side="left">
                 <button
                   type="button"
                   onClick={() => setShowAtlassianToken(v => !v)}
@@ -542,17 +566,22 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 >
                   {showAtlassianToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
+                </Hint>
               </div>
-              <p className="text-xs text-muted-foreground">Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">id.atlassian.com → API tokens</a>. Used with Basic auth to fetch runbook pages + attachments.</p>
+              <p className="text-xs text-muted-foreground">Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">id.atlassian.com → API tokens</a>. Used with Basic auth to fetch runbook pages + attachments.</p>
             </div>
           </div>
         )}
 
         <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
-          <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </Button>
+          <Hint label="Close without saving — unsaved edits are lost">
+            <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+          </Hint>
+          <Hint label="Write these settings to disk and close">
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </Hint>
         </div>
       </DialogContent>
     </Dialog>

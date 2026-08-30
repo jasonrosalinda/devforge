@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/page-header';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Hint } from "@/components/ui/hint";
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
@@ -351,8 +352,8 @@ export default function ReleasePilotPage() {
           ) : connected ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-green-500/60 bg-green-500/10 px-3 py-1 text-xs text-green-500 hover:bg-green-500/20 transition-colors">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
+                <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-success/60 bg-success/10 px-3 py-1 text-xs text-success hover:bg-success/20 transition-colors">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-success" />
                   Connected
                 </button>
               </DropdownMenuTrigger>
@@ -419,10 +420,12 @@ export default function ReleasePilotPage() {
             {runbookHistory.map((u, i) => <option key={i} value={u} />)}
           </datalist>
         </div>
-        <Button onClick={handleLoad} disabled={!hasCreds || loading || !url.trim()} className="gap-1.5 shrink-0 self-stretch h-auto">
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
-          {loading ? 'Loading…' : 'Load'}
-        </Button>
+        <Hint label={!hasCreds ? 'Add your Confluence credentials in Settings first' : 'Fetch the runbook from this Confluence page and build the release summary'}>
+          <Button onClick={handleLoad} disabled={!hasCreds || loading || !url.trim()} className="gap-1.5 shrink-0 self-stretch h-auto">
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
+            {loading ? 'Loading…' : 'Load'}
+          </Button>
+        </Hint>
       </div>
 
       {error && (
@@ -434,14 +437,14 @@ export default function ReleasePilotPage() {
 
       {/* Image fetch diagnostics */}
       {imgDebug && (
-        <details className="rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs">
-          <summary className="cursor-pointer select-none px-3 py-2 font-mono text-amber-600 dark:text-amber-400 list-none flex items-center gap-2">
+        <details className="rounded-lg border border-warning/40 bg-warning/10 text-xs">
+          <summary className="cursor-pointer select-none px-3 py-2 font-mono text-warning list-none flex items-center gap-2">
             <span className="font-semibold">Image fetch:</span>
             <span>{imgDebug.fetched}/{imgDebug.total} fetched</span>
-            {imgDebug.fetched < imgDebug.total && <span className="text-amber-500">▼ details</span>}
+            {imgDebug.fetched < imgDebug.total && <span className="text-warning">▼ details</span>}
           </summary>
           {imgDebug.fetched < imgDebug.total && (
-            <div className="flex flex-col gap-1 border-t border-amber-500/20 px-3 pb-2.5 pt-2">
+            <div className="flex flex-col gap-1 border-t border-warning/20 px-3 pb-2.5 pt-2">
               <span className="font-mono">first-fail status: {String(imgDebug.status)} · error: {imgDebug.err}</span>
               <span className="font-mono break-all">url: {imgDebug.sampleUrl}</span>
               <span className="font-mono break-all whitespace-pre-wrap">textHead: {imgDebug.textHead || '(none)'}</span>
@@ -453,14 +456,14 @@ export default function ReleasePilotPage() {
       {/* Unmatched-screenshot diagnostics — images in the runbook that no
           downloaded attachment matched (so they were dropped during parse). */}
       {droppedImages > 0 && (
-        <details className="rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+        <details className="rounded-lg border border-warning/40 bg-warning/10 text-xs text-warning">
           <summary className="cursor-pointer select-none px-3 py-2.5 list-none flex items-start gap-2">
             <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
               {droppedImages} screenshot{droppedImages === 1 ? '' : 's'} couldn’t be matched to a downloaded attachment and {droppedImages === 1 ? 'was' : 'were'} dropped. ▼ keys
             </span>
           </summary>
-          <div className="flex flex-col gap-2 border-t border-amber-500/20 px-3 pb-2.5 pt-2">
+          <div className="flex flex-col gap-2 border-t border-warning/20 px-3 pb-2.5 pt-2">
             <div>
               <div className="font-semibold">Dropped image attributes:</div>
               {dropped.map((k, i) => <div key={i} className="font-mono break-all">{k}</div>)}
@@ -486,7 +489,7 @@ export default function ReleasePilotPage() {
                 href={result.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex shrink-0 items-center gap-1 text-xs text-blue-500 hover:underline"
+                className="inline-flex shrink-0 items-center gap-1 text-xs text-info hover:underline"
               >
                 Open in Confluence <ExternalLink className="h-3 w-3" />
               </a>
@@ -511,11 +514,11 @@ export default function ReleasePilotPage() {
                       {section.title}
                       {pct !== null && (
                         allDone ? (
-                          <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-500 border border-emerald-500/30">
+                          <span className="inline-flex items-center gap-0.5 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold text-success border border-success/30">
                             ✓ Done
                           </span>
                         ) : (
-                          <span className="inline-flex items-center rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500 border border-amber-500/30">
+                          <span className="inline-flex items-center rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning border border-warning/30">
                             {pct}%
                           </span>
                         )
@@ -526,25 +529,32 @@ export default function ReleasePilotPage() {
               </TabsList>
               {activeTab === 'summary' && (
                 <div className="flex shrink-0 flex-wrap items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant={closure ? 'default' : 'outline'}
-                    className={`h-7 gap-1.5 text-xs ${closure ? 'bg-emerald-600 hover:bg-emerald-600/90 text-white' : ''}`}
-                    onClick={() => setClosure(v => !v)}
-                    title="Toggle Release Closure — adds the closure header and Testing Results sections"
-                  >
-                    {closure ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
-                    Release Closure
-                  </Button>
-                  <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCopyFull} title="Copy summary with full-resolution images (large — may exceed Teams)">
-                    <Copy className="h-3.5 w-3.5" /> Copy (full res)
-                  </Button>
-                  <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCopyNoImages} title="Copy summary text only (no screenshots) — always fits Teams">
-                    <Copy className="h-3.5 w-3.5" /> Copy (no images)
-                  </Button>
-                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={handleExportSummary} title="Export full-quality HTML file (all sections, full-res)">
-                    <Download className="h-4 w-4" />
-                  </Button>
+                  <Hint label={closure ? 'Drop the closure header and Testing Results sections from the summary' : 'Add the closure header and Testing Results sections to the summary'}>
+                    <Button
+                      size="sm"
+                      variant={closure ? 'default' : 'outline'}
+                      className={`h-7 gap-1.5 text-xs ${closure ? 'bg-success text-success-foreground hover:bg-success/90' : ''}`}
+                      onClick={() => setClosure(v => !v)}
+                    >
+                      {closure ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
+                      Release Closure
+                    </Button>
+                  </Hint>
+                  <Hint label="Copy the summary with full-resolution screenshots — large, and may exceed the Teams paste limit">
+                    <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCopyFull}>
+                      <Copy className="h-3.5 w-3.5" /> Copy (full res)
+                    </Button>
+                  </Hint>
+                  <Hint label="Copy the summary text only, no screenshots — always fits in Teams">
+                    <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCopyNoImages}>
+                      <Copy className="h-3.5 w-3.5" /> Copy (no images)
+                    </Button>
+                  </Hint>
+                  <Hint label="Export every section as one full-quality HTML file, images at full resolution">
+                    <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={handleExportSummary}>
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </Hint>
                 </div>
               )}
               </div>

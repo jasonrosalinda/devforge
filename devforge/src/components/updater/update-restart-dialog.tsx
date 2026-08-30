@@ -28,7 +28,7 @@ export function UpdateRestartDialog({ open, version, onRestart, onLater }: Props
             <AlertDialogContent>
                 <AlertDialogHeader>
                     <AlertDialogTitle className="flex items-center gap-2">
-                        <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                        <CheckCircle2 className="h-5 w-5 text-success" />
                         Update {version ? `v${version} ` : ''}ready to install
                     </AlertDialogTitle>
                     <AlertDialogDescription>

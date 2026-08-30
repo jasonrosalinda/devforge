@@ -1,19 +1,18 @@
 import type { EndpointPerformance, EndpointPerfRow, EndpointPerfSeries, EndpointDependency } from '@shared/types/azureMetrics.types';
+import { UI, PERF_COLORS } from '@/lib/chart-colors';
 
 /** Green while a response is a normal page load, amber once a user notices it, red
  *  once it reads as broken. Same thresholds as the Response breakdown, so a P95 is
  *  the same colour wherever the card shows it. */
 export function msColor(ms: number): string {
-  return ms >= 5000 ? '#f85149' : ms >= 1000 ? '#d29922' : '#3fb950';
+  return ms >= 5000 ? UI.error : ms >= 1000 ? UI.warning : UI.success;
 }
 
-/** One shade deeper than the #3fb950 green used for success text elsewhere. These are
- *  large filled areas rather than a few glyphs, and at full brightness the base segment
- *  competes with the 4xx and 5xx stacked on top of it — which are the ones worth seeing. */
-export const PERF_OK_COLOR   = '#2ea043';
-export const PERF_4XX_COLOR  = '#f97316';
-export const PERF_5XX_COLOR  = '#f85149';
-export const PERF_LINE_COLOR = '#58a6ff';
+/** See PERF_COLORS in @/lib/chart-colors for why this family stays literal hex. */
+export const PERF_OK_COLOR   = PERF_COLORS.ok;
+export const PERF_4XX_COLOR  = PERF_COLORS.fourXx;
+export const PERF_5XX_COLOR  = PERF_COLORS.fiveXx;
+export const PERF_LINE_COLOR = PERF_COLORS.line;
 
 /** HTTP reason phrase plus a one-line description for the codes that actually
  *  show up as 4xx/5xx failures on a web app. Not the full IANA registry — just

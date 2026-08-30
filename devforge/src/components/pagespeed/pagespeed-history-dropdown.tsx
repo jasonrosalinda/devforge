@@ -1,5 +1,6 @@
 import { History, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui';
+import { Hint } from "@/components/ui/hint";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -23,19 +24,21 @@ function summarize(snapshot: PageSpeedHistorySnapshot): string {
     const count = config.urls.length;
     const parts = [`${count} URL${count === 1 ? '' : 's'}`];
     if (config.comparisonMode) parts.push('compare');
-    if (config.runMode === 'average') parts.push('avg');
+    if (config.runs > 1) parts.push(`${config.runs}× ${config.aggregation}`);
     return parts.join(' · ');
 }
 
 export default function PageSpeedHistoryDropdown({ entries, onSelect, onDelete, onClear, disabled }: PageSpeedHistoryDropdownProps) {
     return (
         <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button variant="outline" disabled={disabled || entries.length === 0}>
-                    <History className="mr-1 h-4 w-4" />
-                    History{entries.length > 0 ? ` (${entries.length})` : ''}
-                </Button>
-            </DropdownMenuTrigger>
+            <Hint label={entries.length === 0 ? 'No saved analyses yet - use Save to history after a run' : 'Reopen a saved analysis, config and results included'}>
+                <DropdownMenuTrigger asChild>
+                    <Button variant="outline" disabled={disabled || entries.length === 0}>
+                        <History className="mr-1 h-4 w-4" />
+                        History{entries.length > 0 ? ` (${entries.length})` : ''}
+                    </Button>
+                </DropdownMenuTrigger>
+            </Hint>
             <DropdownMenuContent align="end" className="w-80">
                 <DropdownMenuLabel>Saved analyses</DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -53,14 +56,15 @@ export default function PageSpeedHistoryDropdown({ entries, onSelect, onDelete, 
                                     <span className="text-sm">{new Date(entry.savedAt).toLocaleString()}</span>
                                     <span className="text-xs text-muted-foreground">{summarize(entry)}</span>
                                 </div>
-                                <button
-                                    type="button"
-                                    title="Delete"
-                                    className="text-muted-foreground hover:text-destructive"
-                                    onClick={e => { e.stopPropagation(); onDelete(entry.id); }}
-                                >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                </button>
+                                <Hint label="Delete this saved analysis" side="left">
+                                    <button
+                                        type="button"
+                                        className="text-muted-foreground hover:text-destructive"
+                                        onClick={e => { e.stopPropagation(); onDelete(entry.id); }}
+                                    >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                </Hint>
                             </DropdownMenuItem>
                         ))}
                     </div>

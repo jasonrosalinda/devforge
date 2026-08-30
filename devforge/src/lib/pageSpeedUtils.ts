@@ -5,7 +5,8 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
     return {
         apiKey: '',
         strategy: strategy || 'desktop',
-        runMode: 'single',
+        runs: 1,
+        aggregation: 'average',
         urls: [],
 
         comparisonMode: false,
@@ -20,7 +21,6 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         showTBT: true,
         showFCP: true,
         showWarnings: false,
-        concurrency: 1,
     };
 }
 
@@ -79,7 +79,11 @@ export function getPageSpeedInsightResultMessages(result1: PageSpeedInsightResul
     return messages;
 }
 
-export function getPageSpeedInsightResultAverage(url: string, results: PageSpeedInsightResult[]): PageSpeedInsightResult {
+export function aggregatePageSpeedInsightResults(
+    url: string,
+    results: PageSpeedInsightResult[],
+    aggregation: PageSpeedConfiguration['aggregation'] = 'average',
+): PageSpeedInsightResult {
     if (results.length === 0) return defaultPageSpeedResult(url);
     if (results.length === 1) return results[0]!;
 
@@ -104,7 +108,14 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
         return Array.isArray(msg) ? msg.some(m => m.length > 0) : msg.length > 0;
     };
 
-    const avgMetric = (
+    // Median of an even-sized set is the mean of the two middle values.
+    const median = (values: number[]): number => {
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+    };
+
+    const aggMetric = (
         key: keyof Pick<PageSpeedInsightResult,
             'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint'>
     ): PageSpeedMetrics => {
@@ -114,23 +125,26 @@ export function getPageSpeedInsightResultAverage(url: string, results: PageSpeed
             return results[0]![key];
         }
 
-        const avg = valid.reduce((sum, r) => sum + r[key].numericValue, 0) / valid.length;
+        const values = valid.map(r => r[key].numericValue);
+        const agg = aggregation === 'median'
+            ? median(values)
+            : values.reduce((sum, v) => sum + v, 0) / values.length;
         const ref = valid[0]![key];
 
         return {
             ...ref,
-            numericValue: avg,
-            displayValue: formatDisplayValue(avg, ref.numericUnit, ref.displayValue),
+            numericValue: agg,
+            displayValue: formatDisplayValue(agg, ref.numericUnit, ref.displayValue),
         };
     };
 
     const result: PageSpeedInsightResult = {
         url,
-        speedIndex: avgMetric('speedIndex'),
-        largestContentfulPaint: avgMetric('largestContentfulPaint'),
-        cumulativeLayoutShift: avgMetric('cumulativeLayoutShift'),
-        totalBlockingTime: avgMetric('totalBlockingTime'),
-        firstContentfulPaint: avgMetric('firstContentfulPaint'),
+        speedIndex: aggMetric('speedIndex'),
+        largestContentfulPaint: aggMetric('largestContentfulPaint'),
+        cumulativeLayoutShift: aggMetric('cumulativeLayoutShift'),
+        totalBlockingTime: aggMetric('totalBlockingTime'),
+        firstContentfulPaint: aggMetric('firstContentfulPaint'),
         ...(results.length > 1 ? { runHistory: results } : {}),
     };
 

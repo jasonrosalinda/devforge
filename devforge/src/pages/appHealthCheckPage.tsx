@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from 'react';
+import { Hint } from "@/components/ui/hint";
 import { TbActivity } from 'react-icons/tb';
 import { Loader2, Copy, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
@@ -49,15 +50,17 @@ function AzureStatusPill({
     if (credStatus === 'ok') {
         return (
             <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                    <button
-                        type="button"
-                        className="inline-flex items-center gap-1.5 rounded-full border border-green-500/60 bg-green-500/10 px-3 py-1 text-xs text-green-500 hover:bg-green-500/20 transition-colors"
-                    >
-                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
-                        Authenticated
-                    </button>
-                </DropdownMenuTrigger>
+                <Hint label="Signed in to Azure CLI - click to re-check">
+                    <DropdownMenuTrigger asChild>
+                        <button
+                            type="button"
+                            className="inline-flex items-center gap-1.5 rounded-full border border-success/60 bg-success/10 px-3 py-1 text-xs text-success hover:bg-success/20 transition-colors"
+                        >
+                            <span className="inline-block h-1.5 w-1.5 rounded-full bg-success" />
+                            Authenticated
+                        </button>
+                    </DropdownMenuTrigger>
+                </Hint>
                 <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={onRecheck}>
                         <RefreshCw className="h-3.5 w-3.5 mr-2" /> Re-check
@@ -69,16 +72,17 @@ function AzureStatusPill({
 
     return (
         <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <button
-                    type="button"
-                    className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-card px-3 py-1 text-xs text-destructive hover:bg-accent transition-colors"
-                    title={credError || 'Azure CLI not authenticated'}
-                >
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-destructive" />
-                    Not authenticated
-                </button>
-            </DropdownMenuTrigger>
+            <Hint label={credError || 'Azure CLI not authenticated - click for the sign-in command'}>
+                <DropdownMenuTrigger asChild>
+                    <button
+                        type="button"
+                        className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-card px-3 py-1 text-xs text-destructive hover:bg-accent transition-colors"
+                    >
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-destructive" />
+                        Not authenticated
+                    </button>
+                </DropdownMenuTrigger>
+            </Hint>
             <DropdownMenuContent align="end" className="w-64">
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">
                     Run this in your terminal, then click Re-check:
@@ -270,8 +274,8 @@ export default function AppHealthCheckPage() {
           to   { transform: rotate(360deg); }
         }
         @keyframes sparkle-glow {
-          0%, 100% { filter: drop-shadow(0 0 3px #d29922); opacity: 0.7; }
-          50%       { filter: drop-shadow(0 0 8px #d29922) drop-shadow(0 0 14px #d2992288); opacity: 1; }
+          0%, 100% { filter: drop-shadow(0 0 3px hsl(var(--warning))); opacity: 0.7; }
+          50%       { filter: drop-shadow(0 0 8px hsl(var(--warning))) drop-shadow(0 0 14px hsl(var(--warning) / 0.53)); opacity: 1; }
         }
         input[type="datetime-local"]::-webkit-calendar-picker-indicator {
           filter: invert(0.6);

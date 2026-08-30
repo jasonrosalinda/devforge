@@ -1,5 +1,6 @@
 import { CheckCircle2, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Hint } from "@/components/ui/hint";
 import type { UpdateInfo } from '@/hooks/useAppUpdater';
 
 interface Props {
@@ -26,7 +27,7 @@ export function UpdateIndicator({ info, onRestart }: Props) {
         return (
             <div className={baseCls} role="status" aria-live="polite">
                 <div className="flex items-start gap-2">
-                    <CheckCircle2 className="h-4 w-4 mt-0.5 text-emerald-500 flex-shrink-0" />
+                    <CheckCircle2 className="h-4 w-4 mt-0.5 text-success flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium">
                             Update {info.version ? `v${info.version} ` : ''}ready
@@ -35,9 +36,11 @@ export function UpdateIndicator({ info, onRestart }: Props) {
                             Restart devForge to apply.
                         </div>
                         <div className="mt-2">
-                            <Button size="sm" className="h-7 text-xs" onClick={onRestart}>
-                                Restart Now
-                            </Button>
+                            <Hint label="Close devForge and reopen it on the new version">
+                                <Button size="sm" className="h-7 text-xs" onClick={onRestart}>
+                                    Restart Now
+                                </Button>
+                            </Hint>
                         </div>
                     </div>
                 </div>

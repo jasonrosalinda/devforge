@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { SnatResult } from '@shared/types/azureMetrics.types';
 import { EndpointSeriesChart, INSTANCE_PALETTE } from './azureMetricChart';
 import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
+import { UI } from '@/lib/chart-colors';
 
 /**
  * The four SNAT charts App Service Diagnostics publishes, drawn from the detector
@@ -37,7 +38,7 @@ export function SnatPortPanel({
   );
 
   if (loading && !snat) return <PanelSkeleton rows={3} chartHeight={100} />;
-  if (snat?.error) return note(`SNAT diagnostics failed: ${snat.error}`, '#f85149');
+  if (snat?.error) return note(`SNAT diagnostics failed: ${snat.error}`, UI.error);
   if (!snat?.charts?.length) {
     return note('SNAT diagnostics unavailable for this site — App Service Diagnostics publishes them for Windows plans only.');
   }
@@ -46,7 +47,7 @@ export function SnatPortPanel({
   for (const chart of snat.charts) {
     for (const s of chart.series) {
       if (!colorOf.has(s.name)) {
-        colorOf.set(s.name, INSTANCE_PALETTE[colorOf.size % INSTANCE_PALETTE.length] ?? '#8b9ab3');
+        colorOf.set(s.name, INSTANCE_PALETTE[colorOf.size % INSTANCE_PALETTE.length] ?? UI.textMuted);
       }
     }
   }
@@ -68,17 +69,17 @@ export function SnatPortPanel({
             return counters.size > 1 && short ? `${instance} ${short}` : instance;
           };
           const series = shown.map(s => ({ url: labelOf(s.name), series: s.series }));
-          const colors = shown.map(s => colorOf.get(s.name) ?? '#8b9ab3');
+          const colors = shown.map(s => colorOf.get(s.name) ?? UI.textMuted);
           return (
             <div key={chart.title} style={{ minWidth: 0 }}>
-              <div style={{ color: '#8b949e', fontWeight: 600, marginBottom: 2 }}>{chart.title}</div>
+              <div style={{ color: UI.textMuted, fontWeight: 600, marginBottom: 2 }}>{chart.title}</div>
               {/* An empty chart is a result, not a gap: no failed connections and no
                   pending ones is what a healthy window looks like, and dropping the
                   panel would leave the reader unsure whether it was even checked. */}
               {chart.series.length === 0
-                ? <div style={{ height: 130, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3fb950' }}>None in this window</div>
+                ? <div style={{ height: 130, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.success }}>None in this window</div>
                 : series.length === 0
-                  ? <div style={{ height: 130, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6e7681' }}>All workers hidden — click a legend entry to show one</div>
+                  ? <div style={{ height: 130, display: 'flex', alignItems: 'center', justifyContent: 'center', color: UI.textDim }}>All workers hidden — click a legend entry to show one</div>
                   : <EndpointSeriesChart series={series} colors={colors} height={130} syncId={syncId} />}
               {/* EndpointSeriesChart draws no legend of its own — its usual caller is a
                   list of endpoint toggles, and so is this: one entry per worker, click
@@ -92,16 +93,16 @@ export function SnatPortPanel({
                       key={group.instance}
                       onClick={() => toggle(group.instance)}
                       style={{
-                        color: '#6e7681', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
+                        color: UI.textDim, whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
                         opacity: off ? 0.4 : 1, textDecoration: off ? 'line-through' : 'none',
                       }}
                       title={`${group.instance}: ${group.counters.map(c => `${prettyCounter(c.counter)} ${c.peak.toLocaleString()}`).join(' | ')}`}
                     >
                       <span style={{ fontWeight: 700 }}>{group.instance}</span>
-                      <span style={{ color: '#484f58' }}> - </span>
+                      <span style={{ color: UI.textDim }}> - </span>
                       {group.counters.map((c, i) => (
                         <span key={c.name}>
-                          {i > 0 && <span style={{ color: '#484f58' }}> / </span>}
+                          {i > 0 && <span style={{ color: UI.textDim }}> / </span>}
                           <span style={{ color: colorOf.get(c.name), fontWeight: 600 }}>
                             {c.peak.toLocaleString()}
                           </span>
@@ -115,7 +116,7 @@ export function SnatPortPanel({
           );
         })}
       </div>
-      <div style={{ color: '#484f58', paddingLeft: 8, marginTop: 6 }}>
+      <div style={{ color: UI.textDim, paddingLeft: 8, marginTop: 6 }}>
         Ports are allocated per worker instance on the App Service plan, so these figures cover every site sharing the plan
         {snat.detector ? ` · detector: ${snat.detector}` : ''}.
         {/* Stated rather than silently tolerated: at a coarser grain a spike that
@@ -125,7 +126,7 @@ export function SnatPortPanel({
           const mismatch = grainMismatch(snat.requestedGrain, snat.grainMs);
           if (!mismatch) return null;
           return (
-            <span style={{ color: '#d29922' }} title="App Service Diagnostics chooses its own bucket width and ignores finer requests on wider windows. Shorten the time range to get closer to the interval you picked.">
+            <span style={{ color: UI.warning }} title="App Service Diagnostics chooses its own bucket width and ignores finer requests on wider windows. Shorten the time range to get closer to the interval you picked.">
               {' '}Detector returned {mismatch.actual} buckets — the {mismatch.requested} interval could not be applied, so short spikes are averaged out.
             </span>
           );
@@ -276,7 +277,7 @@ export function SnatPortsRows({
             and a zero in red reads as "none of the bad thing", not as an alarm. */}
         <td
           className="text-right tabular-nums"
-          style={{ whiteSpace: 'nowrap', color: '#d29922' }}
+          style={{ whiteSpace: 'nowrap', color: UI.warning }}
           title={'Pending SNAT connections: outbound connections queued waiting for a free SNAT port. '
             + 'Totalled across time buckets and worker instances. A queue that keeps growing is what precedes outright failures.'
             + (pendingPeak != null ? ` Peak ${pendingPeak.toLocaleString()} waiting at once.` : '')}
@@ -295,7 +296,7 @@ export function SnatPortsRows({
             is what that column means on every other row. */}
         <td
           className="text-right tabular-nums"
-          style={{ whiteSpace: 'nowrap', color: '#8b9ab3' }}
+          style={{ whiteSpace: 'nowrap', color: UI.textMuted }}
           title={peakAllocated != null
             ? `Peak ${peakUsed?.toLocaleString() ?? '—'} ports in use out of ${peakAllocated.toLocaleString()} allocated, on the busiest worker`
             : undefined}

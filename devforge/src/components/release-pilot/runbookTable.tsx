@@ -33,7 +33,7 @@ export const RICH =
   '[&_ul]:list-disc [&_ul]:pl-4 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:my-1 ' +
   '[&_li]:my-0.5 [&_li>ul]:mt-0.5 ' +
   '[&_h1]:font-semibold [&_h1]:text-sm [&_h2]:font-semibold [&_h2]:text-sm [&_h3]:font-semibold ' +
-  '[&_a]:text-blue-500 [&_a]:underline ' +
+  '[&_a]:text-info [&_a]:underline ' +
   '[&_table]:my-1 [&_td]:border [&_td]:border-border [&_td]:px-1.5 [&_td]:py-0.5 [&_th]:border [&_th]:border-border [&_th]:px-1.5 ' +
   '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono ' +
   '[&_details]:my-2 [&_details]:rounded-md [&_details]:border [&_details]:border-border [&_details]:overflow-hidden ' +

@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { ArrowRightLeft, Clock } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Hint } from "@/components/ui/hint";
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -58,16 +59,17 @@ export function QuickTimeConverter() {
 
     return (
         <Dialog>
-            <DialogTrigger asChild>
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                    title="Quick UTC/Local Converter"
-                >
-                    <Clock className="w-4 h-4" />
-                </Button>
-            </DialogTrigger>
+            <Hint label="Convert between UTC and local time">
+                <DialogTrigger asChild>
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                    >
+                        <Clock className="w-4 h-4" />
+                    </Button>
+                </DialogTrigger>
+            </Hint>
             <DialogContent className="max-w-sm">
                 <DialogHeader>
                     <DialogTitle>Quick Time Converter</DialogTitle>
@@ -80,10 +82,12 @@ export function QuickTimeConverter() {
                     <Label className="text-xs text-muted-foreground uppercase tracking-wide">
                         {direction === "utcToLocal" ? "UTC" : "Local"} in
                     </Label>
-                    <Button variant="ghost" size="sm" onClick={swapDirection} className="h-7 px-2 text-xs gap-1">
-                        <ArrowRightLeft className="w-3.5 h-3.5" />
-                        Swap
-                    </Button>
+                    <Hint label="Swap the conversion direction">
+                        <Button variant="ghost" size="sm" onClick={swapDirection} className="h-7 px-2 text-xs gap-1">
+                            <ArrowRightLeft className="w-3.5 h-3.5" />
+                            Swap
+                        </Button>
+                    </Hint>
                 </div>
 
                 <Input

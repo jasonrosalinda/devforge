@@ -41,7 +41,10 @@ const DrawerContent = React.forwardRef<
     <DrawerPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed inset-x-0 bottom-0 z-50 mt-24 flex h-auto flex-col rounded-t-[10px] border bg-background",
+        // focus:outline-none — Vaul focuses the panel on open, and without this
+        // Chromium paints its UA focus ring (amber over a dark surface). Keyboard
+        // users land on the controls inside, which carry their own rings.
+        "fixed inset-x-0 bottom-0 z-50 mt-24 flex h-auto flex-col rounded-t-[10px] border bg-background focus:outline-none",
         className
       )}
       {...props}

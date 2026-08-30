@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { RestartResult } from '@shared/types/azureMetrics.types';
 import { EventBarChart, INSTANCE_PALETTE } from './azureMetricChart';
 import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
+import { UI } from '@/lib/chart-colors';
 
 /**
  * Application restart events, from the portal's restart-analysis detector.
@@ -16,7 +17,10 @@ import { CellSkeleton, PanelSkeleton } from './loadingSkeleton';
  * Per site, so the frontend and the API each get their own row.
  */
 
-/** Cause → colour. Anything unrecognised falls through to the shared palette. */
+/** Cause → colour. Anything unrecognised falls through to the shared palette.
+ *  Literal hex on purpose: this is one categorical legend scale, and its entries
+ *  have to stay mutually distinguishable and stable across themes. Mixing a
+ *  semantic token in here would make the crash colour drift away from the rest. */
 const CAUSE_COLORS: Array<[RegExp, string]> = [
   [/kudu|manual|process explorer/i, '#22d3ee'],   // someone did this deliberately
   [/crash|fault|unhandled/i, '#f85149'],           // the application broke
@@ -26,7 +30,7 @@ const CAUSE_COLORS: Array<[RegExp, string]> = [
 
 export function causeColor(cause: string, fallbackIdx = 0): string {
   for (const [re, color] of CAUSE_COLORS) if (re.test(cause)) return color;
-  return INSTANCE_PALETTE[fallbackIdx % INSTANCE_PALETTE.length] ?? '#8b9ab3';
+  return INSTANCE_PALETTE[fallbackIdx % INSTANCE_PALETTE.length] ?? UI.textMuted;
 }
 
 /** Total restarts per cause across the window. Pure. */
@@ -220,7 +224,7 @@ export function RestartPanel({
   return (
     <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
       {total === 0 && findings.length === 0 && (
-        <div style={{ color: '#3fb950', padding: '4px 0' }}>No restarts in this window.</div>
+        <div style={{ color: UI.success, padding: '4px 0' }}>No restarts in this window.</div>
       )}
 
       {plotted.length > 0 && (
@@ -236,9 +240,9 @@ export function RestartPanel({
           />
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, paddingLeft: 8, marginTop: 2 }}>
             {byCause.map((c, i) => (
-              <span key={c.cause} style={{ color: '#6e7681', whiteSpace: 'nowrap' }}>
+              <span key={c.cause} style={{ color: UI.textDim, whiteSpace: 'nowrap' }}>
                 <span style={{ color: causeColor(c.cause, i) }}>■</span> {c.cause}
-                <span style={{ color: '#484f58' }}> {c.count.toLocaleString()}</span>
+                <span style={{ color: UI.textDim }}> {c.count.toLocaleString()}</span>
               </span>
             ))}
           </div>
@@ -253,7 +257,7 @@ export function RestartPanel({
           {byCause.map(c => (
             <span key={c.cause} style={{ whiteSpace: 'nowrap' }}>
               <span style={{ color: causeColor(c.cause), fontWeight: 600 }}>{c.count.toLocaleString()}</span>
-              <span style={{ color: '#6e7681' }}> {c.cause}</span>
+              <span style={{ color: UI.textDim }}> {c.cause}</span>
             </span>
           ))}
         </div>
@@ -263,24 +267,24 @@ export function RestartPanel({
           incident: a time, a cause, and the worker it happened on. */}
       {events.length > 0 && (
         <div style={{ marginTop: 6 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr 130px', gap: 8, color: '#6e7681', marginBottom: 2 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr 130px', gap: 8, color: UI.textDim, marginBottom: 2 }}>
             <span>When (SGT)</span><span>Cause</span><span>Instance</span>
           </div>
           {events.slice(0, 20).map((e, i) => (
             <div key={`${e.t}-${e.cause}-${e.instance ?? ''}-${i}`} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 130px', gap: 8, marginBottom: 1 }}>
               {/* Azure reports some events as "occurred multiple times during the day"
                   with no timestamps at all. Saying so beats inventing a time. */}
-              <span className="tabular-nums" style={{ color: e.t ? '#cdd9e5' : '#484f58' }}>
+              <span className="tabular-nums" style={{ color: e.t ? UI.text : UI.textDim }}>
                 {e.t ? fmtEventTime(e.t) : 'recurring'}
               </span>
               <span style={{ color: causeColor(e.cause) }}>
-                {e.cause}{e.count > 1 ? <span style={{ color: '#484f58' }}> ×{e.count}</span> : null}
+                {e.cause}{e.count > 1 ? <span style={{ color: UI.textDim }}> ×{e.count}</span> : null}
               </span>
-              <span style={{ color: '#6e7681', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.instance ?? '—'}</span>
+              <span style={{ color: UI.textDim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.instance ?? '—'}</span>
             </div>
           ))}
           {events.length > 20 && (
-            <div style={{ color: '#484f58', marginTop: 2 }}>+{events.length - 20} more events in this window.</div>
+            <div style={{ color: UI.textDim, marginTop: 2 }}>+{events.length - 20} more events in this window.</div>
           )}
         </div>
       )}
@@ -322,14 +326,14 @@ export function RestartRows({
             ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
             : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
         </td>
-        <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap', color: '#8b9ab3', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap', color: UI.textMuted, overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {loading && !restarts
             ? <CellSkeleton w={120} />
             : top
               ? <span style={{ color: causeColor(top.cause) }}>{top.cause} ×{top.count.toLocaleString()}{byCause.length > 1 ? ` +${byCause.length - 1} more` : ''}</span>
               : restarts ? 'no restarts' : '—'}
         </td>
-        <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap', color: total === 0 ? '#3fb950' : crashy ? 'hsl(var(--destructive))' : '#d29922' }}>
+        <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap', color: total === 0 ? UI.success : crashy ? 'hsl(var(--destructive))' : UI.warning }}>
           {loading && !restarts ? <CellSkeleton w={58} /> : restarts ? `${total.toLocaleString()} restart${total === 1 ? '' : 's'}` : '—'}
         </td>
       </tr>

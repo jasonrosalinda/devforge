@@ -56,7 +56,8 @@ export type PageSpeedStrategy = "mobile" | "desktop";
 export interface PageSpeedConfiguration {
     apiKey: string;
     strategy: PageSpeedStrategy;
-    runMode: "single" | "average";
+    runs: number;
+    aggregation: "average" | "median";
     urls: string[];
     comparisonMode: boolean;
     beforeLabel: string;
@@ -69,11 +70,10 @@ export interface PageSpeedConfiguration {
     showTBT: boolean;
     showFCP: boolean;
     showWarnings: boolean;
-    concurrency: 1 | 2 | 3;
 }
 
 export interface UsePageSpeedInsightHooks {
-    audit: (url: string, signal?: AbortSignal, runMode?: PageSpeedConfiguration['runMode']) => Promise<PageSpeedInsightResult>;
+    audit: (url: string, signal?: AbortSignal, runs?: number) => Promise<PageSpeedInsightResult>;
 }
 
 export interface PageSpeedApiResponse {

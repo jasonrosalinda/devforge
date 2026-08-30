@@ -4,6 +4,7 @@ import type { EndpointPerformance } from '@shared/types/azureMetrics.types';
 import { EndpointPerfChart } from './azureMetricChart';
 import { CellSkeleton, PanelSkeleton, SkeletonBlock } from './loadingSkeleton';
 import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
+import { UI } from '@/lib/chart-colors';
 import {
   perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
   PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR, httpStatusLabel,
@@ -127,12 +128,12 @@ export function PerformancePanel({
     ct.count > 0 && n > 0 ? (n / ct.count < 0.001 ? '<0.1%' : `${(n / ct.count * 100).toFixed(1)}%`) : '0%';
 
   const chip = (color: string, label: string, value: number, tip: string) => (
-    <span key={label} title={tip} style={{ color: '#6e7681', whiteSpace: 'nowrap' }}>
+    <span key={label} title={tip} style={{ color: UI.textDim, whiteSpace: 'nowrap' }}>
       <span style={{ color }}>■</span> {label}{' '}
       {/* Dimmed at zero for the same reason as the table cells: a clean class is worth
           seeing at a glance, and a blank reads as "not measured". */}
-      <span className="tabular-nums" style={{ color: value > 0 ? color : '#30363d' }}>{value.toLocaleString()}</span>
-      <span style={{ color: '#484f58' }}> ({share(value)})</span>
+      <span className="tabular-nums" style={{ color: value > 0 ? color : UI.border }}>{value.toLocaleString()}</span>
+      <span style={{ color: UI.textDim }}> ({share(value)})</span>
     </span>
   );
 
@@ -144,15 +145,15 @@ export function PerformancePanel({
     <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
       {/* Names what the bars are. The set-wide total and one busy endpoint draw the same
           shape, so without this line the two states are indistinguishable. */}
-      <div style={{ color: '#6e7681', paddingLeft: 8, marginBottom: 1 }}>
+      <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 1 }}>
         {selected
-          ? <>Charting <span style={{ color: '#cdd9e5' }}>{selected}</span>
-              <span style={{ color: '#484f58' }}> — click its row again to go back to the total.</span></>
-          : <>Charting <span style={{ color: '#cdd9e5' }}>every endpoint</span>
+          ? <>Charting <span style={{ color: UI.text }}>{selected}</span>
+              <span style={{ color: UI.textDim }}> — click its row again to go back to the total.</span></>
+          : <>Charting <span style={{ color: UI.text }}>every endpoint</span>
               {/* Stated, not implied: this is all traffic, while the figures on the row
                   above cover the merged set only — so the two totals will not agree, and
                   a reader who assumes they should will read the gap as a bug. */}
-              <span style={{ color: '#484f58' }}> — all requests to this site, including the ones
+              <span style={{ color: UI.textDim }}> — all requests to this site, including the ones
               outside the {endpoints.length}-endpoint list below. Click a row to chart one.</span></>}
       </div>
 
@@ -169,7 +170,7 @@ export function PerformancePanel({
         : !selected && overallRows.length === 0
         // Said rather than drawn as a bare axis: the row list is populated, so an empty
         // plot here means the set-wide timeline query is what came back empty.
-        ? <span style={{ color: '#484f58', fontStyle: 'italic', paddingLeft: 8 }}>
+        ? <span style={{ color: UI.textDim, fontStyle: 'italic', paddingLeft: 8 }}>
             No app-wide timeline for this window — click an endpoint to chart it on its own.
           </span>
         : <EndpointPerfChart
@@ -186,16 +187,16 @@ export function PerformancePanel({
       {/* Centred under the plot: the row is now figures rather than a colour key, so it
           reads as the chart's caption, and a caption hanging off the left edge of a
           full-width chart reads as belonging to whatever is to its left. */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 10, color: '#484f58', padding: '0 8px', margin: '2px 0 5px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 10, color: UI.textDim, padding: '0 8px', margin: '2px 0 5px' }}>
         {/* The stack height totalled, first: it is what the three colours are shares of. */}
         <span
-          style={{ whiteSpace: 'nowrap', color: '#6e7681' }}
+          style={{ whiteSpace: 'nowrap', color: UI.textDim }}
           title={selected
             ? `Total requests to ${selected} in this window`
             : 'Total requests to every endpoint on this site in this window — larger than the figure on the Performance row, which counts the merged endpoint set only'}
         >
           {selected ? 'endpoint total' : 'total'}{' '}
-          <span className="tabular-nums" style={{ color: '#cdd9e5' }}>{ct.count.toLocaleString()}</span>
+          <span className="tabular-nums" style={{ color: UI.text }}>{ct.count.toLocaleString()}</span>
         </span>
         {chip(PERF_OK_COLOR,  'successful', ct.ok, 'Requests that returned neither a 4xx nor a 5xx')}
         {chip(PERF_4XX_COLOR, '4xx',        ct.c4, selected ? 'Client errors from this endpoint' : 'Client errors across every endpoint')}
@@ -216,21 +217,21 @@ export function PerformancePanel({
       {/* Out of the figure row and onto its own line, left-aligned with the paragraph below
           it: this is instruction rather than measurement, and mixing it in made the centred
           figures wrap around a sentence. */}
-      <div style={{ color: '#484f58', paddingLeft: 8, marginBottom: 5 }}>
+      <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
         bar height is requests per {bin ?? 'bucket'} — click a row to chart it, click it again for the total.
       </div>
 
       {/* Above the table, not below it: this describes how the list was built and how it is
           ordered, which is what a reader needs before reading it rather than after. */}
-      <div style={{ color: '#484f58', paddingLeft: 8, marginBottom: 5 }}>
+      <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
         The ten busiest endpoints, the ten worst 4xx, and every endpoint with a 5xx — merged, query strings stripped.
         Ordered by 5xx, then 4xx, then volume, so a broken endpoint outranks a busy one.
         {perf.fiveXxCapped && (
-          <span style={{ color: '#d29922' }}> The 5xx list hit its {perf.fiveXxCap}-endpoint cap, so some may be missing.</span>
+          <span style={{ color: UI.warning }}> The 5xx list hit its {perf.fiveXxCap}-endpoint cap, so some may be missing.</span>
         )}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: GRID, gap: 6, color: '#6e7681', fontWeight: 600, borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 2, marginBottom: 2 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: GRID, gap: 6, color: UI.textDim, fontWeight: 600, borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 2, marginBottom: 2 }}>
         <span>endpoint</span>
         <span style={{ textAlign: 'right' }} title="Requests per minute across the window">rpm</span>
         <span style={{ textAlign: 'right' }} title="Total requests in the window">requests</span>
@@ -259,13 +260,13 @@ export function PerformancePanel({
               borderRadius: 2,
             }}
           >
-            <span style={{ color: on ? '#cdd9e5' : 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: on ? 4 : 0 }}>{e.url}</span>
+            <span style={{ color: on ? UI.text : 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: on ? 4 : 0 }}>{e.url}</span>
             {num(e.rpm, PERF_LINE_COLOR, 'Requests per minute')}
-            {num(e.count, '#484f58', 'Total requests')}
+            {num(e.count, UI.textDim, 'Total requests')}
             {/* Dimmed at zero rather than blank: a dash reads as "not measured", and a
                 clean endpoint is worth seeing at a glance. */}
-            {num(e.fourXx, e.fourXx ? PERF_4XX_COLOR : '#30363d', '4xx responses')}
-            {num(e.fiveXx, e.fiveXx ? PERF_5XX_COLOR : '#30363d', '5xx responses')}
+            {num(e.fourXx, e.fourXx ? PERF_4XX_COLOR : UI.border, '4xx responses')}
+            {num(e.fiveXx, e.fiveXx ? PERF_5XX_COLOR : UI.border, '5xx responses')}
             <span className="tabular-nums" style={{ color: msColor(e.avgMs), textAlign: 'right' }}>{fmtMs(e.avgMs)}</span>
             <span className="tabular-nums" style={{ color: msColor(e.p95), textAlign: 'right' }}>{fmtMs(e.p95)}</span>
           </div>
@@ -291,10 +292,10 @@ export function PerformancePanel({
           SQL is slow, only this can say which endpoint's SQL. */}
       {selected && (
         <div style={{ marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 4 }}>
-          <div style={{ color: '#6e7681', fontWeight: 600, marginBottom: 2 }}>
-            Downstream calls from <span style={{ color: '#cdd9e5' }}>{selected}</span>
+          <div style={{ color: UI.textDim, fontWeight: 600, marginBottom: 2 }}>
+            Downstream calls from <span style={{ color: UI.text }}>{selected}</span>
             {selectedDeps.length > 0 && (
-              <span style={{ fontWeight: 400, color: '#484f58' }}>
+              <span style={{ fontWeight: 400, color: UI.textDim }}>
                 {' — '}{dt.calls.toLocaleString()} call{dt.calls === 1 ? '' : 's'}
                 {dt.targets > 1 && ` across ${dt.targets} targets`}
                 {', '}{fmtMs(dt.totalMs)} total
@@ -317,15 +318,15 @@ export function PerformancePanel({
               ))}
             </div>
           ) : deps?.error ? (
-            <span style={{ color: '#f85149' }}>{deps.error}</span>
+            <span style={{ color: UI.error }}>{deps.error}</span>
           ) : selectedDeps.length === 0 ? (
-            <span style={{ color: '#484f58', fontStyle: 'italic' }}>
+            <span style={{ color: UI.textDim, fontStyle: 'italic' }}>
               No downstream calls recorded for this endpoint. A dependency raised outside a request carries no
               operation name, so it cannot be attributed to an endpoint.
             </span>
           ) : (
           <>
-          <div style={{ display: 'grid', gridTemplateColumns: DEP_GRID, gap: 6, color: '#6e7681', fontWeight: 600, marginBottom: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: DEP_GRID, gap: 6, color: UI.textDim, fontWeight: 600, marginBottom: 1 }}>
             <span>call</span>
             <span>target</span>
             <span style={{ textAlign: 'right' }} title="Number of calls this endpoint made">calls</span>
@@ -353,15 +354,15 @@ export function PerformancePanel({
               }}
               title={`${d.type}${d.target ? ` → ${d.target}` : ''}\n${d.name}\n\n${d.count.toLocaleString()} calls, ${d.failCount.toLocaleString()} failed\navg ${fmtMs(d.avgMs)} · P95 ${fmtMs(d.p95)} · ${fmtMs(d.totalMs)} of this endpoint's total wait${canPlot ? `\n\nClick to ${on ? 'hide' : 'show'} its timeline` : '\n\nNo timeline — only the costliest calls get one'}`}
             >
-              <span style={{ color: '#cdd9e5', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                <span style={{ color: '#6e7681' }}>{d.type || '?'}</span> {d.name}
+              <span style={{ color: UI.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ color: UI.textDim }}>{d.type || '?'}</span> {d.name}
               </span>
-              <span style={{ color: '#6e7681', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.target || '—'}</span>
-              <span className="tabular-nums" style={{ color: '#484f58', textAlign: 'right' }}>{d.count.toLocaleString()}</span>
-              <span className="tabular-nums" style={{ color: d.failCount ? PERF_5XX_COLOR : '#30363d', textAlign: 'right' }}>{d.failCount.toLocaleString()}</span>
+              <span style={{ color: UI.textDim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.target || '—'}</span>
+              <span className="tabular-nums" style={{ color: UI.textDim, textAlign: 'right' }}>{d.count.toLocaleString()}</span>
+              <span className="tabular-nums" style={{ color: d.failCount ? PERF_5XX_COLOR : UI.border, textAlign: 'right' }}>{d.failCount.toLocaleString()}</span>
               <span className="tabular-nums" style={{ color: msColor(d.avgMs), textAlign: 'right' }}>{fmtMs(d.avgMs)}</span>
               <span className="tabular-nums" style={{ color: msColor(d.p95), textAlign: 'right' }}>{fmtMs(d.p95)}</span>
-              <span className="tabular-nums" style={{ color: '#8b9ab3', textAlign: 'right' }}>{fmtMs(d.totalMs)}</span>
+              <span className="tabular-nums" style={{ color: UI.textMuted, textAlign: 'right' }}>{fmtMs(d.totalMs)}</span>
             </div>
             );
           })}
@@ -384,8 +385,8 @@ export function PerformancePanel({
                 segmentLabels={{ ok: 'succeeded', c5: 'failed' }}
                 countNoun="Calls"
               />
-              <div style={{ color: '#484f58', paddingLeft: 8 }}>
-                <span style={{ color: '#cdd9e5' }}>{chartedDep.name}</span>
+              <div style={{ color: UI.textDim, paddingLeft: 8 }}>
+                <span style={{ color: UI.text }}>{chartedDep.name}</span>
                 {chartedDep.target ? ` → ${chartedDep.target}` : ''} — calls per {deps?.bin ?? 'bucket'}, coloured by
                 outcome, with P95 solid and average dashed on the right axis. Click the row again to hide it.
               </div>
@@ -394,7 +395,7 @@ export function PerformancePanel({
           {/* Stays with the block it explains rather than in a footnote under the whole
               panel — and it is the caveat that matters, since an endpoint's calls summing
               to less than the app-wide Dependencies row is expected, not a discrepancy. */}
-          <div style={{ color: '#484f58', marginTop: 2 }}>
+          <div style={{ color: UI.textDim, marginTop: 2 }}>
             Attributed by the dependency&apos;s operation name and ranked by total time — calls raised outside a
             request carry no operation name, so they appear in the Dependencies row but not here.
           </div>
@@ -411,14 +412,14 @@ export function PerformancePanel({
           says WHY the bars above look like that. */}
       {selected && codes.length > 0 && (
         <div style={{ marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 4 }}>
-          <div style={{ color: '#6e7681', fontWeight: 600, marginBottom: 2 }}>
-            Failure codes from <span style={{ color: '#cdd9e5' }}>{selected}</span>
-            <span style={{ fontWeight: 400, color: '#484f58' }}>
+          <div style={{ color: UI.textDim, fontWeight: 600, marginBottom: 2 }}>
+            Failure codes from <span style={{ color: UI.text }}>{selected}</span>
+            <span style={{ fontWeight: 400, color: UI.textDim }}>
               {' — '}{(ct.c4 + ct.c5).toLocaleString()} failed request{ct.c4 + ct.c5 === 1 ? '' : 's'}
               {' across '}{codes.length} code{codes.length === 1 ? '' : 's'}
             </span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: CODE_GRID, gap: 6, color: '#6e7681', fontWeight: 600, marginBottom: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: CODE_GRID, gap: 6, color: UI.textDim, fontWeight: 600, marginBottom: 1 }}>
             <span>code</span>
             <span>reason</span>
             <span>count</span>
@@ -437,14 +438,14 @@ export function PerformancePanel({
                 }`}
               >
                 <span className="tabular-nums" style={{ color, fontWeight: 600 }}>{c.code}</span>
-                <span style={{ color: '#8b9ab3' }}>{httpStatusLabel(c.code)}</span>
+                <span style={{ color: UI.textMuted }}>{httpStatusLabel(c.code)}</span>
                 <span className="tabular-nums" style={{ color, whiteSpace: 'nowrap' }}>
                   {c.count.toLocaleString()}
                   {/* The share is of its own class, not of all failures: 404s and 500s
                       are different questions, and one percentage over both answers
                       neither. */}
                   {classTotal > 0 && (
-                    <span style={{ color: '#484f58' }}> ({(c.count / classTotal * 100).toFixed(1)}% of {c.cls})</span>
+                    <span style={{ color: UI.textDim }}> ({(c.count / classTotal * 100).toFixed(1)}% of {c.cls})</span>
                   )}
                 </span>
               </div>
@@ -530,7 +531,7 @@ export function PerformanceRows({
               number would be the widest thing in the row for the least information. */}
           {has && (
             <span
-              style={{ marginLeft: 6, fontWeight: 400, fontSize: 10, color: '#484f58' }}
+              style={{ marginLeft: 6, fontWeight: 400, fontSize: 10, color: UI.textDim }}
               title={`${t.endpoints} endpoints in the merged set${t.failing > 0 ? `, ${t.failing} of them returning 5xx` : ''}`}
             >
               {t.endpoints} endpoints
@@ -559,21 +560,21 @@ export function PerformanceRows({
                 <span
                   title={`${fiveXx.toLocaleString()} server errors (5xx) and ${fourXx.toLocaleString()} client errors (4xx) out of ${total.toLocaleString()} requests to the whole app — ${total > 0 ? ((fiveXx + fourXx) / total * 100).toFixed(2) : '0.00'}% failed.\n\nApp-wide, not just the merged endpoint set listed below (the ten busiest, the ten worst 4xx, and every endpoint with a 5xx).`}
                 >
-                  <span style={{ color: '#6e7681' }}>Request - </span>
-                  <span style={{ color: fiveXx > 0 ? PERF_5XX_COLOR : '#484f58', fontSize: 10 }}>{fiveXx.toLocaleString()} ({fmtPct(fiveXx, total)})</span>
-                  <span style={{ color: '#484f58' }}> / </span>
-                  <span style={{ color: fourXx > 0 ? PERF_4XX_COLOR : '#484f58', fontSize: 10 }}>{fourXx.toLocaleString()} ({fmtPct(fourXx, total)})</span>
-                  <span style={{ color: '#484f58' }}> / </span>
+                  <span style={{ color: UI.textDim }}>Request - </span>
+                  <span style={{ color: fiveXx > 0 ? PERF_5XX_COLOR : UI.textDim, fontSize: 10 }}>{fiveXx.toLocaleString()} ({fmtPct(fiveXx, total)})</span>
+                  <span style={{ color: UI.textDim }}> / </span>
+                  <span style={{ color: fourXx > 0 ? PERF_4XX_COLOR : UI.textDim, fontSize: 10 }}>{fourXx.toLocaleString()} ({fmtPct(fourXx, total)})</span>
+                  <span style={{ color: UI.textDim }}> / </span>
                   <span style={{ color: PERF_LINE_COLOR }}>{total.toLocaleString()}</span>
                 </span>
                 <span
                   title={`P95 ${fmtMs(peakP95)} / average ${fmtMs(avgMs)} / slowest ${fmtMs(t.slowest)}.\n\nP95 is the worst bucket's P95 across the whole app, not a true app-wide percentile — percentiles cannot be averaged across buckets, so naming the worst is the only honest figure without the raw durations.\n\nThe average is weighted by request count, so a near-empty bucket at 8s does not drag it up as hard as a busy one at 40ms.\n\nSlowest is the single slowest request to any endpoint in the merged set below — the one figure here without an app-wide equivalent, since only endpoint rollups carry a single worst request.`}
                 >
-                  <span style={{ color: '#6e7681' }}>Response - </span>
+                  <span style={{ color: UI.textDim }}>Response - </span>
                   <span className="tabular-nums" style={{ color: msColor(peakP95), fontSize: 10 }}>{fmtMs(peakP95)}</span>
-                  <span style={{ color: '#484f58' }}> / </span>
+                  <span style={{ color: UI.textDim }}> / </span>
                   <span className="tabular-nums" style={{ color: msColor(avgMs), fontSize: 10 }}>{fmtMs(avgMs)}</span>
-                  <span style={{ color: '#484f58' }}> / </span>
+                  <span style={{ color: UI.textDim }}> / </span>
                   <span className="tabular-nums" style={{ color: msColor(t.slowest), fontSize: 10 }}>{fmtMs(t.slowest)}</span>
                 </span>
               </div>

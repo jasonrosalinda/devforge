@@ -9,6 +9,7 @@ import type { ReviewVerdict, UnusedAsset } from "@/types/unusedAssets.types";
 import { isElectron } from "@/lib/environment";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Hint } from "@/components/ui/hint";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -25,9 +26,9 @@ const VERDICT_LABEL: Record<ReviewVerdict["verdict"], string> = {
 };
 
 const VERDICT_COLOR: Record<ReviewVerdict["verdict"], string> = {
-    "confirmed-unused": "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
-    "false-positive": "bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30",
-    "needs-review": "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30",
+    "confirmed-unused": "bg-success/15 text-success border-success/30",
+    "false-positive": "bg-error/15 text-error border-error/30",
+    "needs-review": "bg-warning/15 text-warning border-warning/30",
 };
 
 type StatusFilter = "all" | ReviewVerdict["verdict"];
@@ -97,7 +98,7 @@ function ViewCodeButton({ asset, getSnippet }: { asset: UnusedAsset; getSnippet:
                 {snippet ? (
                     <pre className="text-xs overflow-x-auto rounded-md border bg-muted/30 p-3">
                         {snippet.map((line) => (
-                            <div key={line.number} className={cn("flex gap-3 px-1", line.isTarget && "bg-amber-500/15")}>
+                            <div key={line.number} className={cn("flex gap-3 px-1", line.isTarget && "bg-warning/15")}>
                                 <span className="text-muted-foreground select-none w-8 shrink-0 text-right">{line.number}</span>
                                 <span className="whitespace-pre">{line.text}</span>
                             </div>
@@ -220,7 +221,7 @@ function ResultTable({
                                 <StatusFilterBadge
                                     active={statusFilter === "confirmed-unused"}
                                     onClick={() => setStatusFilter((s) => (s === "confirmed-unused" ? "all" : "confirmed-unused"))}
-                                    className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                                    className="bg-success/15 text-success border-success/30"
                                 >
                                     {confirmedCount} confirmed unused
                                 </StatusFilterBadge>
@@ -229,7 +230,7 @@ function ResultTable({
                                 <StatusFilterBadge
                                     active={statusFilter === "false-positive"}
                                     onClick={() => setStatusFilter((s) => (s === "false-positive" ? "all" : "false-positive"))}
-                                    className="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30"
+                                    className="bg-error/15 text-error border-error/30"
                                 >
                                     {falsePositiveCount} false positive
                                 </StatusFilterBadge>
@@ -238,7 +239,7 @@ function ResultTable({
                                 <StatusFilterBadge
                                     active={statusFilter === "needs-review"}
                                     onClick={() => setStatusFilter((s) => (s === "needs-review" ? "all" : "needs-review"))}
-                                    className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                                    className="bg-warning/15 text-warning border-warning/30"
                                 >
                                     {needsReviewVerdictCount} needs review
                                 </StatusFilterBadge>
@@ -246,21 +247,24 @@ function ResultTable({
                         </div>
                         <div className="flex items-center gap-2">
                             {data.length > 0 && (
+                                <Hint label={reviewDisabledReason || 'Have Claude check each flagged asset for dynamic usage before you delete anything'}>
                                 <Button
                                     variant="outline"
                                     size="sm"
                                     onClick={onReview}
                                     disabled={reviewDisabled}
-                                    title={reviewDisabledReason}
                                 >
                                     {isReviewing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
                                     {isReviewing ? (reviewStage || "Reviewing…") : "Review with Claude"}
                                 </Button>
+                                </Hint>
                             )}
                             {isReviewing && (
-                                <Button variant="ghost" size="sm" onClick={onCancel} className="text-destructive hover:text-destructive">
-                                    Cancel
-                                </Button>
+                                <Hint label="Stop the review — items already checked keep their verdict">
+                                    <Button variant="ghost" size="sm" onClick={onCancel} className="text-destructive hover:text-destructive">
+                                        Cancel
+                                    </Button>
+                                </Hint>
                             )}
                             <DataTableSearchBox table={table} placeholder={placeholder} />
                         </div>
@@ -376,26 +380,31 @@ export default function UnusedAssetsScan() {
                             disabled={isScanning}
                         />
                         {result && (
-                            <Button
-                                variant="outline"
-                                onClick={handleSaveHistory}
-                                disabled={!allReviewed}
-                                title={allReviewed ? "Save this scan so you can reload it later" : "Review all flagged items with Claude before saving"}
-                            >
-                                <Save className="w-4 h-4" />
-                                Save
-                            </Button>
+                            <Hint label={allReviewed ? 'Save this scan so you can reload it later' : 'Review all flagged items with Claude before saving'}>
+                                <Button
+                                    variant="outline"
+                                    onClick={handleSaveHistory}
+                                    disabled={!allReviewed}
+                                >
+                                    <Save className="w-4 h-4" />
+                                    Save
+                                </Button>
+                            </Hint>
                         )}
                         {result && (
-                            <Button variant="outline" onClick={handleReport} title="Download a Markdown report of the findings">
-                                <FileText className="w-4 h-4" />
-                                Report
-                            </Button>
+                            <Hint label="Download a Markdown report of everything this scan found">
+                                <Button variant="outline" onClick={handleReport}>
+                                    <FileText className="w-4 h-4" />
+                                    Report
+                                </Button>
+                            </Hint>
                         )}
-                        <Button onClick={() => inputRef.current?.click()} disabled={isScanning}>
-                            {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                            {isScanning ? `Scanning ${progress.processed}/${progress.total}` : "Select Folder"}
-                        </Button>
+                        <Hint label={isScanning ? 'Scan in progress…' : 'Pick the solution folder to scan for unused CSS classes, ids and JS functions'}>
+                            <Button onClick={() => inputRef.current?.click()} disabled={isScanning}>
+                                {isScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                                {isScanning ? `Scanning ${progress.processed}/${progress.total}` : "Select Folder"}
+                            </Button>
+                        </Hint>
                     </div>
                     <input
                         ref={inputRef}

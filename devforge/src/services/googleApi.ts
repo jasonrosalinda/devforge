@@ -1,14 +1,12 @@
-import type { PageSpeedErrorResponse, PageSpeedApiResponse, PageSpeedStrategy, PageSpeedInsightResult } from "@shared/types/pageSpeedInsight.types";
+import type { PageSpeedErrorResponse, PageSpeedApiResponse, PageSpeedStrategy, PageSpeedInsightResult, PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
 import { buildErrorPageSpeedInsightResult, parseToPageSpeedInsightResult } from "@shared/utils/pageSpeedAuditParser";
-import { getPageSpeedInsightResultAverage } from "@/lib/pageSpeedUtils";
+import { aggregatePageSpeedInsightResults } from "@/lib/pageSpeedUtils";
 import { formatMs } from "@shared/utils/formatingHelper";
 
 const API_BASE_URL = "https://www.googleapis.com";
 
-const RUN_MODE_COUNT: Record<'single' | 'average', number> = {
-  single: 1,
-  average: 3,
-};
+const MIN_RUNS = 1;
+const MAX_RUNS = 10;
 
 class GoogleApiService {
   private async request<T>(endpoint: string, options?: RequestInit, signal?: AbortSignal): Promise<T> {
@@ -33,10 +31,11 @@ class GoogleApiService {
     url: string,
     apiKey: string,
     strategy: PageSpeedStrategy,
-    runMode: 'single' | 'average' = 'single',
+    runs: number = MIN_RUNS,
+    aggregation: PageSpeedConfiguration['aggregation'] = 'average',
     signal?: AbortSignal,
   ): Promise<PageSpeedInsightResult> {
-    const numRuns = RUN_MODE_COUNT[runMode];
+    const numRuns = Math.min(MAX_RUNS, Math.max(MIN_RUNS, Math.round(runs) || MIN_RUNS));
     const endpoint = `/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&key=${apiKey}&strategy=${strategy}&category=performance&locale=en`;
 
     const results: PageSpeedInsightResult[] = [];
@@ -68,7 +67,7 @@ class GoogleApiService {
       }
     }
 
-    return getPageSpeedInsightResultAverage(url, results);
+    return aggregatePageSpeedInsightResults(url, results, aggregation);
   }
 }
 

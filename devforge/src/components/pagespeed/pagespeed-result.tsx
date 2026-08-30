@@ -7,10 +7,12 @@ type AnalysisStatus = 'running' | 'done' | 'error';
 import { useCopyElementAsImage } from '../../hooks/useCopyElementAsImage';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Button, Toast } from '../ui';
+import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, getPageSpeedInsightResultAverage } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults } from '@/lib/pageSpeedUtils';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
+import { Skeleton } from '@/components/ui/skeleton';
 import type { StrategySnapshot } from '@/lib/pagespeed-history';
 type AuditSlot = PageSpeedInsightResult | null | false | undefined;
 type AuditTimes = { start: Date | null; end: Date | null };
@@ -72,27 +74,29 @@ const CollapsibleMessages = ({ messages, forceExpanded }: { messages: PageSpeedI
         }
     });
 
-    const summaryColor = hasErrors ? 'text-red-500' : 'text-orange-500';
+    const summaryColor = hasErrors ? 'text-error' : 'text-warning';
 
     return (
         <div className="mt-1">
-            <button title="Toggle errors and warnings" onClick={() => setIsExpanded(!isExpanded)} className={`flex items-center text-xs hover:opacity-80 transition-opacity ${summaryColor}`}>
+            <Hint label={expanded ? 'Hide the errors and warnings from this run' : 'Show the errors and warnings from this run'}>
+            <button onClick={() => setIsExpanded(!isExpanded)} className={`flex items-center text-xs hover:opacity-80 transition-opacity ${summaryColor}`}>
                 {expanded ? <ChevronDown size={14} className="mr-1 inline" data-html2canvas-ignore="true" /> : <ChevronRight size={14} className="mr-1 inline" data-html2canvas-ignore="true" />}
                 {warningCount > 0 && `${warningCount} warning(s)`}
                 {warningCount > 0 && errorCount > 0 && ' / '}
                 {errorCount > 0 && `${errorCount} error(s)`}
             </button>
+            </Hint>
             {expanded && (
                 <div className="ml-4 mt-2 space-y-2">
                     {unparsed.map((p, i) => (
-                        <p key={`u-${i}`} className={`text-xs ${p.isError ? 'text-red-500' : 'text-orange-500'}`}>* {p.message}</p>
+                        <p key={`u-${i}`} className={`text-xs ${p.isError ? 'text-error' : 'text-warning'}`}>* {p.message}</p>
                     ))}
                     {Object.entries(groups).map(([groupName, groupMessages], i) => (
                         <div key={i} className="space-y-1">
                             <div className="text-xs font-semibold text-muted-foreground">{groupName}</div>
                             <div className="pl-2 border-l border-border space-y-1">
                                 {groupMessages.map((m, j) => (
-                                    <p key={j} className={`text-xs ${m.isError ? 'text-red-500' : 'text-orange-500'}`}>* {m.message}</p>
+                                    <p key={j} className={`text-xs ${m.isError ? 'text-error' : 'text-warning'}`}>* {m.message}</p>
                                 ))}
                             </div>
                         </div>
@@ -144,6 +148,23 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [results1, results2]);
 
+    // Aggregation only applies when a URL's runs collapse into one row, which happens at
+    // audit time — so switching Average↔Median afterwards has to recompute the stored rows
+    // from their run history, otherwise the table keeps showing the old statistic until a re-run.
+    const aggregationRef = useRef(config.aggregation);
+    useEffect(() => {
+        if (aggregationRef.current === config.aggregation) return;
+        aggregationRef.current = config.aggregation;
+        const reaggregate = (slots: AuditSlot[]): AuditSlot[] => slots.map(slot => {
+            if (!slot || typeof slot !== 'object') return slot;
+            const history = slot.runHistory;
+            if (!history || history.length < 2) return slot;
+            return aggregatePageSpeedInsightResults(slot.url, history, config.aggregation);
+        });
+        setResults1(prev => reaggregate(prev));
+        setResults2(prev => reaggregate(prev));
+    }, [config.aggregation]);
+
     useEffect(() => {
         if (!timerActive || !auditStart) return;
         setElapsed(0);
@@ -157,7 +178,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const showAnalyzeButton = config.urls.length > 0 && !isNullOrEmpty(config.apiKey);
     const toast = Toast();
     const hasSubHead = !!(displayAudit.before && displayAudit.after);
-    const isAccuracyMode = config.runMode === 'average';
+    const isMultiRun = config.runs > 1;
 
 
     const toggleHistory = (index: number) => {
@@ -189,11 +210,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
     const MAX_RETRIES = 2;
 
-    const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal, runMode?: PageSpeedConfiguration['runMode']): Promise<PageSpeedInsightResult> => {
+    const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal, runs?: number): Promise<PageSpeedInsightResult> => {
         let lastError: unknown;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
-                return await audit(url, signal, runMode);
+                return await audit(url, signal, runs);
             } catch (err) {
                 if (err instanceof DOMException && err.name === 'AbortError') throw err;
                 lastError = err;
@@ -224,7 +245,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         setResults(new Array(config.urls.length).fill(null));
 
         try {
-            const effectiveConcurrency = config.concurrency;
             const urlQueue: Array<[number, string]> = [...config.urls.entries()];
 
             const worker = async () => {
@@ -251,7 +271,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 }
             };
 
-            await Promise.all(Array.from({ length: effectiveConcurrency }, worker));
+            await worker();
         } finally {
             setResults(prev => prev.map(slot => (slot === null ? undefined : slot)));
             setTimes(prev => ({ ...prev, end: new Date() }));
@@ -342,9 +362,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 // Re-run each failed run as a single audit, splice back into the run list, re-average.
                 const merged = [...history];
                 for (const fi of failedRunIdx) {
-                    merged[fi] = await auditWithRetry(url, undefined, 'single');
+                    merged[fi] = await auditWithRetry(url, undefined, 1);
                 }
-                result = getPageSpeedInsightResultAverage(url, merged);
+                result = aggregatePageSpeedInsightResults(url, merged, config.aggregation);
             } else {
                 result = await auditWithRetry(url);
             }
@@ -392,10 +412,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         setRerunningRuns(prev => new Set(prev).add(runKey));
 
         try {
-            const fresh = await auditWithRetry(url, undefined, 'single');
+            const fresh = await auditWithRetry(url, undefined, 1);
             const merged = [...history];
             merged[runIdx] = fresh;
-            const result = getPageSpeedInsightResultAverage(url, merged);
+            const result = aggregatePageSpeedInsightResults(url, merged, config.aggregation);
             setResults(prev => {
                 const next = [...prev];
                 next[index] = result;
@@ -429,10 +449,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const improvement = ((before - after) / before) * 100;
         const formatted = improvement.toFixed(2);
         const color = improvement >= 0
-            ? 'text-green-500'
+            ? 'text-success'
             : Math.abs(improvement) > config.improvementThreshold
-                ? 'text-red-500'
-                : 'text-orange-500';
+                ? 'text-error'
+                : 'text-warning';
         return (
             <div className={color}>
                 {improvement > 0 ? `+${formatted}%` : `${formatted}%`}
@@ -540,7 +560,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
         const analysisMd = analyses[-1]?.status === 'done' ? analyses[-1]!.markdown : '';
         const analysisHtml = analysisMd ? `<br/>${marked.parse(analysisMd, { async: false }) as string}` : '';
-        const title = `${config.strategy.toUpperCase()} — PageSpeed${config.comparisonMode ? ` (${config.beforeLabel} vs ${config.afterLabel})` : ''}`;
+        const titleParts = [
+            config.runs > 1 ? (config.aggregation === 'median' ? 'Median' : 'Average') : '',
+            config.comparisonMode ? `${config.beforeLabel} vs ${config.afterLabel}` : '',
+        ].filter(Boolean);
+        const title = `${config.strategy.toUpperCase()} — PageSpeed${titleParts.length ? ` (${titleParts.join(' · ')})` : ''}`;
         const html = `<h3>${title}</h3>${tableHtml}${analysisHtml}`;
 
         const plain = `${title}\n` + config.urls.map((url, i) => {
@@ -631,7 +655,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     };
 
     const cellValue = (slot: AuditSlot, metric: PageSpeedMetrics | undefined): React.ReactNode => {
-        if (slot === null) return <Loader2 className="animate-spin mx-auto" size={20} />;
+        // A per-cell spinner reads as a hang once a URL is auditing for minutes
+        // (runs is now up to 10). A bar the width of the value it stands in for
+        // keeps the column from resizing when the number lands.
+        if (slot === null) return <Skeleton className="mx-auto h-4 w-12" />;
         if (slot === undefined) return <span>-</span>;
         // Show metric when available — even on partial run failure the average is still valid
         if (metric?.displayValue) return metric.displayValue;
@@ -657,16 +684,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const rowKey = `${slotKey}-${index}`;
         const isRetrying = retryingRows.has(rowKey);
         return (
-            <Button
-                variant="ghost"
-                size="sm"
-                className="h-2.5 w-2.5 p-0"
-                disabled={isRetrying || isAuditing}
-                onClick={() => retryRow(index, setResults, slotKey)}
-                data-html2canvas-ignore="true"
-            >
-                <RotateCcw className={`h-2 w-2 ${isRetrying ? 'animate-spin' : ''}`} />
-            </Button>
+            <Hint label={isRetrying ? 'Retrying this URL...' : 'This audit failed - retry just the failed runs and re-aggregate'}>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-2.5 w-2.5 p-0"
+                    disabled={isRetrying || isAuditing}
+                    onClick={() => retryRow(index, setResults, slotKey)}
+                    data-html2canvas-ignore="true"
+                >
+                    <RotateCcw className={`h-2 w-2 ${isRetrying ? 'animate-spin' : ''}`} />
+                </Button>
+            </Hint>
         );
     };
 
@@ -679,17 +708,19 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     ): React.ReactNode => {
         const busy = retryingRows.has(`${slotKey}-${index}`);
         return (
-            <Button
-                variant="outline"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                disabled={busy || isAuditing || isRetryingAny}
-                onClick={() => retryRow(index, setResults, slotKey)}
-                data-html2canvas-ignore="true"
-            >
-                <RotateCw className={`mr-1 h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
-                Re-run
-            </Button>
+            <Hint label="Audit this URL again and replace this result">
+                <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    disabled={busy || isAuditing || isRetryingAny}
+                    onClick={() => retryRow(index, setResults, slotKey)}
+                    data-html2canvas-ignore="true"
+                >
+                    <RotateCw className={`mr-1 h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
+                    Re-run
+                </Button>
+            </Hint>
         );
     };
 
@@ -714,16 +745,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
     const scoreColor = (score: number | null): string => {
         if (score === null) return 'text-muted-foreground';
-        if (score >= 0.9) return 'text-green-500';
-        if (score >= 0.5) return 'text-orange-500';
-        return 'text-red-500';
+        if (score >= 0.9) return 'text-success';
+        if (score >= 0.5) return 'text-warning';
+        return 'text-error';
     };
 
     const severityIcon = (score: number | null): React.ReactNode => {
         if (score === null) return <Circle className="h-3.5 w-3.5 text-muted-foreground shrink-0" />;
-        if (score < 0.5) return <Triangle className="h-3.5 w-3.5 fill-red-500 text-red-500 shrink-0" />;
-        if (score < 0.9) return <Square className="h-3.5 w-3.5 fill-orange-500 text-orange-500 shrink-0" />;
-        return <Circle className="h-3.5 w-3.5 fill-green-500 text-green-500 shrink-0" />;
+        if (score < 0.5) return <Triangle className="h-3.5 w-3.5 fill-red-500 text-error shrink-0" />;
+        if (score < 0.9) return <Square className="h-3.5 w-3.5 fill-orange-500 text-warning shrink-0" />;
+        return <Circle className="h-3.5 w-3.5 fill-green-500 text-success shrink-0" />;
     };
 
     // Network-tree insight has no displayValue — its headline number is longestChain.duration.
@@ -849,13 +880,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             const longest = !!n.isLongest;
             const row = (
                 <div key={k} className="flex items-baseline gap-2 py-0.5 leading-tight" style={{ paddingLeft: depth * 16 }}>
-                    <span className={`break-all ${longest ? 'text-red-500' : 'text-foreground'}`}>
+                    <span className={`break-all ${longest ? 'text-error' : 'text-foreground'}`}>
                         {depth > 0 && <span className="mr-1 text-muted-foreground">└</span>}
                         {tail}
                         {host && <span className="text-muted-foreground"> ({host})</span>}
                     </span>
                     <span className="ml-auto whitespace-nowrap text-muted-foreground">
-                        {t !== undefined && <span className={`font-medium ${longest ? 'text-red-500' : 'text-foreground'}`}>{Math.round(t).toLocaleString()} ms</span>}
+                        {t !== undefined && <span className={`font-medium ${longest ? 'text-error' : 'text-foreground'}`}>{Math.round(t).toLocaleString()} ms</span>}
                         {sz !== undefined && <span>, {(sz / 1024).toFixed(2)} KiB</span>}
                     </span>
                 </div>
@@ -988,6 +1019,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const metrics = o.metricSavings ? Object.keys(o.metricSavings) : [];
         return (
             <div key={key} className="border-b border-border last:border-0">
+                <Hint label={hasDetail ? (open ? 'Hide what Lighthouse found' : 'Show what Lighthouse found and the resources it affects') : ''} className="w-full">
                 <button
                     onClick={() => hasDetail && toggleInsight(key)}
                     className={`w-full flex items-center gap-2 px-3 py-2 text-left ${hasDetail ? 'hover:bg-muted/40 cursor-pointer' : 'cursor-default'}`}
@@ -1003,6 +1035,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     )}
                 </button>
+                </Hint>
                 {open && hasDetail && (
                     <div className="px-3 pb-3 pt-1 space-y-2">
                         {o.description && <p className="text-xs text-muted-foreground leading-relaxed">{renderDescription(o.description)}</p>}
@@ -1024,6 +1057,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const open = expandedInsights.has(groupKey);
         return (
             <div className="mt-3">
+                <Hint label={open ? `Hide these ${items.length} items` : `Show these ${items.length} items`} side="right">
                 <button
                     onClick={() => toggleInsight(groupKey)}
                     className="flex items-center gap-1 mb-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground"
@@ -1031,6 +1065,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     {heading} ({items.length})
                 </button>
+                </Hint>
                 {open && (
                     <div className="border border-border rounded-md overflow-hidden bg-background">
                         {items.map(o => renderInsightRow(o, idPrefix, occurrences?.[o.auditKey ?? o.title]))}
@@ -1193,7 +1228,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return [
             `URL: ${url}`,
             `Strategy: ${config.strategy}`,
-            `Run mode: ${config.runMode}${isAccuracyMode && h1 ? ` (${h1.length} runs)` : ''}`,
+            `Runs: ${config.runs}${isMultiRun ? ` (${config.aggregation})` : ''}${isMultiRun && h1 ? ` — ${h1.length} completed` : ''}`,
             '',
             slot(config.beforeLabel, r1, h1),
             slot(config.afterLabel, r2, h2),
@@ -1289,6 +1324,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return (
             <div className="mt-3 border border-border rounded-md bg-background">
                 <div className="flex items-center justify-between px-3 py-2">
+                    <Hint label={open ? 'Collapse this analysis' : 'Expand this analysis'} side="right" className="flex-1">
                     <button
                         onClick={() => toggleInsight(ek)}
                         className="flex flex-1 items-center gap-1 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground text-left"
@@ -1297,17 +1333,19 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         {heading}
                         <ChevronDown className={`ml-auto h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     </button>
+                    </Hint>
                     {a?.status === 'done' && (
                         <div className="flex items-center gap-1" data-html2canvas-ignore="true">
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 w-6 p-0 text-muted-foreground"
-                                onClick={() => createBrief(key)}
-                                title="Save a fix brief into a project/repo folder for an AI coding agent"
-                            >
-                                <FileDown className="h-3.5 w-3.5" />
-                            </Button>
+                            <Hint label="Save this as a fix brief in a project folder, ready to hand to an AI coding agent">
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0 text-muted-foreground"
+                                    onClick={() => createBrief(key)}
+                                >
+                                    <FileDown className="h-3.5 w-3.5" />
+                                </Button>
+                            </Hint>
                             <Button
                                 variant="ghost"
                                 size="sm"
@@ -1326,19 +1364,23 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             >
                                 <Copy className="h-3.5 w-3.5" />
                             </Button>
-                            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" disabled={isAuditing} onClick={run} title="Re-run analysis">
-                                <RotateCw className="h-3.5 w-3.5" />
-                            </Button>
+                            <Hint label="Ask Claude again - replaces the analysis below">
+                                <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" disabled={isAuditing} onClick={run}>
+                                    <RotateCw className="h-3.5 w-3.5" />
+                                </Button>
+                            </Hint>
                         </div>
                     )}
                 </div>
                 {open && (
                     <div className="border-t border-border p-3 text-xs">
                         {!a && (
-                            <Button variant="outline" size="sm" disabled={isAuditing} onClick={run} data-html2canvas-ignore="true">
-                                <Sparkles className="mr-1.5 h-3.5 w-3.5 text-primary" />
-                                {buttonLabel}
-                            </Button>
+                            <Hint label="Have Claude read this URL's results and explain what changed and why">
+                                <Button variant="outline" size="sm" disabled={isAuditing} onClick={run} data-html2canvas-ignore="true">
+                                    <Sparkles className="mr-1.5 h-3.5 w-3.5 text-primary" />
+                                    {buttonLabel}
+                                </Button>
+                            </Hint>
                         )}
                         {a?.status === 'running' && (
                             <div className="flex flex-col gap-2">
@@ -1357,9 +1399,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                     <AlertTriangle className="h-4 w-4" />
                                     <span>{a.error || 'Something went wrong.'}</span>
                                 </div>
-                                <Button variant="outline" size="sm" onClick={run} data-html2canvas-ignore="true">
-                                    <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-                                </Button>
+                                <Hint label="Try the analysis again">
+                                    <Button variant="outline" size="sm" onClick={run} data-html2canvas-ignore="true">
+                                        <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
+                                    </Button>
+                                </Hint>
                             </div>
                         )}
                         {a?.status === 'done' && (
@@ -1396,7 +1440,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const renderRunHistory = (history: PageSpeedInsightResult[], index: number, slotKey: '1' | '2'): React.ReactNode => {
         const matches = crossRunMatches(index);
         const hl = (key: 'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint', run: PageSpeedInsightResult): string =>
-            matches.get(key)?.has(run[key]?.displayValue ?? '') ? ' italic font-semibold text-amber-400' : '';
+            matches.get(key)?.has(run[key]?.displayValue ?? '') ? ' italic font-semibold text-warning' : '';
         return (
             <table className="w-full text-xs">
                 <thead>
@@ -1425,14 +1469,15 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 {displayAudit.FCP && <td className={`text-center py-1 px-2${hl('firstContentfulPaint', run)}`}>{historyMetricValue(run.firstContentfulPaint)}</td>}
                                 {!copying && (
                                     <td className="py-1 px-2 w-px whitespace-nowrap text-right" data-html2canvas-ignore="true">
-                                        <button
-                                            onClick={() => rerunSingleRun(index, runIdx, slotKey)}
-                                            disabled={isAuditing || isRetryingAny || rerunning}
-                                            title={`Re-run run #${runIdx + 1}`}
-                                            className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                                        >
-                                            <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
-                                        </button>
+                                        <Hint label={`Re-run only run #${runIdx + 1}, then re-aggregate this row`}>
+                                            <button
+                                                onClick={() => rerunSingleRun(index, runIdx, slotKey)}
+                                                disabled={isAuditing || isRetryingAny || rerunning}
+                                                className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors"
+                                            >
+                                                <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
+                                            </button>
+                                        </Hint>
                                     </td>
                                 )}
                             </tr>
@@ -1473,7 +1518,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             {metrics1 && metrics2
                                 ? calculateImprovement(displayNum(metrics1), displayNum(metrics2))
                                 : isAuditing
-                                    ? <Loader2 className="animate-spin mx-auto" size={20} />
+                                    ? <Skeleton className="mx-auto h-4 w-12" />
                                     : '-'}
                         </TableCell>
                     )}
@@ -1493,64 +1538,78 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         <div className="flex items-center gap-2">
                             {config.comparisonMode && (
                                 <>
+                                    <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}on ${config.strategy} and fill the ${config.beforeLabel} columns`}>
+                                        <Button variant="outline" onClick={audit1} disabled={isAuditing}>
+                                            {auditing1 ? (
+                                                <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                                                    <Loader2 className="animate-spin" size={14} />
+                                                    Analyzing {config.beforeLabel}
+                                                </span>
+                                            ) : (
+                                                <>Analyze {config.beforeLabel}</>
+                                            )}
+                                        </Button>
+                                    </Hint>
+                                    <Hint label={`Audit every URL again and fill the ${config.afterLabel} columns - run this after deploying your change`}>
+                                        <Button variant="outline" onClick={audit2} disabled={isAuditing}>
+                                            {auditing2 ? (
+                                                <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                                                    <Loader2 className="animate-spin" size={14} />
+                                                    Analyzing {config.afterLabel}
+                                                </span>
+                                            ) : (
+                                                <>Analyze {config.afterLabel}</>
+                                            )}
+                                        </Button>
+                                    </Hint>
+                                </>
+                            )}
+                            {!config.comparisonMode && (
+                                <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}on ${config.strategy}`}>
                                     <Button variant="outline" onClick={audit1} disabled={isAuditing}>
                                         {auditing1 ? (
                                             <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
                                                 <Loader2 className="animate-spin" size={14} />
-                                                Analyzing {config.beforeLabel}
+                                                Analyzing...
                                             </span>
                                         ) : (
-                                            <>Analyze {config.beforeLabel}</>
+                                            <>Analyze</>
                                         )}
                                     </Button>
-                                    <Button variant="outline" onClick={audit2} disabled={isAuditing}>
-                                        {auditing2 ? (
-                                            <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
-                                                <Loader2 className="animate-spin" size={14} />
-                                                Analyzing {config.afterLabel}
-                                            </span>
-                                        ) : (
-                                            <>Analyze {config.afterLabel}</>
-                                        )}
-                                    </Button>
-                                </>
-                            )}
-                            {!config.comparisonMode && (
-                                <Button variant="outline" onClick={audit1} disabled={isAuditing}>
-                                    {auditing1 ? (
-                                        <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
-                                            <Loader2 className="animate-spin" size={14} />
-                                            Analyzing...
-                                        </span>
-                                    ) : (
-                                        <>Analyze</>
-                                    )}
-                                </Button>
+                                </Hint>
                             )}
                             {isAuditing && (
-                                <Button variant="outline" onClick={() => abortControllerRef.current?.abort()}>
-                                    Cancel
-                                </Button>
+                                <Hint label="Stop this strategy's audit - URLs already measured keep their results">
+                                    <Button variant="outline" onClick={() => abortControllerRef.current?.abort()}>
+                                        Cancel
+                                    </Button>
+                                </Hint>
                             )}
                             {config.comparisonMode && config.urls.some((_, i) => getSlot1(i) && getSlot2(i)) && (
-                                <Button
-                                    variant="outline"
-                                    onClick={runAllAnalysis}
-                                    disabled={isAuditing || analyses[-1]?.status === 'running'}
-                                >
-                                    <Sparkles className="mr-1 h-4 w-4 text-primary" />
-                                    Claude Analysis
-                                </Button>
+                                <Hint label="Have Claude review every URL in this table at once and summarise the before/after">
+                                    <Button
+                                        variant="outline"
+                                        onClick={runAllAnalysis}
+                                        disabled={isAuditing || analyses[-1]?.status === 'running'}
+                                    >
+                                        <Sparkles className="mr-1 h-4 w-4 text-primary" />
+                                        Claude Analysis
+                                    </Button>
+                                </Hint>
                             )}
                             {config.urls.some((_, i) => getSlot1(i) || getSlot2(i)) && (
-                                <Button variant="outline" onClick={copyForTeams} disabled={copying}>
-                                    <Copy className="mr-1 h-4 w-4" />
-                                    Copy for Teams
-                                </Button>
+                                <Hint label={`Copy this ${config.strategy} table as rich text, ready to paste into Teams`}>
+                                    <Button variant="outline" onClick={copyForTeams} disabled={copying}>
+                                        <Copy className="mr-1 h-4 w-4" />
+                                        Copy for Teams
+                                    </Button>
+                                </Hint>
                             )}
-                            <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
-                                Copy as Image
-                            </Button>
+                            <Hint label="Copy this card to the clipboard as a PNG screenshot">
+                                <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
+                                    Copy as Image
+                                </Button>
+                            </Hint>
                         </div>
                     )}
                 </CardTitle>
@@ -1579,6 +1638,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             )}
                         </TableHeader>
                         <TableBody>
+                            {config.urls.length === 0 && (
+                                <TableRow>
+                                    <TableCell colSpan={99} className="py-10 text-center">
+                                        <p className="text-sm font-medium text-foreground">No URLs to audit</p>
+                                        <p className="mt-1 text-xs text-muted-foreground">
+                                            Open Configuration and add a URL, or upload a .txt file with one URL per line.
+                                        </p>
+                                    </TableCell>
+                                </TableRow>
+                            )}
                             {config.urls.map((url, index) => {
                                 const slot1 = getSlot1(index);
                                 const slot2 = getSlot2(index);
@@ -1586,13 +1655,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 const result2 = slot2 || undefined;
                                 const history1 = result1?.runHistory;
                                 const history2 = result2?.runHistory;
-                                const hasHistory = isAccuracyMode && (history1 || history2);
+                                const hasHistory = isMultiRun && (history1 || history2);
                                 const hasInsights = !!(
                                     result1?.opportunities?.some(o => o.type === 'opportunity') ||
                                     result2?.opportunities?.some(o => o.type === 'opportunity')
                                 );
                                 // Single-run rows expand too, so each slot's Re-run is always reachable.
-                                const hasSingleRun = !isAccuracyMode && !!(result1 || result2);
+                                const hasSingleRun = !isMultiRun && !!(result1 || result2);
                                 const hasDrawer = hasHistory || hasInsights || hasSingleRun;
                                 const isExpanded = expandedHistory.has(index);
 
@@ -1603,15 +1672,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                             <TableCell className={`sticky left-0 bg-background z-10 w-1/3 ${stickyBorder}`}>
                                                 <div className="flex items-start gap-1">
                                                     {!copying && hasDrawer && (
+                                                        <Hint label={isExpanded ? 'Hide the runs and insights for this URL' : 'Show the individual runs, Lighthouse insights and Claude analysis for this URL'}>
                                                         <button
                                                             onClick={() => toggleHistory(index)}
                                                             className="shrink-0 mt-0.5 p-0.5 rounded hover:bg-muted transition-colors"
-                                                            title={isExpanded ? 'Hide details' : 'Show details'}
                                                         >
                                                             <ChevronDown
                                                                 className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
                                                             />
                                                         </button>
+                                                        </Hint>
                                                     )}
                                                     <div className="flex-1">
                                                         <a href={url} target="_blank" rel="noopener noreferrer" className="break-all">
@@ -1647,10 +1717,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             return (
                                                             <div className={`rounded-md border border-border bg-background p-3 ${history2 ? 'mb-3' : ''}`}>
+                                                                <Hint label={cardOpen ? 'Collapse the individual runs' : 'Expand to see each run and re-run any one of them'} className="w-full">
                                                                 <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
                                                                     <p className="text-xs font-medium text-muted-foreground">{displayAudit.singleResult ? 'Individual Runs' : `${config.beforeLabel} — Individual Runs`}</p>
                                                                     <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                                                                 </button>
+                                                                </Hint>
                                                                 {cardOpen && (
                                                                     <>
                                                                         {renderRunHistory(history1, index, '1')}
@@ -1667,10 +1739,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             return (
                                                             <div className="rounded-md border border-border bg-background p-3">
+                                                                <Hint label={cardOpen ? 'Collapse the individual runs' : 'Expand to see each run and re-run any one of them'} className="w-full">
                                                                 <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
                                                                     <p className="text-xs font-medium text-muted-foreground">{config.afterLabel} — Individual Runs</p>
                                                                     <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                                                                 </button>
+                                                                </Hint>
                                                                 {cardOpen && (
                                                                     <>
                                                                         {renderRunHistory(history2, index, '2')}
@@ -1688,10 +1762,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             return (
                                                             <div className="mt-3 rounded-md border border-border bg-background p-3">
                                                                 <div className="mb-1.5 flex items-center gap-2">
+                                                                    <Hint label={cardOpen ? 'Collapse these details' : 'Expand the Lighthouse insights for this result'} className="flex-1">
                                                                     <button onClick={() => toggleRunCard(cardKey)} className="flex flex-1 items-center gap-2 text-left">
                                                                         <p className="text-xs font-semibold text-foreground">{displayAudit.singleResult ? 'Details' : config.beforeLabel}</p>
                                                                         <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                                                                     </button>
+                                                                    </Hint>
                                                                     {singleRunRerunButton(index, setResults1, '1')}
                                                                 </div>
                                                                 {cardOpen && renderInsights(result1, `${index}-1`)}
@@ -1705,10 +1781,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             return (
                                                             <div className="mt-3 rounded-md border border-border bg-background p-3">
                                                                 <div className="mb-1.5 flex items-center gap-2">
+                                                                    <Hint label={cardOpen ? 'Collapse these details' : 'Expand the Lighthouse insights for this result'} className="flex-1">
                                                                     <button onClick={() => toggleRunCard(cardKey)} className="flex flex-1 items-center gap-2 text-left">
                                                                         <p className="text-xs font-semibold text-foreground">{config.afterLabel}</p>
                                                                         <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                                                                     </button>
+                                                                    </Hint>
                                                                     {singleRunRerunButton(index, setResults2, '2')}
                                                                 </div>
                                                                 {cardOpen && renderInsights(result2, `${index}-2`)}

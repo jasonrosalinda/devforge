@@ -1,5 +1,6 @@
 import { History, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Hint } from "@/components/ui/hint";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -27,12 +28,14 @@ function summarize(snapshot: UnusedAssetsHistorySnapshot): string {
 export default function UnusedAssetsHistoryDropdown({ entries, onSelect, onDelete, onClear, disabled }: UnusedAssetsHistoryDropdownProps) {
     return (
         <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button variant="outline" disabled={disabled || entries.length === 0}>
-                    <History className="w-4 h-4" />
-                    History{entries.length > 0 ? ` (${entries.length})` : ""}
-                </Button>
-            </DropdownMenuTrigger>
+            <Hint label={entries.length === 0 ? 'No saved scans yet - use Save after a scan' : 'Reload a saved scan, Claude verdicts included'}>
+                <DropdownMenuTrigger asChild>
+                    <Button variant="outline" disabled={disabled || entries.length === 0}>
+                        <History className="w-4 h-4" />
+                        History{entries.length > 0 ? ` (${entries.length})` : ""}
+                    </Button>
+                </DropdownMenuTrigger>
+            </Hint>
             <DropdownMenuContent align="end" className="w-80">
                 <DropdownMenuLabel>Saved scans</DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -55,14 +58,15 @@ export default function UnusedAssetsHistoryDropdown({ entries, onSelect, onDelet
                                         {new Date(entry.savedAt).toLocaleString()} · {summarize(entry)}
                                     </span>
                                 </div>
-                                <button
-                                    type="button"
-                                    title="Delete"
-                                    className="text-muted-foreground hover:text-destructive shrink-0"
-                                    onClick={(e) => { e.stopPropagation(); onDelete(entry.id); }}
-                                >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                </button>
+                                <Hint label="Delete this saved scan" side="left">
+                                    <button
+                                        type="button"
+                                        className="text-muted-foreground hover:text-destructive shrink-0"
+                                        onClick={(e) => { e.stopPropagation(); onDelete(entry.id); }}
+                                    >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                </Hint>
                             </DropdownMenuItem>
                         ))}
                     </div>

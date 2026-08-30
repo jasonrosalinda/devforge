@@ -1,5 +1,6 @@
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import type { UptimeRobotMonitor, UptimeRobotLog } from '@/hooks/useUptimeRobotMonitor';
+import { UI } from '@/lib/chart-colors';
 
 export type RemarkKind =
   | 'CPU spike'
@@ -403,8 +404,8 @@ export function buildRemarks(
 }
 
 const SEVERITY_COLORS: Record<RemarkSeverity, string> = {
-  ok: '#3fb950',
-  warning: '#d29922',
+  ok: UI.success,
+  warning: UI.warning,
   critical: 'hsl(var(--destructive))',
 };
 

@@ -1,6 +1,7 @@
 import { useMemo, useEffect } from 'react';
 import { AppDropdown } from './appDropdown';
 import { C, GRANULARITIES, inputStyle, nowDt } from './styles';
+import { Hint } from '@/components/ui/hint';
 
 type Props = {
   notConfigured: boolean;
@@ -66,9 +67,9 @@ export function ControlBar(props: Props) {
           onChange={e => setEndDt(e.target.value)}
           style={inputStyle}
         />
+        <Hint label="Set the end time to now. Telemetry lags a few minutes, so the last bucket may be thin or empty.">
         <button
           onClick={() => setEndDt(nowDt())}
-          title="Set end to now. Telemetry lags a few minutes, so the last bucket may be thin or empty."
           style={{
             padding: '4px 8px',
             borderRadius: 6,
@@ -81,17 +82,22 @@ export function ControlBar(props: Props) {
         >
           Now
         </button>
+        </Hint>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{ fontSize: 11, color: C.textMuted }}>Interval:</span>
           {GRANULARITIES.map(g => {
             const disabled = spanHours > g.maxSpanHours;
             return (
-              <button
+              <Hint
                 key={g.value}
+                label={disabled
+                  ? `Unavailable above ${g.maxSpanHours}h of range - narrow the window to use ${g.label} buckets`
+                  : `Bucket the metrics every ${g.label}`}
+              >
+              <button
                 disabled={disabled}
                 onClick={() => !disabled && setGranularity(g.value)}
-                title={disabled ? `Max span ${g.maxSpanHours}h` : undefined}
                 style={{
                   padding: '3px 8px',
                   borderRadius: 5,
@@ -101,18 +107,20 @@ export function ControlBar(props: Props) {
                   fontSize: 11,
                   cursor: disabled ? 'not-allowed' : 'pointer',
                   opacity: disabled ? 0.4 : 1,
+                  pointerEvents: disabled ? 'none' : undefined,
                 }}
               >
                 {g.label}
               </button>
+              </Hint>
             );
           })}
         </div>
 
+        <Hint label={loading ? 'Fetching metrics from Azure Monitor…' : 'Fetch metrics for the selected apps and time range'}>
         <button
           onClick={onFetch}
           disabled={fetchDisabled}
-          title="Fetch Metrics"
           style={{
             padding: '5px 8px',
             borderRadius: 6,
@@ -123,6 +131,7 @@ export function ControlBar(props: Props) {
             cursor: fetchDisabled ? 'not-allowed' : 'pointer',
             display: 'flex', alignItems: 'center',
             opacity: fetchDisabled ? 0.4 : 1,
+            pointerEvents: fetchDisabled ? 'none' : undefined,
           }}
         >
           {loading ? (
@@ -133,6 +142,7 @@ export function ControlBar(props: Props) {
             }} />
           ) : '↻'}
         </button>
+        </Hint>
       </div>
 
     </div>

@@ -25,6 +25,17 @@
     --accent-foreground: 222.2 47.4% 11.2%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
+    /* Status tokens for diagnostic text, badges and pills. Distinct from
+       --destructive, which stays tuned for destructive *button* surfaces.
+       Light-mode values are darkened to clear 4.5:1 on --background. */
+    --success: 161 94% 30%;
+    --success-foreground: 0 0% 100%;
+    --warning: 26 90% 37%;
+    --warning-foreground: 0 0% 100%;
+    --error: 0 72% 45%;
+    --error-foreground: 0 0% 100%;
+    --info: 221 83% 48%;
+    --info-foreground: 0 0% 100%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
     --ring: 222.2 84% 4.9%;
@@ -61,6 +72,16 @@
     --accent-foreground: 210 40% 98%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
+    /* Dark mode lightens and desaturates rather than reusing the light values —
+       the light-mode ramps are far too dark to read on --background. */
+    --success: 158 64% 52%;
+    --success-foreground: 222.2 84% 4.9%;
+    --warning: 43 96% 56%;
+    --warning-foreground: 222.2 84% 4.9%;
+    --error: 0 91% 71%;
+    --error-foreground: 222.2 84% 4.9%;
+    --info: 213 94% 68%;
+    --info-foreground: 222.2 84% 4.9%;
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 212.7 26.8% 83.9%;
@@ -87,6 +108,33 @@
 
   body {
     @apply bg-background text-foreground;
+    font-family: 'Inter Variable', ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Browsers default <button> to cursor: default, and neither the shadcn Button
+     nor the raw buttons across the app override it — so every control read as
+     non-interactive. Set once here rather than per call site; anything explicitly
+     disabled keeps the not-allowed cursor. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* Metric tables compare numbers column-wise, so figures must not change width
+     between digits. Applied to the two data-table scroll wrappers rather than
+     globally, to keep proportional figures in prose. */
+  .table-scroll-area table,
+  .scrollable-content table {
+    font-variant-numeric: tabular-nums;
   }
 
   /* styles/scrollbar.css or in your globals.css */
@@ -245,5 +293,20 @@
   }
   .runbook-cell details[open] > summary::before {
     transform: rotate(90deg);
+  }
+}
+
+/* Honour the OS "reduce motion" setting. Deliberately outside @layer base so it
+   overrides Tailwind's animation/transition utilities, which sit in a later
+   layer. Kept at 0.01ms rather than 0 so transitionend/animationend still fire
+   and any handler waiting on them is not stranded. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

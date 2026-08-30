@@ -32,10 +32,26 @@ export interface PageSpeedHistorySnapshot {
     pageAnalysis?: { markdown: string } | null;
 }
 
+// Entries saved before runs/aggregation replaced runMode carry the old shape.
+// Map the retired `runMode` onto the current fields so a restore never yields
+// an undefined run count.
+export type LegacyConfig = PageSpeedConfiguration & { runMode?: 'single' | 'average'; concurrency?: number };
+
+export function migrateConfig(config: LegacyConfig): PageSpeedConfiguration {
+    const { runMode, concurrency, ...rest } = config;
+    void concurrency; // destructured only to strip the retired field
+    return {
+        ...rest,
+        runs: rest.runs ?? (runMode === 'average' ? 3 : 1),
+        aggregation: rest.aggregation ?? 'average',
+    };
+}
+
 export function loadHistory(): PageSpeedHistorySnapshot[] {
     try {
         const v = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-        return Array.isArray(v) ? (v as PageSpeedHistorySnapshot[]) : [];
+        if (!Array.isArray(v)) return [];
+        return (v as PageSpeedHistorySnapshot[]).map(s => ({ ...s, config: migrateConfig(s.config) }));
     } catch {
         return [];
     }

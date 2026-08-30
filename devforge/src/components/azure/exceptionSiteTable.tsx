@@ -7,6 +7,7 @@
 // is an attribute of it — named when it is the only one, counted when it is not.
 
 import type { ExceptionSiteRow } from '@shared/types/azureMetrics.types';
+import { UI } from '@/lib/chart-colors';
 
 /** Line numbers as the table shows them: "24, 54", or blank when the frames
  *  carried none. Zero is the sentinel for "no line info", never a real line. */
@@ -30,7 +31,7 @@ export function stackLabel(row: Pick<ExceptionSiteRow, 'assembly' | 'method' | '
 // Row content here is a wrapped file path several lines tall, so the vertical
 // padding has to be enough to keep one row's last line off the next row's first.
 const TH: React.CSSProperties = {
-  textAlign: 'left', fontWeight: 600, color: '#6e7681',
+  textAlign: 'left', fontWeight: 600, color: UI.textDim,
   padding: '5px 12px 6px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)',
   whiteSpace: 'nowrap',
 };
@@ -67,11 +68,11 @@ export function ExceptionSiteTable({ rows, topN }: {
             const endpoint = endpointLabel(r);
             return (
               <tr key={i}>
-                <td style={{ ...TD, fontFamily: 'monospace', color: '#3fb950', wordBreak: 'break-all' }} title={stackLabel(r)}>
+                <td style={{ ...TD, fontFamily: 'monospace', color: UI.success, wordBreak: 'break-all' }} title={stackLabel(r)}>
                   {stackLabel(r)}
                 </td>
                 <td
-                  style={{ ...TD, fontFamily: 'monospace', color: '#8b949e' }}
+                  style={{ ...TD, fontFamily: 'monospace', color: UI.textMuted }}
                   title={r.lines.length > 1 ? `${r.lines.length} distinct lines in this file threw` : undefined}
                 >
                   {lines}
@@ -81,7 +82,7 @@ export function ExceptionSiteTable({ rows, topN }: {
                 </td>
                 <td
                   className="tabular-nums"
-                  style={{ ...TD, textAlign: 'right', color: '#f85149', fontWeight: 600 }}
+                  style={{ ...TD, textAlign: 'right', color: UI.error, fontWeight: 600 }}
                   title={r.records !== r.trueCount
                     ? `${r.trueCount.toLocaleString()} occurrences, reconstructed from ${r.records.toLocaleString()} sampled records`
                     : undefined}
@@ -94,7 +95,7 @@ export function ExceptionSiteTable({ rows, topN }: {
         </tbody>
       </table>
       {topN != null && ranked.length >= topN && (
-        <div style={{ color: '#6e7681', paddingTop: 3 }}>
+        <div style={{ color: UI.textDim, paddingTop: 3 }}>
           Showing the {topN} highest-volume throw sites for this type.
         </div>
       )}

@@ -2,6 +2,7 @@ import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.type
 import { defaultPageSpeedConfiguration } from "@/lib/pageSpeedUtils";
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@/components/ui";
+import { Hint } from "@/components/ui/hint";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from "@/components/ui/drawer";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSet, FieldTitle } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
@@ -9,6 +10,10 @@ import { Activity, Cog, Link, Table2, Trash2, Wrench } from "lucide-react";
 import { Item, ItemActions, ItemContent, ItemTitle, } from "@/components/ui/item"
 import { Switch } from "../ui/switch";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../ui/accordion";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+const MIN_RUNS = 1;
+const MAX_RUNS = 10;
 
 export default function PageSpeedConfig({ configHasChanged, isAuditing, value, restoreToken }: { configHasChanged: (config: PageSpeedConfiguration) => void, isAuditing: boolean, value?: PageSpeedConfiguration | undefined, restoreToken?: number | undefined }) {
     const [config, setConfig] = useState(defaultPageSpeedConfiguration());
@@ -30,15 +35,14 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
         configHasChanged(state);
     };
 
-    const onRunModeChange = (e: boolean) => {
-        onSetConfigState({
-            ...config,
-            runMode: e ? "average" : "single",
-        });
+    const onRunsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const parsed = Number(e.target.value);
+        const runs = Number.isFinite(parsed) ? Math.min(MAX_RUNS, Math.max(MIN_RUNS, Math.round(parsed))) : MIN_RUNS;
+        onSetConfigState({ ...config, runs });
     };
 
-    const onConcurrencyChange = (value: string) => {
-        onSetConfigState({ ...config, concurrency: Number(value) as 1 | 2 | 3 });
+    const onAggregationChange = (value: string) => {
+        onSetConfigState({ ...config, aggregation: value as PageSpeedConfiguration['aggregation'] });
     };
 
     const onAddUrl = () => {
@@ -177,9 +181,11 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
             <Drawer direction="right">
                 <DrawerTrigger asChild>
                     <div className="flex justify-end">
+                        <Hint label="URLs, run count, comparison mode and which metrics the table shows">
                         <Button className="capitalize" variant="outline" disabled={isAuditing}>
                             <Cog className="mr-1 h-4 w-4" />Configuration
                         </Button>
+                        </Hint>
                     </div>
                 </DrawerTrigger>
                 <DrawerContent className="right-0 left-auto top-0 mt-0 h-full w-[400px] rounded-none flex flex-col">
@@ -195,56 +201,68 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                     <div className="flex items-center gap-2"><Wrench className="mr-1 h-4 w-4" />Mode</div>
                                 </AccordionTrigger>
                                 <AccordionContent>
-                                    <FieldLabel htmlFor="switch-runMode-mode" className="my-3">
+                                    <FieldLabel htmlFor="input-runs" className="my-3">
                                         <Field orientation="horizontal">
                                             <FieldContent>
-                                                <FieldTitle>Accuracy mode</FieldTitle>
+                                                <FieldTitle>Runs per URL</FieldTitle>
                                                 <FieldDescription className="text-xs text-muted-foreground">
-                                                    Average mode runs audit 3 times and averages the results.
+                                                    Audit each URL {MIN_RUNS}-{MAX_RUNS} times. A 3s pause separates runs.
                                                 </FieldDescription>
                                             </FieldContent>
-                                            <Switch id="switch-runMode-mode" checked={config.runMode === "average"} onCheckedChange={(e) => onRunModeChange(e)} />
+                                            <Input
+                                                id="input-runs"
+                                                type="number"
+                                                min={MIN_RUNS}
+                                                max={MAX_RUNS}
+                                                step={1}
+                                                value={config.runs}
+                                                onChange={onRunsChange}
+                                                className="w-20 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                            />
                                         </Field>
                                     </FieldLabel>
-                                    <FieldLabel htmlFor="select-concurrency" className="my-3">
-                                        <Field orientation="horizontal">
-                                            <FieldContent>
-                                                <FieldTitle>Parallel URLs</FieldTitle>
-                                                <FieldDescription className="text-xs text-muted-foreground">
-                                                    Audit multiple URLs simultaneously.
-                                                </FieldDescription>
-                                            </FieldContent>
-                                            <select
-                                                id="select-concurrency"
-                                                value={config.concurrency}
-                                                onChange={(e) => onConcurrencyChange(e.target.value)}
-                                                className="rounded border border-input bg-background px-2 py-1 text-sm"
-                                            >
-                                                <option value={1}>1 (safe)</option>
-                                                <option value={2}>2</option>
-                                                <option value={3}>3 (fastest)</option>
-                                            </select>
-                                        </Field>
-                                    </FieldLabel>
+                                    {config.runs > 1 && (
+                                        <FieldLabel htmlFor="select-aggregation" className="my-3">
+                                            <Field orientation="horizontal">
+                                                <FieldContent>
+                                                    <FieldTitle>Aggregation</FieldTitle>
+                                                    <FieldDescription className="text-xs text-muted-foreground">
+                                                        How the runs collapse into one result. Median discards outliers.
+                                                    </FieldDescription>
+                                                </FieldContent>
+                                                <Select value={config.aggregation} onValueChange={onAggregationChange}>
+                                                    <SelectTrigger id="select-aggregation" className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
+                                                    <SelectContent>
+                                                        <SelectItem value="average">Average</SelectItem>
+                                                        <SelectItem value="median">Median</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            </Field>
+                                        </FieldLabel>
+                                    )}
                                 </AccordionContent>
                             </AccordionItem>
 
                             <AccordionItem key="web-page-urls" value="web-page-urls" className="border-b px-4 last:border-b-0">
                                 <AccordionTrigger>
-                                    <div className="flex items-center gap-2"><Link className="mr-1 h-4 w-4 text-red-500" />Web page URL's </div>
+                                    <div className="flex items-center gap-2"><Link className="mr-1 h-4 w-4 text-error" />Web page URL's </div>
                                 </AccordionTrigger>
                                 <AccordionContent>
                                     <FieldGroup>
                                         <FieldSet>
                                             <Field>
                                                 <FieldLabel>URL</FieldLabel>
-                                                <Input value={url} onChange={(e) => setUrl(e.target.value)} className={isInvalidUrl ? 'border-red-500' : ''} />
+                                                <Input value={url} onChange={(e) => setUrl(e.target.value)} className={isInvalidUrl ? 'border-error' : ''} />
                                                 <FieldError>{isInvalidUrl ? '* Enter a valid URL.' : ''}</FieldError>
                                             </Field>
                                         </FieldSet>
                                         <Field>
-                                            <Button onClick={onAddUrl} className="w-full" variant="outline">Add</Button>
-                                            <Button onClick={onWebUrlsUploadClick} className="w-full" variant="outline">Upload</Button>
+                                            <Hint label="Add the URL above to the audit list" className="w-full">
+                                                <Button onClick={onAddUrl} className="w-full" variant="outline">Add</Button>
+                                            </Hint>
+                                            <Hint label="Load a .txt file with one URL per line - invalid lines are skipped" className="w-full">
+                                                <Button onClick={onWebUrlsUploadClick} className="w-full" variant="outline">Upload</Button>
+                                            </Hint>
                                             <input ref={webUrlsInputUpload} type="file" accept=".txt" onChange={handleWebUrlsUpload} className="hidden" />
                                         </Field>
                                     </FieldGroup>
@@ -264,9 +282,11 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                                         <ItemTitle className="text-sm break-all">{url}</ItemTitle>
                                                     </ItemContent>
                                                     <ItemActions>
-                                                        <Button size="sm" variant="ghost" onClick={() => onRemoveUrl(url)}>
-                                                            <Trash2 className="mr-1 h-4 w-4" />
-                                                        </Button>
+                                                        <Hint label="Remove this URL from the audit list">
+                                                            <Button size="sm" variant="ghost" onClick={() => onRemoveUrl(url)}>
+                                                                <Trash2 className="mr-1 h-4 w-4" />
+                                                            </Button>
+                                                        </Hint>
                                                     </ItemActions>
                                                 </Item>
                                             ))}
@@ -329,7 +349,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>Speed Index</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-speed-index" checked={config.showSI} onCheckedChange={onShowSIChange} />
+                                            <Hint label="Speed Index - how quickly the page paints its content. Lower is better.">
+                                                <Switch id="switch-show-speed-index" checked={config.showSI} onCheckedChange={onShowSIChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     <FieldLabel htmlFor="switch-show-largest-contentful-paint" className="my-3">
@@ -337,7 +359,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>Largest Contentful Paint</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-largest-contentful-paint" checked={config.showLCP} onCheckedChange={onShowLCPChange} />
+                                            <Hint label="Largest Contentful Paint - when the biggest element finishes rendering. Google's target is under 2.5s.">
+                                                <Switch id="switch-show-largest-contentful-paint" checked={config.showLCP} onCheckedChange={onShowLCPChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     <FieldLabel htmlFor="switch-show-cumulative-layout-shift" className="my-3">
@@ -345,7 +369,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>Cumulative Layout Shift</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-cumulative-layout-shift" checked={config.showCLS} onCheckedChange={onShowCLSChange} />
+                                            <Hint label="Cumulative Layout Shift - how much the page jumps around while loading. Target is under 0.1.">
+                                                <Switch id="switch-show-cumulative-layout-shift" checked={config.showCLS} onCheckedChange={onShowCLSChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     <FieldLabel htmlFor="switch-show-total-blocking-time" className="my-3">
@@ -353,7 +379,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>Total Blocking Time</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-total-blocking-time" checked={config.showTBT} onCheckedChange={onShowTBTChange} />
+                                            <Hint label="Total Blocking Time - how long the main thread was blocked and the page unresponsive to input.">
+                                                <Switch id="switch-show-total-blocking-time" checked={config.showTBT} onCheckedChange={onShowTBTChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     <FieldLabel htmlFor="switch-show-first-contentful-paint" className="my-3">
@@ -361,7 +389,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>First Contentful Paint</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-first-contentful-paint" checked={config.showFCP} onCheckedChange={onShowFCPChange} />
+                                            <Hint label="First Contentful Paint - when the first text or image appears.">
+                                                <Switch id="switch-show-first-contentful-paint" checked={config.showFCP} onCheckedChange={onShowFCPChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     <FieldLabel htmlFor="switch-show-warnings" className="my-3">
@@ -369,7 +399,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             <FieldContent>
                                                 <FieldTitle>Show Warnings &amp; Errors</FieldTitle>
                                             </FieldContent>
-                                            <Switch id="switch-show-warnings" checked={config.showWarnings} onCheckedChange={onShowWarningsChange} />
+                                            <Hint label="Show Lighthouse errors and warnings under each URL in the results table">
+                                                <Switch id="switch-show-warnings" checked={config.showWarnings} onCheckedChange={onShowWarningsChange} />
+                                            </Hint>
                                         </Field>
                                     </FieldLabel>
                                     {config.comparisonMode && (
@@ -378,7 +410,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                                 <FieldContent>
                                                     <FieldTitle>Improvement</FieldTitle>
                                                 </FieldContent>
-                                                <Switch id="switch-show-improvement" checked={config.showImprovement} onCheckedChange={onShowImprovementChange} />
+                                                <Hint label="Add a percentage-change column per metric, green for a gain and red past the regression threshold">
+                                                    <Switch id="switch-show-improvement" checked={config.showImprovement} onCheckedChange={onShowImprovementChange} />
+                                                </Hint>
                                             </Field>
                                             {config.showImprovement && (
                                                 <>
