@@ -6,7 +6,7 @@ import { Hint } from "@/components/ui/hint";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from "@/components/ui/drawer";
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldSet, FieldTitle } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
-import { Activity, Cog, Link, Table2, Trash2, Wrench } from "lucide-react";
+import { Activity, Cog, Link, Minus, Plus, Table2, Trash2, Wrench } from "lucide-react";
 import { Item, ItemActions, ItemContent, ItemTitle, } from "@/components/ui/item"
 import { Switch } from "../ui/switch";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../ui/accordion";
@@ -39,6 +39,11 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
         const parsed = Number(e.target.value);
         const runs = Number.isFinite(parsed) ? Math.min(MAX_RUNS, Math.max(MIN_RUNS, Math.round(parsed))) : MIN_RUNS;
         onSetConfigState({ ...config, runs });
+    };
+
+    const onRunsStep = (delta: number) => {
+        const runs = Math.min(MAX_RUNS, Math.max(MIN_RUNS, config.runs + delta));
+        if (runs !== config.runs) onSetConfigState({ ...config, runs });
     };
 
     const onAggregationChange = (value: string) => {
@@ -209,16 +214,40 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                                     Audit each URL {MIN_RUNS}-{MAX_RUNS} times. A 3s pause separates runs.
                                                 </FieldDescription>
                                             </FieldContent>
-                                            <Input
-                                                id="input-runs"
-                                                type="number"
-                                                min={MIN_RUNS}
-                                                max={MAX_RUNS}
-                                                step={1}
-                                                value={config.runs}
-                                                onChange={onRunsChange}
-                                                className="w-20 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                                            />
+                                            <div className="flex items-center rounded-md border border-input bg-background shadow-sm">
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    aria-label="Decrease runs per URL"
+                                                    className="h-8 w-8 rounded-r-none [&_svg]:size-3.5"
+                                                    disabled={config.runs <= MIN_RUNS}
+                                                    onClick={() => onRunsStep(-1)}
+                                                >
+                                                    <Minus />
+                                                </Button>
+                                                <Input
+                                                    id="input-runs"
+                                                    type="number"
+                                                    min={MIN_RUNS}
+                                                    max={MAX_RUNS}
+                                                    step={1}
+                                                    value={config.runs}
+                                                    onChange={onRunsChange}
+                                                    className="h-8 w-10 rounded-none border-0 px-0 text-center shadow-none focus-visible:ring-0 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                                />
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    aria-label="Increase runs per URL"
+                                                    className="h-8 w-8 rounded-l-none [&_svg]:size-3.5"
+                                                    disabled={config.runs >= MAX_RUNS}
+                                                    onClick={() => onRunsStep(1)}
+                                                >
+                                                    <Plus />
+                                                </Button>
+                                            </div>
                                         </Field>
                                     </FieldLabel>
                                     {config.runs > 1 && (
