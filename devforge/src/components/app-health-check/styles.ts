@@ -21,6 +21,8 @@ export const C = {
   red:         UI.error,
   btnBg:       'hsl(var(--muted))',
   btnActive:   UI.info,
+  warnBg:      'hsl(var(--warning) / 0.1)',
+  warnBorder:  'hsl(var(--warning) / 0.35)',
   errorBg:     'hsl(var(--error) / 0.1)',
   errorBorder: 'hsl(var(--error) / 0.3)',
 } as const;

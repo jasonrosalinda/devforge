@@ -1,17 +1,38 @@
 import { C } from './styles';
 import { Hint } from '@/components/ui/hint';
+import { useSettingsUi } from '@/context/settings-ui-context';
+import { AlertTriangle } from 'lucide-react';
 
 export function NotConfiguredBanner() {
+  const { openSettings } = useSettingsUi();
   return (
     <div style={{
       padding: '12px 16px',
-      background: C.surface,
-      border: `1px solid ${C.border}`,
+      background: C.warnBg,
+      border: `1px solid ${C.warnBorder}`,
       borderRadius: 8,
       fontSize: 13,
-      color: C.textSub,
+      color: C.text,
+      display: 'flex', alignItems: 'flex-start', gap: 10,
     }}>
-      No Azure configuration found. Click the ⚙ Settings icon in the header to add your subscription ID and apps.
+      <AlertTriangle size={15} style={{ color: C.yellow, flexShrink: 0, marginTop: 1 }} />
+      <span>
+        No Azure configuration found - this page needs a subscription ID and at least one app before
+        it can pull metrics. Add them under{' '}
+        <Hint label="Open Settings on the Azure tab">
+          <button
+            type="button"
+            onClick={() => openSettings('azure')}
+            style={{
+              background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer',
+              color: C.accent, fontWeight: 500, textDecoration: 'underline', textUnderlineOffset: 2,
+            }}
+          >
+            Settings / Azure
+          </button>
+        </Hint>
+        .
+      </span>
     </div>
   );
 }

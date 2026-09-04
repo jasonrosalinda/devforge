@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { Home } from "lucide-react";
 import { SettingsProvider } from "@/context/settings-context";
-import { SettingsModal } from "@/components/settings/settings-modal";
+import { SettingsUiProvider } from "@/context/settings-ui-context";
 import { ReleaseNotesModal } from "@/components/release-notes/release-notes-modal";
 import { UpdateIndicator } from "@/components/updater/update-indicator";
 
@@ -69,7 +69,6 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [originStyle, setOriginStyle] = useState<string>("50% 50%");
   const [search, setSearch] = useState<string>("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
   const pendingPage = useRef<string>("Home");
 
@@ -107,6 +106,7 @@ export default function App() {
       {/* App-wide tooltip defaults. Hovering one hinted control then another inside
           200ms skips the second delay, so scanning a toolbar doesn't stutter. */}
       <TooltipProvider delayDuration={300} skipDelayDuration={200}>
+      <SettingsUiProvider>
       <SidebarProvider>
         <style>{LAUNCH_STYLES}</style>
 
@@ -118,7 +118,6 @@ export default function App() {
             search={!isAppVisible ? search : undefined}
             onSearchChange={!isAppVisible ? setSearch : undefined}
             onBack={isAppVisible ? handleClose : undefined}
-            onOpenSettings={() => setSettingsOpen(true)}
             onOpenReleaseNotes={() => setReleaseNotesOpen(true)}
           />
 
@@ -154,7 +153,6 @@ export default function App() {
           </div>
 
           <Toaster />
-          <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
           <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
 
           <UpdateIndicator
@@ -164,6 +162,7 @@ export default function App() {
 
         </div>
       </SidebarProvider>
+      </SettingsUiProvider>
       </TooltipProvider>
       </SettingsProvider>
     </ThemeProvider>

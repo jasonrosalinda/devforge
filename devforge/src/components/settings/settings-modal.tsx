@@ -15,6 +15,8 @@ import { Eye, EyeOff } from 'lucide-react';
 interface SettingsModalProps {
   open: boolean;
   onClose: () => void;
+  /** Tab to land on when the dialog opens. Defaults to Azure. */
+  initialTab?: SettingsTab | undefined;
 }
 
 const EMPTY_APP: AzureAppEntry = {
@@ -23,11 +25,11 @@ const EMPTY_APP: AzureAppEntry = {
   name: '',
 };
 
-type Tab = 'azure' | 'apikeys' | 'atlassian';
+export type SettingsTab = 'azure' | 'apikeys' | 'atlassian';
 
-export function SettingsModal({ open, onClose }: SettingsModalProps) {
+export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
   const { settings, updateSettings } = useSettings();
-  const [tab, setTab] = useState<Tab>('azure');
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? 'azure');
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [editingApp, setEditingApp] = useState<AzureAppEntry | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -46,8 +48,11 @@ const [newMonitorId, setNewMonitorId] = useState('');
   }
 
   useEffect(() => {
-    if (open) setDraft(settings);
-  }, [open, settings]);
+    if (!open) return;
+    setDraft(settings);
+    // Callers can deep-link to a tab (e.g. PageSpeed sending the user to the missing API key).
+    if (initialTab) setTab(initialTab);
+  }, [open, settings, initialTab]);
 
   async function handleSave() {
     setSaving(true);
@@ -96,7 +101,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
     setDraft(d => ({ ...d, azure: { ...d.azure, apps } }));
   }
 
-  const tabStyle = (t: Tab) => ({
+  const tabStyle = (t: SettingsTab) => ({
     padding: '6px 14px',
     borderRadius: 6,
     border: 'none',
@@ -482,16 +487,18 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   value={draft.apiKeys.pagespeedApiKey}
                   onChange={e => setDraft(d => ({ ...d, apiKeys: { ...d.apiKeys, pagespeedApiKey: e.target.value } }))}
                   placeholder="AIza..."
-                  className="text-xs font-mono pr-8"
+                  className="text-xs font-mono pr-9"
                 />
-                <Hint label={showPagespeed ? 'Hide this key' : 'Show this key in plain text'} side="left">
-                <button
-                  type="button"
-                  onClick={() => setShowPagespeed(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showPagespeed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+                <Hint label={showPagespeed ? 'Hide this key' : 'Show this key in plain text'} side="left" className="absolute right-1 top-1/2 -translate-y-1/2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPagespeed(v => !v)}
+                    aria-label={showPagespeed ? 'Hide PageSpeed Insights API key' : 'Show PageSpeed Insights API key'}
+                    aria-pressed={showPagespeed}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {showPagespeed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
                 </Hint>
               </div>
               <p className="text-xs text-muted-foreground">Used by PageSpeed Insights tool. Get your key at <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">Google PageSpeed Insights API</a>.</p>
@@ -507,12 +514,18 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   value={draft.apiKeys.uptimeRobotApiKey}
                   onChange={e => setDraft(d => ({ ...d, apiKeys: { ...d.apiKeys, uptimeRobotApiKey: e.target.value } }))}
                   placeholder="ur1234567-xxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="text-xs font-mono pr-8"
+                  className="text-xs font-mono pr-9"
                 />
-                <Hint label={showUptimeRobot ? 'Hide this key' : 'Show this key in plain text'} side="left">
-                <button type="button" onClick={() => setShowUptimeRobot(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                  {showUptimeRobot ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+                <Hint label={showUptimeRobot ? 'Hide this key' : 'Show this key in plain text'} side="left" className="absolute right-1 top-1/2 -translate-y-1/2">
+                  <button
+                    type="button"
+                    onClick={() => setShowUptimeRobot(v => !v)}
+                    aria-label={showUptimeRobot ? 'Hide UptimeRobot API key' : 'Show UptimeRobot API key'}
+                    aria-pressed={showUptimeRobot}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {showUptimeRobot ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
                 </Hint>
               </div>
               <p className="text-xs text-muted-foreground">Used to fetch monitor status and downtime logs per app. UptimeRobot → Integration & API → Main API Keys → Read-only API key</p>
@@ -556,16 +569,18 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   value={draft.atlassian.apiToken}
                   onChange={e => setDraft(d => ({ ...d, atlassian: { ...d.atlassian, apiToken: e.target.value } }))}
                   placeholder="ATATT3x..."
-                  className="text-xs font-mono pr-8"
+                  className="text-xs font-mono pr-9"
                 />
-                <Hint label={showAtlassianToken ? 'Hide this key' : 'Show this key in plain text'} side="left">
-                <button
-                  type="button"
-                  onClick={() => setShowAtlassianToken(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showAtlassianToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+                <Hint label={showAtlassianToken ? 'Hide this key' : 'Show this key in plain text'} side="left" className="absolute right-1 top-1/2 -translate-y-1/2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAtlassianToken(v => !v)}
+                    aria-label={showAtlassianToken ? 'Hide Confluence API token' : 'Show Confluence API token'}
+                    aria-pressed={showAtlassianToken}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {showAtlassianToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
                 </Hint>
               </div>
               <p className="text-xs text-muted-foreground">Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">id.atlassian.com → API tokens</a>. Used with Basic auth to fetch runbook pages + attachments.</p>

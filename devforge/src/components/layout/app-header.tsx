@@ -10,6 +10,7 @@ import { useState, useEffect } from "react"
 import type { LucideIcon } from "lucide-react"
 import type { IconType } from "react-icons"
 import { isElectron } from "@/lib/environment";
+import { useSettingsUi } from "@/context/settings-ui-context";
 
 type PageIcon = LucideIcon | IconType;
 
@@ -19,7 +20,6 @@ interface AppHeaderProps {
     onBack?: (() => void) | undefined;
     search?: string | undefined;
     onSearchChange?: ((val: string) => void) | undefined;
-    onOpenSettings?: () => void;
     onOpenReleaseNotes?: () => void;
 }
 
@@ -47,7 +47,8 @@ function useClockForZone(timeZone: string): ClockDisplay {
     return display;
 }
 
-export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange, onOpenSettings, onOpenReleaseNotes }: AppHeaderProps) {
+export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchChange, onOpenReleaseNotes }: AppHeaderProps) {
+    const { openSettings } = useSettingsUi();
     const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const localLabel = new Intl.DateTimeFormat([], { timeZoneName: "short", timeZone: localTimeZone })
         .formatToParts(new Date())
@@ -146,13 +147,11 @@ export function AppHeader({ pageName, pageIcon: Icon, onBack, search, onSearchCh
                             </Button>
                         </Hint>
                     )}
-                    {onOpenSettings && (
-                        <Hint label="API keys, Azure apps and other settings">
-                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={onOpenSettings}>
-                                <Settings className="w-4 h-4" />
-                            </Button>
-                        </Hint>
-                    )}
+                    <Hint label="API keys, Azure apps and other settings">
+                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={() => openSettings()}>
+                            <Settings className="w-4 h-4" />
+                        </Button>
+                    </Hint>
                     <ThemeModeToggle />
                 </div>
             </div>

@@ -1,5 +1,5 @@
 import { PageSpeedResults, type PageSpeedResultsHandle } from "@/components/pagespeed/pagespeed-result";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import PageSpeedConfig from "@/components/pagespeed/pagespeed-config";
 import PageSpeedHistoryDropdown from "@/components/pagespeed/pagespeed-history-dropdown";
 import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
@@ -17,6 +17,7 @@ import {
     migrateConfig,
 } from "@/lib/pagespeed-history";
 import { useSettings } from "@/context/settings-context";
+import { useSettingsUi } from "@/context/settings-ui-context";
 import { Button, Toast } from "@/components/ui";
 import { Hint } from "@/components/ui/hint";
 import { isNullOrEmpty } from "@shared/utils/stringHelper";
@@ -47,10 +48,18 @@ const toStrategySnapshot = (r: ResultsBundle): StrategySnapshot => ({
 });
 
 export default function PageSpeedResultPage() {
-    const { settings } = useSettings();
+    const { settings, loading: settingsLoading } = useSettings();
+    const { openSettings } = useSettingsUi();
     const apiKey = settings.apiKeys.pagespeedApiKey;
     const [desktopConfig, setDesktopConfig] = useState(() => ({ ...defaultPageSpeedConfiguration('desktop'), apiKey }));
     const [mobileConfig, setMobileConfig] = useState(() => ({ ...defaultPageSpeedConfiguration('mobile'), apiKey }));
+    // Settings load asynchronously, so the key is empty on first render -- re-inject it once it arrives,
+    // otherwise the configs keep a blank key and the Analyze buttons never show.
+    useEffect(() => {
+        setDesktopConfig(c => (c.apiKey === apiKey ? c : { ...c, apiKey }));
+        setMobileConfig(c => (c.apiKey === apiKey ? c : { ...c, apiKey }));
+    }, [apiKey]);
+
     const onConfigChanged = (config: PageSpeedConfiguration) => {
         setDesktopConfig({ ...config, strategy: 'desktop', apiKey });
         setMobileConfig({ ...config, strategy: 'mobile', apiKey });
@@ -75,8 +84,6 @@ export default function PageSpeedResultPage() {
         desktopRef.current?.startAudit();
         mobileRef.current?.startAudit();
     };
-
-    const canAnalyze = desktopConfig.urls.length > 0 && !isNullOrEmpty(desktopConfig.apiKey);
 
     // Bumped by children whenever their results change, so hasResults (read from refs)
     // is re-evaluated — refs alone don't trigger a parent re-render.
@@ -490,6 +497,23 @@ export default function PageSpeedResultPage() {
                 title="PageSpeed"
                 subtitle="Run Lighthouse / PageSpeed Insights audits across desktop and mobile — 1-10 runs per URL, averaged or median, with optional branch comparison."
             />
+            {!settingsLoading && isNullOrEmpty(apiKey) && (
+                <div className="mb-4 flex items-start gap-2 rounded-md border border-warning/35 bg-warning/10 px-4 py-3 text-sm text-foreground">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                    <span>
+                        No PageSpeed API key set - Analyze buttons stay hidden until one is added under{' '}
+                        <button
+                            type="button"
+                            onClick={() => openSettings('apikeys')}
+                            className="font-medium text-info underline underline-offset-2 hover:opacity-80"
+                        >
+                            Settings / API Keys
+                        </button>
+                        . Without a key the audit falls back to the shared anonymous Google quota and
+                        fails with a "Queries per day" quota error.
+                    </span>
+                </div>
+            )}
             <div className="flex items-center justify-end gap-2">
                 <Hint label="Load a previously exported .json file — replaces the results on screen">
                     <Button variant="outline" onClick={onImportClick} disabled={isAuditing}>
