@@ -2,7 +2,7 @@ const { ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { runClaudeCli } = require('./claude-cli.cjs');
+const { runClaudeCli, stripReportPreamble } = require('./claude-cli.cjs');
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -495,32 +495,6 @@ async function runClaudeAnalysis({ promptBody, onChunk, timeoutMs = 300000 }) {
 }
 
 module.exports = function (mainWindow) {
-    // Pick a project/repo folder and drop a fix-brief markdown there for an AI coding agent.
-    ipcMain.handle('pagespeed-insight:save-brief', async (_event, payload) => {
-        try {
-            const { dialog } = require('electron');
-            const markdown = String(payload?.markdown ?? '').trim();
-            if (!markdown) return { success: false, error: 'No brief content to save.' };
-
-            const pick = await dialog.showOpenDialog(mainWindow, {
-                title: 'Select the project / repository folder for the fix brief',
-                properties: ['openDirectory', 'createDirectory'],
-            });
-            if (pick.canceled || !pick.filePaths?.[0]) return { success: false, canceled: true };
-
-            const repoPath = pick.filePaths[0];
-            const d = new Date();
-            const pad = (n) => String(n).padStart(2, '0');
-            const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
-            const filePath = path.join(repoPath, `pagespeed-fix-brief-${stamp}.md`);
-            fs.writeFileSync(filePath, markdown, 'utf8');
-            shell.openPath(filePath);
-            return { success: true, path: filePath };
-        } catch (err) {
-            return { success: false, error: err.message || String(err) };
-        }
-    });
-
     ipcMain.handle('pagespeed-insight:analyze', async (event, payload) => {
         try {
             const summary = String(payload?.summary ?? '').trim();
@@ -533,7 +507,8 @@ module.exports = function (mainWindow) {
                     }
                 },
             });
-            return { success: true, analysis };
+            // Strip any preamble the model wrote before the first section heading.
+            return { success: true, analysis: stripReportPreamble(analysis, ['Findings', 'Assessment', 'Conclusion', 'Justification']) };
         } catch (err) {
             return { success: false, error: err.message || String(err) };
         }

@@ -17,7 +17,10 @@
 const { ipcMain, dialog } = require('electron');
 const { execFile } = require('child_process');
 const path = require('path');
-const { runClaudeCli, killTree, tagged } = require('./claude-cli.cjs');
+const { runClaudeCli, killTree, tagged, stripReportPreamble } = require('./claude-cli.cjs');
+
+// The report opens at Findings; an agentic run's investigation narration must not.
+const REPORT_HEADINGS = ['Findings', 'Assessment', 'Conclusion', 'Justification'];
 
 // ─── git plumbing ─────────────────────────────────────────────────────────────
 
@@ -473,7 +476,7 @@ module.exports = function (mainWindow) {
 
             return {
                 success: true,
-                analysis: text,
+                analysis: stripReportPreamble(text, REPORT_HEADINGS),
                 meta: {
                     ...meta,
                     repoRoot: info.root,

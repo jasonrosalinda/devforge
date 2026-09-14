@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, Sparkles, RotateCw, AlertTriangle, Copy, FileDown } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, RotateCw, AlertTriangle, Copy, Zap, Play, Ban, Image as ImageIcon } from 'lucide-react';
 import { marked } from 'marked';
 
 type AnalysisStatus = 'running' | 'done' | 'error';
@@ -10,7 +10,7 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, compareRunToBaseline, findUnwinnableMetrics, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -121,6 +121,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [auditing2, setAuditing2] = useState(false);
     const [retryingRows, setRetryingRows] = useState<Set<string>>(new Set());
     const [rerunningRuns, setRerunningRuns] = useState<Set<string>>(new Set());
+    // Brute audit: run key → the attempt currently in flight (1-based).
+    const [bruteProgress, setBruteProgress] = useState<Record<string, number>>({});
+    const bruteCancelRef = useRef<Set<string>>(new Set());
+    // Rows the user asked to brute anyway after being told the regression is real.
+    const bruteForceRef = useRef<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
     const [expandedInsights, setExpandedInsights] = useState<Set<string>>(new Set());
     // Drawer Before/After cards — collapsed keys (default open).
@@ -147,6 +152,8 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [elapsed, setElapsed] = useState(0);
     const isAuditing = auditing1 || auditing2;
     const isRetryingAny = retryingRows.size > 0;
+    // One brute at a time — each one can fire up to 10 audits at the API.
+    const isBrutingAny = Object.keys(bruteProgress).length > 0;
     const timerActive = isAuditing || isRetryingAny;
 
     // Let the parent re-evaluate results-dependent UI (e.g. header "Copy as Table" button)
@@ -442,6 +449,164 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             });
         }
     }, [auditWithRetry, config.urls, results1, results2]);
+
+    // ─── Brute audit ──────────────────────────────────────────────────────────
+    // Re-run the noisiest runs of one After row until the ROW as a whole beats its
+    // Before row on every shown metric. PSI is noisy enough that one unlucky run drags
+    // an average down and makes a genuinely faster release read as a regression; this
+    // keeps replacing the worst offender until the aggregate turns positive.
+    //
+    // Budget scales with the run count — more runs means one bad run is diluted more,
+    // but also more runs that can go bad.
+    const bruteBudget = () => Math.max(5, config.runs * 5);
+
+    // Only the metrics the user is actually showing count toward the verdict.
+    const bruteMetricKeys = (): ComparableMetricKey[] => ([
+        ['speedIndex', displayAudit.SI],
+        ['largestContentfulPaint', displayAudit.LCP],
+        ['cumulativeLayoutShift', displayAudit.CLS],
+        ['totalBlockingTime', displayAudit.TBT],
+        ['firstContentfulPaint', displayAudit.FCP],
+    ] as const).filter(([, show]) => show).map(([key]) => key);
+
+    // Brute audit runs against the whole row, so the baseline is the Before aggregate —
+    // the number the Improvement column actually compares against.
+    const bruteBaseline = (index: number): PageSpeedInsightResult | undefined => getSlot1(index) || undefined;
+
+    const METRIC_LABELS: Record<ComparableMetricKey, string> = {
+        speedIndex: 'SI',
+        largestContentfulPaint: 'LCP',
+        cumulativeLayoutShift: 'CLS',
+        totalBlockingTime: 'TBT',
+        firstContentfulPaint: 'FCP',
+    };
+
+    const formatMetricValue = (key: ComparableMetricKey, value: number): string => {
+        if (key === 'cumulativeLayoutShift') return value.toFixed(3);
+        return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`;
+    };
+
+
+    const bruteAudit = useCallback(async (index: number) => {
+        const url = config.urls[index];
+        if (!url || !config.comparisonMode) return;
+        const key = `2-${index}`;
+
+        // Second click on a running brute stops it after the attempt in flight.
+        if (bruteProgress[key] !== undefined) {
+            bruteCancelRef.current.add(key);
+            return;
+        }
+
+        const baseline = bruteBaseline(index);
+        if (!baseline) {
+            toast.warning(`Audit ${config.beforeLabel} first — there is nothing to beat.`);
+            return;
+        }
+        const after = getSlot2(index) || undefined;
+        let history = after?.runHistory ? [...after.runHistory] : (after ? [after] : []);
+        if (!history.length) {
+            toast.warning(`Audit ${config.afterLabel} first.`);
+            return;
+        }
+
+        const keys = bruteMetricKeys();
+        const budget = bruteBudget();
+        const commit = (runs: PageSpeedInsightResult[]) => setResults2(prev => {
+            const next = [...prev];
+            next[index] = aggregatePageSpeedInsightResults(url, runs, config.aggregation);
+            return next;
+        });
+
+        // Every value ever seen for this row, so a metric's real spread can be told
+        // apart from an unlucky run.
+        const samples: Partial<Record<ComparableMetricKey, number[]>> = {};
+        const addSamples = (run: PageSpeedInsightResult) => keys.forEach(k => {
+            const v = run[k]?.numericValue;
+            if (v) (samples[k] ??= []).push(v);
+        });
+        history.forEach(addSamples);
+
+        const describeBlockers = (blockers: UnwinnableMetric[]) => blockers
+            .map(b => `${METRIC_LABELS[b.key]} (best ${formatMetricValue(b.key, b.best)} vs ${formatMetricValue(b.key, b.target)}, varies by only ${formatMetricValue(b.key, b.spread)} across ${b.samples} runs)`)
+            .join(' and ');
+
+        // Don't spend a single audit proving what the existing runs already show.
+        const preBlockers = findUnwinnableMetrics(samples, baseline, keys);
+        if (preBlockers.length && !bruteForceRef.current.has(key)) {
+            bruteForceRef.current.add(key);
+            toast.warning(`${describeBlockers(preBlockers)} — that is a real regression, not run-to-run noise, so re-running cannot make this row positive. Click again to brute anyway.`);
+            return;
+        }
+        bruteForceRef.current.delete(key);
+
+        bruteCancelRef.current.delete(key);
+        if (activeAuditsRef.current === 0) setAuditEnd(null);
+        activeAuditsRef.current++;
+
+        let won = compareRunToBaseline(aggregatePageSpeedInsightResults(url, history, config.aggregation), baseline, keys).wins;
+        let blockers: UnwinnableMetric[] = [];
+        let attempt = 0;
+        try {
+            while (!won && attempt < budget) {
+                if (bruteCancelRef.current.has(key)) break;
+                attempt++;
+                setBruteProgress(prev => ({ ...prev, [key]: attempt }));
+
+                // Replace the run that is dragging the row down hardest — re-running a
+                // good run would only risk making the aggregate worse.
+                let worstIdx = 0;
+                let worstRatio = -Infinity;
+                history.forEach((run, i) => {
+                    const { ratio } = compareRunToBaseline(run, baseline, keys);
+                    if (ratio > worstRatio) { worstRatio = ratio; worstIdx = i; }
+                });
+
+                let fresh: PageSpeedInsightResult;
+                try {
+                    fresh = await auditWithRetry(url, undefined, 1);
+                } catch (error) {
+                    console.error(`Brute audit attempt ${attempt} failed for ${url}:`, error);
+                    continue;
+                }
+                if (slotHasError(fresh)) continue;
+                addSamples(fresh);
+
+                // Only keep the new run if it is closer to beating the baseline than the
+                // one it replaces, so the row can never get worse than where it started.
+                const freshRatio = compareRunToBaseline(fresh, baseline, keys).ratio;
+                if (freshRatio < worstRatio) {
+                    history = history.map((run, i) => (i === worstIdx ? fresh : run));
+                    commit(history);
+                    won = compareRunToBaseline(aggregatePageSpeedInsightResults(url, history, config.aggregation), baseline, keys).wins;
+                }
+
+                // Each fresh run sharpens the noise estimate; once a metric is provably a
+                // real regression, stop rather than burn the rest of the budget on it.
+                if (!won) {
+                    blockers = findUnwinnableMetrics(samples, baseline, keys);
+                    if (blockers.length) break;
+                }
+            }
+        } finally {
+            const cancelled = bruteCancelRef.current.has(key);
+            bruteCancelRef.current.delete(key);
+            setBruteProgress(prev => {
+                const next = { ...prev };
+                delete next[key];
+                return next;
+            });
+            setTimes2(prev => ({ ...prev, end: new Date() }));
+            activeAuditsRef.current--;
+            if (activeAuditsRef.current === 0) setAuditEnd(new Date());
+
+            if (won) toast.success(`${config.afterLabel} now beats ${config.beforeLabel} on every shown metric (${attempt} of ${budget} attempts).`);
+            else if (cancelled) toast.info(`Brute audit stopped after ${attempt} attempt(s). Kept the best runs found.`);
+            else if (blockers.length) toast.warning(`Stopped after ${attempt} of ${budget} attempts: ${describeBlockers(blockers)} — a real regression that re-running cannot fix. Kept the best runs found.`);
+            else toast.warning(`Still not positive on every shown metric after ${budget} attempts. Kept the best runs found.`);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [auditWithRetry, config.urls, config.runs, config.aggregation, config.comparisonMode, config.beforeLabel, config.afterLabel, results1, results2, bruteProgress]);
 
     // Use the value as DISPLAYED (rounded) so the improvement % is consistent
     // with the numbers shown — e.g. "1.3 s" vs "1.3 s" reads 0%, not a delta
@@ -1314,179 +1479,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return `Comparison across ${blocks.length} URL(s).\n\n${blocks.join('\n\n---\n\n')}`;
     };
 
-    // key: a URL row index, or -1 for the combined all-URLs analysis.
-    const startAnalysis = async (key: number, summary: string, label: string) => {
-        setAnalyses(prev => ({ ...prev, [key]: { status: 'running', markdown: '', error: null } }));
-        setExpandedInsights(prev => new Set(prev).add(`analysis-${key}`));
-        const unsubscribe = window.electronAPI.pagespeedInsight.onAnalyzeChunk(({ chunk }) => {
-            setAnalyses(prev => {
-                const cur = prev[key];
-                if (!cur) return prev;
-                return { ...prev, [key]: { ...cur, markdown: cur.markdown + chunk } };
-            });
-        });
-        try {
-            const res = await window.electronAPI.pagespeedInsight.analyze({ url: label, summary });
-            setAnalyses(prev => {
-                const cur = prev[key];
-                if (!cur) return prev;
-                return {
-                    ...prev,
-                    [key]: res.success
-                        ? { ...cur, status: 'done', markdown: res.analysis ?? cur.markdown }
-                        : { ...cur, status: 'error', error: res.error ?? 'Analysis failed.' },
-                };
-            });
-        } catch (err) {
-            setAnalyses(prev => {
-                const cur = prev[key];
-                if (!cur) return prev;
-                return { ...prev, [key]: { ...cur, status: 'error', error: err instanceof Error ? err.message : String(err) } };
-            });
-        } finally {
-            unsubscribe();
-        }
-    };
-
-    // Per-URL analysis panels were removed — the page-level Run Assessment and Full
-    // Assessment already cover every URL in one pass. -1 is the all-URLs key.
-    const runAllAnalysis = () => startAnalysis(-1, buildAllUrlsSummary(), `all ${config.urls.length} URLs`);
-
-    // Build an AI-agent fix brief: the analysis + raw data + an instruction header for a coding agent.
-    const buildBrief = (key: number): string => {
-        const md = analyses[key]?.markdown ?? '';
-        const data = key === -1 ? buildAllUrlsSummary() : buildAnalysisSummary(key);
-        const title = `PageSpeed Fix Brief — ${config.strategy.toUpperCase()}${config.comparisonMode ? ` (${config.beforeLabel} vs ${config.afterLabel})` : ''}`;
-        return [
-            `# ${title}`,
-            '',
-            '> Generated by devForge PageSpeed. Hand this file to an AI coding agent (e.g. Claude Code) **run inside this repository**.',
-            '> Use it to investigate the codebase and implement the performance fixes/enhancements described below.',
-            '',
-            '## Your Task',
-            '1. Read the performance analysis and raw data below.',
-            '2. For each issue, locate the responsible code in THIS repository (components, bundles, build config, headers, etc.).',
-            '3. Propose a concrete fix or enhancement, then implement it.',
-            '4. Prioritize regressions and high-impact, low-effort wins first; treat run-to-run noise as low priority.',
-            '5. Keep changes scoped — do not alter unrelated behavior. Verify each change and note the expected metric impact.',
-            '',
-            '## Performance Analysis',
-            md.trim() || '_No analysis was generated; rely on the raw data below._',
-            '',
-            '## Before / After Data & Insights',
-            '```',
-            data,
-            '```',
-        ].join('\n');
-    };
-
-    const createBrief = (key: number) => {
-        const p = window.electronAPI.pagespeedInsight.saveBrief({ markdown: buildBrief(key) }).then(res => {
-            if (res.canceled) return 'No folder selected';
-            if (!res.success) throw new Error(res.error || 'Save failed');
-            return 'Fix brief saved to project folder';
-        });
-        toast.promise(p, { loading: 'Creating fix brief…', success: (m: string) => m, error: (e: unknown) => (e instanceof Error ? e.message : 'Save failed') });
-    };
-
-    const renderAnalysisPanel = (key: number, run: () => void, buttonLabel: string, heading: string): React.ReactNode => {
-        const ek = `analysis-${key}`;
-        const open = expandedInsights.has(ek);
-        const a = analyses[key];
-        return (
-            <div className="mt-3 border border-border rounded-md bg-background">
-                <div className="flex items-center justify-between px-3 py-2">
-                    <Hint label={open ? 'Collapse this analysis' : 'Expand this analysis'} side="right" className="flex-1">
-                    <button
-                        onClick={() => toggleInsight(ek)}
-                        className="flex flex-1 items-center gap-1 text-[11px] font-semibold tracking-wide text-muted-foreground hover:text-foreground text-left"
-                    >
-                        <Sparkles className="h-3.5 w-3.5 text-primary" />
-                        {heading}
-                        <ChevronDown className={`ml-auto h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
-                    </button>
-                    </Hint>
-                    {a?.status === 'done' && (
-                        <div className="flex items-center gap-1" data-html2canvas-ignore="true">
-                            <Hint label="Save this as a fix brief in a project folder, ready to hand to an AI coding agent">
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 w-6 p-0 text-muted-foreground"
-                                    onClick={() => createBrief(key)}
-                                >
-                                    <FileDown className="h-3.5 w-3.5" />
-                                </Button>
-                            </Hint>
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 w-6 p-0 text-muted-foreground"
-                                onClick={() => {
-                                    const html = marked.parse(a.markdown, { async: false }) as string;
-                                    const copy = navigator.clipboard.write([
-                                        new ClipboardItem({
-                                            'text/html': new Blob([html], { type: 'text/html' }),
-                                            'text/plain': new Blob([a.markdown], { type: 'text/plain' }),
-                                        }),
-                                    ]);
-                                    toast.promise(copy, { loading: 'Copying…', success: 'Copied for Teams', error: 'Copy failed' });
-                                }}
-                                title="Copy for Teams"
-                            >
-                                <Copy className="h-3.5 w-3.5" />
-                            </Button>
-                            <Hint label="Ask Claude again - replaces the analysis below">
-                                <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" disabled={isAuditing} onClick={run}>
-                                    <RotateCw className="h-3.5 w-3.5" />
-                                </Button>
-                            </Hint>
-                        </div>
-                    )}
-                </div>
-                {open && (
-                    <div className="border-t border-border p-3 text-xs">
-                        {!a && (
-                            <Hint label="Have Claude read this URL's results and explain what changed and why">
-                                <Button variant="outline" size="sm" disabled={isAuditing} onClick={run} data-html2canvas-ignore="true">
-                                    <Sparkles className="mr-1.5 h-3.5 w-3.5 text-primary" />
-                                    {buttonLabel}
-                                </Button>
-                            </Hint>
-                        )}
-                        {a?.status === 'running' && (
-                            <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-2 text-muted-foreground">
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                                    {a.markdown ? 'Writing the performance analysis…' : 'Reviewing your before & after results…'}
-                                </div>
-                                {a.markdown && (
-                                    <pre className="whitespace-pre-wrap border-t border-border pt-2 font-mono text-[11px] leading-relaxed text-foreground/80">{a.markdown}</pre>
-                                )}
-                            </div>
-                        )}
-                        {a?.status === 'error' && (
-                            <div className="flex flex-col items-start gap-2">
-                                <div className="flex items-center gap-2 text-destructive">
-                                    <AlertTriangle className="h-4 w-4" />
-                                    <span>{a.error || 'Something went wrong.'}</span>
-                                </div>
-                                <Hint label="Try the analysis again">
-                                    <Button variant="outline" size="sm" onClick={run} data-html2canvas-ignore="true">
-                                        <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-                                    </Button>
-                                </Hint>
-                            </div>
-                        )}
-                        {a?.status === 'done' && (
-                            <div className="ps-analysis-content" dangerouslySetInnerHTML={{ __html: marked.parse(a.markdown, { async: false }) as string }} />
-                        )}
-                    </div>
-                )}
-            </div>
-        );
-    };
-
     // Values appearing in BOTH before and after run sets for a metric (any run index) —
     // highlighted to flag likely network jitter / measurement noise.
     const crossRunMatches = (index: number): Map<string, Set<string>> => {
@@ -1569,7 +1561,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                         <Hint label={`Re-run only run #${runIdx + 1}, then re-aggregate this row`}>
                                             <button
                                                 onClick={() => rerunSingleRun(index, runIdx, slotKey)}
-                                                disabled={isAuditing || isRetryingAny || rerunning}
+                                                disabled={isAuditing || isRetryingAny || rerunning || isBrutingAny}
                                                 className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors"
                                             >
                                                 <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
@@ -1655,7 +1647,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                     Analyzing {config.beforeLabel}
                                                 </span>
                                             ) : (
-                                                <>Analyze {config.beforeLabel}</>
+                                                <><Play className="mr-1 h-4 w-4" />Analyze {config.beforeLabel}</>
                                             )}
                                         </Button>
                                     </Hint>
@@ -1667,7 +1659,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                     Analyzing {config.afterLabel}
                                                 </span>
                                             ) : (
-                                                <>Analyze {config.afterLabel}</>
+                                                <><Play className="mr-1 h-4 w-4" />Analyze {config.afterLabel}</>
                                             )}
                                         </Button>
                                     </Hint>
@@ -1682,7 +1674,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                 Analyzing...
                                             </span>
                                         ) : (
-                                            <>Analyze</>
+                                            <><Play className="mr-1 h-4 w-4" />Analyze</>
                                         )}
                                     </Button>
                                 </Hint>
@@ -1690,19 +1682,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             {isAuditing && (
                                 <Hint label="Stop this strategy's audit - URLs already measured keep their results">
                                     <Button variant="outline" onClick={() => abortControllerRef.current?.abort()}>
-                                        Cancel
-                                    </Button>
-                                </Hint>
-                            )}
-                            {config.comparisonMode && config.urls.some((_, i) => getSlot1(i) && getSlot2(i)) && (
-                                <Hint label="Have Claude review every URL in this table at once and summarise the before/after">
-                                    <Button
-                                        variant="outline"
-                                        onClick={runAllAnalysis}
-                                        disabled={isAuditing || analyses[-1]?.status === 'running'}
-                                    >
-                                        <Sparkles className="mr-1 h-4 w-4 text-primary" />
-                                        Claude Analysis
+                                        <Ban className="mr-1 h-4 w-4" />Cancel
                                     </Button>
                                 </Hint>
                             )}
@@ -1716,7 +1696,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             )}
                             <Hint label="Copy this card to the clipboard as a PNG screenshot">
                                 <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
-                                    Copy as Image
+                                    <ImageIcon className="mr-1 h-4 w-4" />Copy as Image
                                 </Button>
                             </Hint>
                         </div>
@@ -1848,14 +1828,40 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         {history2 && !displayAudit.singleResult && (() => {
                                                             const cardKey = `runs-${index}-2`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            const bruteKey = `2-${index}`;
+                                                            const bruteAttempt = bruteProgress[bruteKey];
+                                                            const bruting = bruteAttempt !== undefined;
+                                                            // Needs a Before row to beat; comparison mode only.
+                                                            const canBrute = config.comparisonMode && !!bruteBaseline(index);
                                                             return (
                                                             <div className="rounded-md border border-border bg-background p-3">
-                                                                <Hint label={cardOpen ? 'Collapse the individual runs' : 'Expand to see each run and re-run any one of them'} className="w-full">
-                                                                <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
-                                                                    <p className="text-xs font-medium text-muted-foreground">{config.afterLabel} — Individual Runs</p>
-                                                                    <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
-                                                                </button>
-                                                                </Hint>
+                                                                <div className="mb-1.5 flex items-center gap-1">
+                                                                    <Hint label={cardOpen ? 'Collapse the individual runs' : 'Expand to see each run and re-run any one of them'} className="flex-1">
+                                                                    <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left">
+                                                                        <p className="text-xs font-medium text-muted-foreground">{config.afterLabel} — Individual Runs</p>
+                                                                    </button>
+                                                                    </Hint>
+                                                                    {!copying && canBrute && (
+                                                                        <Hint label={bruting
+                                                                            ? `Attempt ${bruteAttempt} of ${bruteBudget()} — click to stop and keep the best runs found`
+                                                                            : `Brute audit: keep replacing the worst run until ${config.afterLabel} beats ${config.beforeLabel} on every shown metric, up to ${bruteBudget()} attempts (${config.runs} run${config.runs === 1 ? '' : 's'} × 5)`}>
+                                                                            <button
+                                                                                onClick={() => bruteAudit(index)}
+                                                                                disabled={isAuditing || isRetryingAny || (isBrutingAny && !bruting)}
+                                                                                className={`inline-flex items-center justify-center gap-0.5 rounded p-1 hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors ${bruting ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                                                                                data-html2canvas-ignore="true"
+                                                                            >
+                                                                                <Zap className={`h-3.5 w-3.5 ${bruting ? 'animate-pulse' : ''}`} />
+                                                                                {bruting && <span className="text-[10px] font-medium tabular-nums">{bruteAttempt}/{bruteBudget()}</span>}
+                                                                            </button>
+                                                                        </Hint>
+                                                                    )}
+                                                                    <Hint label={cardOpen ? 'Collapse the individual runs' : 'Expand to see each run and re-run any one of them'}>
+                                                                    <button onClick={() => toggleRunCard(cardKey)} className="inline-flex items-center p-0.5">
+                                                                        <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                    </button>
+                                                                    </Hint>
+                                                                </div>
                                                                 {cardOpen && (
                                                                     <>
                                                                         {renderRunHistory(history2, index, '2')}
@@ -1931,8 +1937,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     .ps-analysis-content a { color: hsl(var(--primary)); }
                     .ps-analysis-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .6rem; color: hsl(var(--muted-foreground)); margin: .4rem 0; }
                 `}</style>
-                {analyses[-1] &&
-                    renderAnalysisPanel(-1, runAllAnalysis, `Analyze all ${config.urls.length} URLs (${config.beforeLabel} vs ${config.afterLabel})`, 'CLAUDE ANALYSIS — ALL URLS')}
                 {(times1.start || times2.start) && (
                     <div className="mt-2 text-right text-xs text-muted-foreground space-y-0.5">
                         {config.comparisonMode ? (

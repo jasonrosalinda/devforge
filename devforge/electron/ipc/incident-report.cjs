@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const { subscriptionEnv } = require('./claude-cli.cjs');
 
 // Exception bucket classifiers, shared with the app health check so both
 // features agree on what a socket failure is.
@@ -2568,7 +2569,7 @@ function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000, directive, mode
       child = spawn(`claude -p "${directive}" --output-format text --model ${model}`, {
         shell: true,
         cwd: os.tmpdir(),        // neutral cwd → no project CLAUDE.md / project hooks
-        env: process.env,
+        env: subscriptionEnv(),  // CLI login only — never metered API billing
         windowsHide: true,
       });
     } catch (err) {

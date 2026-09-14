@@ -41,7 +41,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     pagespeedInsight: {
         generate: (payload) => ipcRenderer.invoke('pagespeed-insight:generate', payload),
         analyze: (payload) => ipcRenderer.invoke('pagespeed-insight:analyze', payload),
-        saveBrief: (payload) => ipcRenderer.invoke('pagespeed-insight:save-brief', payload),
         onAnalyzeChunk: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('pagespeed-insight:analyze-chunk', fn);

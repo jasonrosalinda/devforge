@@ -13,6 +13,94 @@ const { isSafeRef, capLines, AGENT_FLAGS, buildAttributionPrompt, validateRepo, 
 // history, so the git layer is exercised against git rather than a mock of it.
 const REPO = process.cwd();
 
+const { stripReportPreamble, subscriptionEnv, BILLING_OVERRIDE_VARS } = require('./claude-cli.cjs');
+
+// devForge has no Anthropic API key of its own — every AI feature runs on the user's
+// Claude Code CLI login. A machine-wide key set for some other tool must not silently
+// redirect these runs to metered API billing.
+describe('subscriptionEnv', () => {
+    const withVars = (vars) => {
+        const saved = {};
+        for (const [k, v] of Object.entries(vars)) { saved[k] = process.env[k]; process.env[k] = v; }
+        try { return subscriptionEnv(); } finally {
+            for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+        }
+    };
+
+    it('strips every variable that could override the CLI login', () => {
+        const env = withVars(Object.fromEntries(BILLING_OVERRIDE_VARS.map(v => [v, 'set-by-something-else'])));
+        for (const name of BILLING_OVERRIDE_VARS) expect(env[name], name).toBeUndefined();
+    });
+
+    it('names the API key, the auth token and the cloud-provider routes', () => {
+        expect(BILLING_OVERRIDE_VARS).toEqual(expect.arrayContaining([
+            'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+            'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+        ]));
+    });
+
+    it('keeps the rest of the environment so the CLI still finds its login and PATH', () => {
+        const env = withVars({ ANTHROPIC_API_KEY: 'sk-should-be-dropped' });
+        expect(env.PATH ?? env.Path).toBeDefined();
+        expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    });
+
+    it('applies extras while still stripping overrides', () => {
+        process.env.ANTHROPIC_API_KEY = 'sk-should-be-dropped';
+        try {
+            const env = subscriptionEnv({ GIT_PAGER: 'cat', ANTHROPIC_API_KEY: 'sk-also-dropped' });
+            expect(env.GIT_PAGER).toBe('cat');
+            expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+        } finally {
+            delete process.env.ANTHROPIC_API_KEY;
+        }
+    });
+});
+
+// An agentic run narrates while it investigates; that narration must not survive
+// into the finished report.
+describe('stripReportPreamble', () => {
+    const HEADINGS = ['Findings', 'Assessment', 'Conclusion', 'Justification'];
+    const report = '## Findings\n\n- LCP 7.7 s → 0.6 s\n\n## Conclusion\n\nA genuine improvement.';
+
+    it('drops the investigation narration before the first heading', () => {
+        expect(stripReportPreamble(`Now I have all the evidence needed.\n\n${report}`, HEADINGS)).toBe(report);
+    });
+
+    it('drops several lines of preamble', () => {
+        const noisy = `Let me check the webpack config.\n\nOK — that explains it.\nNow I have all the evidence needed.\n\n${report}`;
+        expect(stripReportPreamble(noisy, HEADINGS)).toBe(report);
+    });
+
+    it('leaves a clean report untouched', () => {
+        expect(stripReportPreamble(report, HEADINGS)).toBe(report);
+    });
+
+    it('drops a trailing sign-off', () => {
+        expect(stripReportPreamble(`${report}\n\nLet me know if you want me to dig further.`, HEADINGS)).toBe(report);
+    });
+
+    it('never eats content that merely looks conversational', () => {
+        const withProse = '## Findings\n\n- LCP improved\n\n## Justification\n\nI have completed the comparison across both strategies.';
+        // The closing line is inside a section and is the report's own prose — keep it.
+        expect(stripReportPreamble(withProse, HEADINGS)).toContain('I have completed the comparison');
+    });
+
+    it('keeps everything when no heading is found rather than emptying the report', () => {
+        const orphan = 'Some text with no headings at all.';
+        expect(stripReportPreamble(orphan, HEADINGS)).toBe(orphan);
+    });
+
+    it('handles empty input', () => {
+        expect(stripReportPreamble('', HEADINGS)).toBe('');
+        expect(stripReportPreamble(undefined, HEADINGS)).toBe(undefined);
+    });
+
+    it('survives CRLF line endings', () => {
+        expect(stripReportPreamble(`Now I have all the evidence needed.\r\n\r\n${report.replace(/\n/g, '\r\n')}`, HEADINGS)).toBe(report);
+    });
+});
+
 describe('isSafeRef', () => {
     it('accepts the ref shapes a release label takes', () => {
         for (const ref of ['v3.14.1', '3.14.1', 'main', 'origin/main', 'refs/tags/v1.0', 'release/2026-09', 'HEAD~3', 'abc123def']) {

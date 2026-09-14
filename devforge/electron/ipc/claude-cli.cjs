@@ -12,6 +12,27 @@ const { spawn, execFile } = require('child_process');
 
 const tagged = (message, code) => Object.assign(new Error(message), { code });
 
+// devForge deliberately has no Anthropic API key of its own: every AI feature runs
+// through the user's Claude Code CLI login. These variables would override that login
+// and route the run to metered API / Bedrock / Vertex billing instead, so they are
+// stripped from the child environment — a machine-wide ANTHROPIC_API_KEY set for some
+// other tool must not silently start charging per token for a devForge assessment.
+const BILLING_OVERRIDE_VARS = [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_ORGANIZATION_ID',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+];
+
+/** process.env with every billing override removed, plus any extras to add. */
+function subscriptionEnv(extra = {}) {
+    const env = { ...process.env, ...extra };
+    for (const name of BILLING_OVERRIDE_VARS) delete env[name];
+    return env;
+}
+
 // shell:true is mandatory on Windows — `claude` is a .cmd shim and Node >= 20.12
 // refuses to spawn .cmd without a shell (CVE-2024-27980). The consequence is that
 // child.pid is cmd.exe, NOT claude, so child.kill() reaps the wrapper and leaves the
@@ -52,7 +73,7 @@ function runClaudeCli({
         const command = [`claude -p "${directive}"`, ...flags].join(' ');
         let child;
         try {
-            child = spawn(command, { shell: true, cwd, env: env || process.env, windowsHide: true });
+            child = spawn(command, { shell: true, cwd, env: subscriptionEnv(env), windowsHide: true });
         } catch (err) {
             reject(tagged(`Failed to launch Claude CLI: ${err.message}`, 'CLI_SPAWN_FAILED'));
             return;
@@ -109,8 +130,20 @@ function runClaudeCli({
             if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
                 emit(evt.message.content.filter(c => c?.type === 'text').map(c => c.text).join(''));
             } else if (evt.type === 'result') {
+                // Cached input is billed differently but is still work the run did, so
+                // every bucket counts toward the total the UI shows.
+                const u = evt.usage ?? {};
+                const input = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+                const output = u.output_tokens ?? 0;
                 meta = {
                     costUsd: evt.total_cost_usd,
+                    tokens: {
+                        input,
+                        output,
+                        cacheRead: u.cache_read_input_tokens ?? 0,
+                        cacheCreation: u.cache_creation_input_tokens ?? 0,
+                        total: input + output,
+                    },
                     numTurns: evt.num_turns,
                     durationMs: evt.duration_ms,
                     sessionId: evt.session_id,
@@ -161,4 +194,45 @@ function runClaudeCli({
     });
 }
 
-module.exports = { runClaudeCli, killTree, tagged };
+// Lines a model tacks on around a finished report — "Now I have all the evidence
+// needed.", "Let me know if you want…". The prompt forbids them, but prompt
+// compliance is not guaranteed, so the output is trimmed too.
+// Kept deliberately narrow. "I have completed the comparison across both strategies"
+// is legitimate report prose in a Justification section, so first-person phrasing is
+// NOT a narration signal — only unambiguous sign-offs are.
+const TRAILING_NARRATION = [
+    /^(let me know|hope this helps|feel free)\b/i,
+    /^analysis complete\b/i,
+    /^(that|this) (completes|concludes)\b/i,
+];
+
+/**
+ * Drop everything before the report's first real section heading, plus any sign-off
+ * after it. An agentic run narrates while it investigates ("Now I have all the
+ * evidence needed."), and that narration must not open the report.
+ *
+ * @param {string} markdown
+ * @param {string[]} headings section names that may legitimately start the report
+ */
+function stripReportPreamble(markdown, headings) {
+    if (!markdown) return markdown;
+    const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+    const opener = new RegExp(`^#{1,3}\\s*(${headings.join('|')})\\b`, 'i');
+
+    const first = lines.findIndex(l => opener.test(l.trim()));
+    const start = first > 0 ? first : 0;
+
+    let end = lines.length;
+    while (end > start) {
+        const line = lines[end - 1].trim();
+        // Never discard structure or data, whatever it says.
+        if (!line) { end--; continue; }
+        if (/^[#>|\-*\d]|^```/.test(line)) break;
+        if (TRAILING_NARRATION.some(re => re.test(line))) { end--; continue; }
+        break;
+    }
+
+    return lines.slice(start, end).join('\n').trim();
+}
+
+module.exports = { runClaudeCli, killTree, tagged, stripReportPreamble, subscriptionEnv, BILLING_OVERRIDE_VARS };

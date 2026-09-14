@@ -4,6 +4,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { subscriptionEnv } = require('./claude-cli.cjs');
 
 // Reads .git/HEAD directly off disk — browsers' webkitdirectory picker hides
 // dotfiles/dotfolders from the renderer's FileList, so this is Electron-only.
@@ -47,7 +48,7 @@ function runClaudeReview({ promptBody, onStage, timeoutMs = 300000 }) {
       child = spawn(`claude -p "${directive}" --output-format text --model sonnet`, {
         shell: true,
         cwd: os.tmpdir(),
-        env: process.env,
+        env: subscriptionEnv(),   // CLI login only — never metered API billing
         windowsHide: true,
       });
     } catch (err) {

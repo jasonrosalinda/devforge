@@ -76,6 +76,13 @@ export interface AttributionResult {
     after?: GitRefResolution;
     meta?: {
         costUsd?: number;
+        tokens?: {
+            input: number;
+            output: number;
+            cacheRead: number;
+            cacheCreation: number;
+            total: number;
+        };
         numTurns?: number;
         durationMs?: number;
         repoRoot?: string;
@@ -102,7 +109,6 @@ export interface IElectronAPI {
             mobile?:  { results1: unknown[]; results2: unknown[]; config: unknown; auditStart: Date | null; auditEnd: Date | null } | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         analyze: (payload: { url: string; summary: string }) => Promise<{ success: boolean; analysis?: string; error?: string }>;
-        saveBrief: (payload: { markdown: string }) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
         onAnalyzeChunk: (cb: (data: { url?: string; chunk: string }) => void) => () => void;
 
         // Full Assessment — read-only investigation of the audited site's repository.
