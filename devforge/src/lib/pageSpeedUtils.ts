@@ -176,6 +176,7 @@ export function aggregatePageSpeedInsightResults(
     if (lastGood) {
         result.interactive = lastGood.interactive;
         result.opportunities = lastGood.opportunities;
+        result.passedAudits = lastGood.passedAudits;
         result.performanceScore = lastGood.performanceScore;
         result.lighthouseVersion = lastGood.lighthouseVersion;
         result.fetchTime = lastGood.fetchTime;

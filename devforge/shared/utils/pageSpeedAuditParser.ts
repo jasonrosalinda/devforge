@@ -1,4 +1,4 @@
-import type { PageSpeedMetrics, PageSpeedInsightResult, PageSpeedErrorResponse, PageSpeedOpportunity, AuditDetails } from "../types/pageSpeedInsight.types";
+import type { PageSpeedMetrics, PageSpeedInsightResult, PageSpeedErrorResponse, PageSpeedOpportunity, PageSpeedPassedAudit, AuditDetails } from "../types/pageSpeedInsight.types";
 
 type AuditEntry = {
     displayValue?: string;
@@ -37,6 +37,37 @@ const DATA_ONLY_KEYS = new Set([
 const isInsightAudit = (key: string): boolean => key.endsWith('-insight');
 const isSavingsAudit = (mode: string | undefined): boolean => mode === 'metricSavings' || mode === 'opportunity';
 
+// Uncapped `details.items` dominates the serialized size of a result (network-requests
+// alone can be 200+ rows), which is what quietly blows the localStorage quota.
+// Lighthouse already returns opportunity items worst-first, so a slice keeps the
+// high-signal rows — except for the audits below, which are ordered by time.
+const MAX_DETAIL_ITEMS = 40;
+const CAP_SORT_KEY: Record<string, string> = {
+    'network-requests': 'transferSize',
+    'long-tasks': 'duration',
+};
+
+function capDetails(key: string, details: AuditDetails): AuditDetails {
+    const items = details.items;
+    if (!items || items.length <= MAX_DETAIL_ITEMS) return details;
+    const sortKey = CAP_SORT_KEY[key];
+    const ordered = sortKey
+        ? [...items].sort((a, b) => (Number(b[sortKey]) || 0) - (Number(a[sortKey]) || 0))
+        : items;
+    return { ...details, items: ordered.slice(0, MAX_DETAIL_ITEMS), itemsTruncated: true, itemCount: items.length };
+}
+
+// Audits eligible to be reported at all — shared by the failing (opportunities) and
+// passing (passedAudits) passes so the two can never drift apart.
+const isCandidate = (key: string, a: AuditEntry): boolean =>
+    !METRIC_AUDIT_KEYS.has(key) &&
+    !DATA_ONLY_KEYS.has(key) &&
+    !SKIP_MODES.has(a.scoreDisplayMode ?? '') &&
+    !!a.title &&
+    (isInsightAudit(key) || isSavingsAudit(a.scoreDisplayMode));
+
+const isPassing = (a: AuditEntry): boolean => typeof a.score === 'number' && a.score >= 0.9;
+
 export function parseToPageSpeedInsightResult(
     url: string,
     audits: RawAudits,
@@ -45,14 +76,11 @@ export function parseToPageSpeedInsightResult(
 ): PageSpeedInsightResult {
     const opps: PageSpeedOpportunity[] = Object.entries(audits)
         .filter(([key, a]) =>
-            !METRIC_AUDIT_KEYS.has(key) &&
-            !DATA_ONLY_KEYS.has(key) &&
-            !SKIP_MODES.has(a.scoreDisplayMode ?? '') &&
-            !!a.title &&
-            (isInsightAudit(key) || isSavingsAudit(a.scoreDisplayMode)) &&
+            isCandidate(key, a) &&
             // Drop passing ("green") audits — but always keep the qualitative *-insight findings
             // (e.g. forced reflow), which can score 1 yet still report a real issue.
-            (isInsightAudit(key) || !(typeof a.score === 'number' && a.score >= 0.9))
+            // Passing audits are still recorded, slim, in `passedAudits` below.
+            (isInsightAudit(key) || !isPassing(a))
         )
         // Worst first (score 0 → top); passing audits (score 1) sink to the bottom.
         .sort(([, a], [, b]) => (a.score ?? 1) - (b.score ?? 1))
@@ -64,7 +92,21 @@ export function parseToPageSpeedInsightResult(
             displayValue: a.displayValue,
             score: a.score ?? null,
             scoreDisplayMode: a.scoreDisplayMode,
-            ...(a.details ? { details: a.details } : {}),
+            ...(a.details ? { details: capDetails(key, a.details) } : {}),
+            ...(a.metricSavings ? { metricSavings: a.metricSavings } : {}),
+        }));
+
+    // Audits that passed on this run, without `details`. Lets a before/after diff
+    // attribute "fixed" instead of watching the audit disappear from `opportunities`.
+    // Sorted by key so diffs are stable between runs.
+    const passedAudits: PageSpeedPassedAudit[] = Object.entries(audits)
+        .filter(([key, a]) => isCandidate(key, a) && !isInsightAudit(key) && isPassing(a))
+        .sort(([ka], [kb]) => ka.localeCompare(kb))
+        .map(([key, a]) => ({
+            auditKey: key,
+            title: a.title!,
+            score: a.score as number,
+            ...(a.displayValue ? { displayValue: a.displayValue } : {}),
             ...(a.metricSavings ? { metricSavings: a.metricSavings } : {}),
         }));
 
@@ -84,7 +126,7 @@ export function parseToPageSpeedInsightResult(
             displayValue: a.displayValue,
             score: null,
             scoreDisplayMode: a.scoreDisplayMode,
-            ...(a.details ? { details: a.details } : {}),
+            ...(a.details ? { details: capDetails(key, a.details) } : {}),
         }));
 
     const opportunities = [...opps, ...diags];
@@ -101,6 +143,7 @@ export function parseToPageSpeedInsightResult(
         runWarnings: runWarnings ?? "",
         errorResponse: emptyPageSpeedErrorResponse(),
         ...(opportunities.length ? { opportunities } : {}),
+        ...(passedAudits.length ? { passedAudits } : {}),
         ...(meta ?? {}),
     };
 }
@@ -134,6 +177,7 @@ export function parseObjectToMetrics(raw: any): PageSpeedInsightResult {
                 : { code: raw.errorResponse.code, message: raw.errorResponse.message }
             : emptyPageSpeedErrorResponse(),
         opportunities: raw.opportunities ?? undefined,
+        passedAudits: raw.passedAudits ?? undefined,
         interactive: raw.interactive ?? undefined,
         performanceScore: raw.performanceScore ?? undefined,
         lighthouseVersion: raw.lighthouseVersion ?? undefined,

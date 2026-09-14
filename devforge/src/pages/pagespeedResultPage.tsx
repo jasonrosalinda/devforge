@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import PageSpeedConfig from "@/components/pagespeed/pagespeed-config";
 import PageSpeedHistoryDropdown from "@/components/pagespeed/pagespeed-history-dropdown";
 import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
+import type { AttributionResult, GitRefResolution } from "@shared/types/electron";
 import { defaultPageSpeedConfiguration } from "@/lib/pageSpeedUtils";
 import {
     loadHistory,
@@ -15,13 +16,14 @@ import {
     type SerializedTimes,
     type LegacyConfig,
     migrateConfig,
+    slimForStorage,
 } from "@/lib/pagespeed-history";
 import { useSettings } from "@/context/settings-context";
 import { useSettingsUi } from "@/context/settings-ui-context";
 import { Button, Toast } from "@/components/ui";
 import { Hint } from "@/components/ui/hint";
 import { isNullOrEmpty } from "@shared/utils/stringHelper";
-import { AlertTriangle, ChevronDown, Download, FileDown, Loader2, RotateCw, Save, Sparkles, Table as TableIcon, Upload } from "lucide-react";
+import { AlertTriangle, ChevronDown, Download, FileDown, Loader2, RotateCw, Save, Sparkles, Table as TableIcon, Upload, Wrench } from "lucide-react";
 import { SiPagespeedinsights } from "react-icons/si";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,14 +40,103 @@ const serializeTimes = (t: { start: Date | null; end: Date | null }): Serialized
 
 const toStrategySnapshot = (r: ResultsBundle): StrategySnapshot => ({
     // Drop `null` (loading) and coerce `undefined` to null for stable JSON round-tripping.
-    results1: r.results1.map(s => (s == null ? null : s)) as SerializedAuditSlot[],
-    results2: r.results2.map(s => (s == null ? null : s)) as SerializedAuditSlot[],
+    // slimForStorage sheds the per-resource detail of runs nothing reads back, which is
+    // what kept pushing snapshots past the localStorage quota.
+    results1: r.results1.map(s => slimForStorage(s == null ? null : s)) as SerializedAuditSlot[],
+    results2: r.results2.map(s => slimForStorage(s == null ? null : s)) as SerializedAuditSlot[],
     times1: serializeTimes(r.times1),
     times2: serializeTimes(r.times2),
     auditStart: r.auditStart ? r.auditStart.toISOString() : null,
     auditEnd: r.auditEnd ? r.auditEnd.toISOString() : null,
     analyses: r.analyses,
 });
+
+type AnalysisState = { status: 'running' | 'done' | 'error'; markdown: string; error: string | null };
+
+// What to call a compared side: the branch or tag it resolved to ("release/v3.14.1"),
+// falling back to the label the user typed, then to the commit as a last resort.
+const refName = (r: GitRefResolution | undefined, fallback: string): string =>
+    r?.ref ?? r?.label ?? (r?.short ? r.short : fallback);
+
+// Shared shell for both assessments: the quick Desktop+Mobile read and the repository
+// investigation. Same four states, same streaming pane — only the labels differ.
+function AnalysisCard({
+    state, heading, icon, open, onToggle, onRetry, retryHint, runningLabel, writingLabel, progress, onCancel, footer,
+}: {
+    state: AnalysisState;
+    heading: string;
+    icon: React.ReactNode;
+    open: boolean;
+    onToggle: () => void;
+    onRetry: () => void;
+    retryHint: string;
+    runningLabel: string;
+    writingLabel: string;
+    progress?: string | undefined;
+    onCancel?: (() => void) | undefined;
+    footer?: React.ReactNode;
+}) {
+    return (
+        <Card className="my-4 mx-6 shadow-none">
+            <CardHeader>
+                <CardTitle>
+                    <Hint label={open ? 'Collapse the analysis' : 'Expand the analysis'} className="w-full">
+                        <button
+                            onClick={onToggle}
+                            className="flex w-full items-center gap-2 text-sm text-left hover:opacity-80 transition-opacity"
+                        >
+                            {icon}
+                            {heading}
+                            <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+                        </button>
+                    </Hint>
+                </CardTitle>
+            </CardHeader>
+            {open && (
+                <CardContent className="text-xs">
+                    {state.status === 'running' && (
+                        <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-2 text-muted-foreground">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                                {state.markdown ? writingLabel : runningLabel}
+                                {onCancel && (
+                                    <Hint label="Stop the investigation">
+                                        <Button variant="ghost" size="sm" className="ml-auto h-6 px-2" onClick={onCancel}>Cancel</Button>
+                                    </Hint>
+                                )}
+                            </div>
+                            {/* Tool activity, kept out of the report text so the finished
+                                answer isn't interleaved with investigation noise. */}
+                            {progress && (
+                                <div className="truncate font-mono text-[11px] text-muted-foreground/80">{progress}</div>
+                            )}
+                            {state.markdown && (
+                                <pre className="whitespace-pre-wrap border-t border-border pt-2 font-mono text-[11px] leading-relaxed text-foreground/80">{state.markdown}</pre>
+                            )}
+                        </div>
+                    )}
+                    {state.status === 'error' && (
+                        <div className="flex flex-col items-start gap-2">
+                            <div className="flex items-center gap-2 text-destructive">
+                                <AlertTriangle className="h-4 w-4" />
+                                <span>{state.error || 'Something went wrong.'}</span>
+                            </div>
+                            <Hint label={retryHint}>
+                                <Button variant="outline" size="sm" onClick={onRetry}>
+                                    <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
+                                </Button>
+                            </Hint>
+                        </div>
+                    )}
+                    {state.status === 'done' && (
+                        <div className="ps-analysis-content" dangerouslySetInnerHTML={{ __html: marked.parse(state.markdown, { async: false }) as string }} />
+                    )}
+                    {footer}
+                </CardContent>
+            )}
+        </Card>
+    );
+}
 
 export default function PageSpeedResultPage() {
     const { settings, loading: settingsLoading } = useSettings();
@@ -95,17 +186,11 @@ export default function PageSpeedResultPage() {
     const [pageAnalysisOpen, setPageAnalysisOpen] = useState(true);
 
     const runPageAnalysis = async () => {
-        const d = desktopRef.current?.getAnalysisSummary() ?? '';
-        const m = mobileRef.current?.getAnalysisSummary() ?? '';
-        if (!d && !m) {
+        const summary = combinedSummary();
+        if (!summary) {
             toast.warning('Run Desktop and/or Mobile audits first');
             return;
         }
-        const summary = [
-            'Combined Desktop + Mobile PageSpeed results. Cover BOTH strategies and call out where they diverge (e.g. mobile regresses while desktop improves).',
-            d ? `# DESKTOP\n\n${d}` : '',
-            m ? `# MOBILE\n\n${m}` : '',
-        ].filter(Boolean).join('\n\n====\n\n');
 
         setPageAnalysis({ status: 'running', markdown: '', error: null });
         setPageAnalysisOpen(true);
@@ -121,6 +206,95 @@ export default function PageSpeedResultPage() {
             setPageAnalysis({ status: 'error', markdown: '', error: err instanceof Error ? err.message : String(err) });
         } finally {
             unsubscribe();
+        }
+    };
+
+    // Full Assessment — the same data, investigated inside the site's own repository.
+    // The repo is located by hand on every run and never stored: not in the config,
+    // not in history, not in an export.
+    const [deepDive, setDeepDive] = useState<AnalysisState | null>(null);
+    const [deepDiveOpen, setDeepDiveOpen] = useState(true);
+    const [deepDiveProgress, setDeepDiveProgress] = useState('');
+    const [deepDiveMeta, setDeepDiveMeta] = useState<AttributionResult['meta'] | null>(null);
+
+    const combinedSummary = (): string => {
+        const d = desktopRef.current?.getAnalysisSummary() ?? '';
+        const m = mobileRef.current?.getAnalysisSummary() ?? '';
+        if (!d && !m) return '';
+        return [
+            'Combined Desktop + Mobile PageSpeed results. Cover BOTH strategies and call out where they diverge (e.g. mobile regresses while desktop improves).',
+            d ? `# DESKTOP\n\n${d}` : '',
+            m ? `# MOBILE\n\n${m}` : '',
+        ].filter(Boolean).join('\n\n====\n\n');
+    };
+
+    const runFullAssessment = async () => {
+        const summary = combinedSummary();
+        if (!summary) {
+            toast.warning('Run Desktop and/or Mobile audits first');
+            return;
+        }
+
+        const pick = await window.electronAPI.pagespeedInsight.pickRepo();
+        if (!pick.success) {
+            if (!pick.canceled) toast.error(pick.error ?? 'Could not open the folder picker.');
+            return;
+        }
+        const repoPath = pick.path!;
+
+        const check = await window.electronAPI.pagespeedInsight.validateRepo({
+            repoPath,
+            beforeLabel: desktopConfig.beforeLabel,
+            afterLabel: desktopConfig.afterLabel,
+        });
+        if (!check.success) {
+            toast.error(check.error ?? 'That folder is not a git repository.');
+            return;
+        }
+        // Unresolved labels are recoverable: offer the closest tags rather than failing.
+        const unresolved = [check.before, check.after].filter(r => r && !r.resolved);
+        if (unresolved.length) {
+            const names = unresolved.map(r => `"${r!.label}"`).join(' and ');
+            const hints = unresolved[0]?.candidates?.slice(0, 5).join(', ');
+            toast.error(
+                `${names} did not resolve to a commit in ${check.root}.`
+                + (hints ? ` Closest tags: ${hints}. Rename the Before/After labels to match, then run again.` : ''),
+            );
+            return;
+        }
+        for (const w of check.warnings ?? []) toast.warning(w.message);
+
+        setDeepDive({ status: 'running', markdown: '', error: null });
+        setDeepDiveOpen(true);
+        setDeepDiveProgress('');
+        setDeepDiveMeta(null);
+
+        const offChunk = window.electronAPI.pagespeedInsight.onAttributionChunk(({ chunk }) => {
+            setDeepDive(prev => (prev && prev.status === 'running') ? { ...prev, markdown: prev.markdown + chunk } : prev);
+        });
+        const offProgress = window.electronAPI.pagespeedInsight.onAttributionProgress((p) => {
+            setDeepDiveProgress(p.tool ? `${p.tool}: ${p.detail ?? ''}` : (p.detail ?? ''));
+        });
+        try {
+            const res = await window.electronAPI.pagespeedInsight.analyzeAttribution({
+                repoPath,
+                summary,
+                urls: desktopConfig.urls,
+                beforeLabel: desktopConfig.beforeLabel,
+                afterLabel: desktopConfig.afterLabel,
+            });
+            if (res.success) {
+                setDeepDive({ status: 'done', markdown: res.analysis ?? '', error: null });
+                setDeepDiveMeta(res.meta ?? null);
+            } else {
+                setDeepDive({ status: 'error', markdown: '', error: res.error ?? 'The investigation failed.' });
+            }
+        } catch (err) {
+            setDeepDive({ status: 'error', markdown: '', error: err instanceof Error ? err.message : String(err) });
+        } finally {
+            offChunk();
+            offProgress();
+            setDeepDiveProgress('');
         }
     };
 
@@ -145,14 +319,24 @@ export default function PageSpeedResultPage() {
             pageAnalysis: pageAnalysis?.status === 'done' && pageAnalysis.markdown
                 ? { markdown: pageAnalysis.markdown }
                 : null,
+            // Ref names only — the repo path stays out of history and out of exports.
+            pageDeepDive: deepDive?.status === 'done' && deepDive.markdown
+                ? {
+                    markdown: deepDive.markdown,
+                    beforeRef: refName(deepDiveMeta?.before, desktopConfig.beforeLabel),
+                    afterRef: refName(deepDiveMeta?.after, desktopConfig.afterLabel),
+                }
+                : null,
         };
     };
 
     const saveToHistory = () => {
         const snapshot = buildSnapshot();
         if (!snapshot) return;
-        setHistory(saveSnapshot(snapshot));
-        toast.success('Analysis saved to history');
+        const { entries, error } = saveSnapshot(snapshot);
+        setHistory(entries);
+        if (error) toast.error(error);
+        else toast.success('Analysis saved to history');
     };
 
     // Export/import use the same snapshot shape as history, so a .json file round-trips
@@ -216,6 +400,11 @@ export default function PageSpeedResultPage() {
             '  changes — do not chase them, and discount any apparent win or loss that overlaps them.',
             '- "opportunities" come from Lighthouse and are ranked estimates, not instructions. Verify each',
             '  against the actual code before acting on it.',
+            '- Sections headed "Evidence diff" compare the two runs audit by audit and file by file: which',
+            '  audits appeared, worsened or were resolved, and which resources were added, removed or grew.',
+            '  Start there — a file listed as new or heavier is the shortest path from a metric to a commit.',
+            '  Resource names are fingerprint-normalized (`theme.9f2ab1.css` → `theme.css`), so a row marked',
+            '  "new" is a genuinely new file rather than a rebuilt one.',
             '',
             '## Run Setup',
             `- Strategies: Desktop and Mobile (same URLs, same run count)`,
@@ -287,6 +476,7 @@ export default function PageSpeedResultPage() {
             desktop: strategy(s.desktop),
             mobile: strategy(s.mobile),
             pageAnalysis: s.pageAnalysis ?? null,
+            pageDeepDive: s.pageDeepDive ?? null,
         };
     };
 
@@ -317,6 +507,17 @@ export default function PageSpeedResultPage() {
         mobileRef.current?.restoreSnapshot(snapshot.mobile);
         setPageAnalysis(snapshot.pageAnalysis?.markdown
             ? { status: 'done', markdown: snapshot.pageAnalysis.markdown, error: null }
+            : null);
+        setDeepDive(snapshot.pageDeepDive?.markdown
+            ? { status: 'done', markdown: snapshot.pageDeepDive.markdown, error: null }
+            : null);
+        // The repo path was never saved, so a restored report keeps its refs for the
+        // heading but a re-run means locating the folder again.
+        setDeepDiveMeta(snapshot.pageDeepDive
+            ? {
+                before: { label: snapshot.pageDeepDive.beforeRef, ref: snapshot.pageDeepDive.beforeRef, resolved: true },
+                after: { label: snapshot.pageDeepDive.afterRef, ref: snapshot.pageDeepDive.afterRef, resolved: true },
+            }
             : null);
         toast.info('Restored analysis from ' + new Date(snapshot.savedAt).toLocaleString());
     };
@@ -556,6 +757,16 @@ export default function PageSpeedResultPage() {
                                 Run Assessment
                             </Button>
                         </Hint>
+                        <Hint label="Locate the source repository for these URLs, then have Claude read it (read-only) and tie each metric change to the commit and file that caused it. You pick the folder each time; nothing about it is saved.">
+                            <span>
+                                <Button variant="outline" onClick={runFullAssessment} disabled={!hasResults || deepDive?.status === 'running'}>
+                                    {deepDive?.status === 'running'
+                                        ? <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                        : <Wrench className="mr-1 h-4 w-4 text-primary" />}
+                                    Full Assessment
+                                </Button>
+                            </span>
+                        </Hint>
                         <Hint label="Write a Markdown prompt into a project folder — hand it to Claude Code in that repo to find what is degrading the scores and fix it">
                             <Button variant="outline" onClick={createFixBrief} disabled={isAuditing || !hasResults}>
                                 <FileDown className="mr-1 h-4 w-4" />Fix Brief
@@ -564,53 +775,54 @@ export default function PageSpeedResultPage() {
                     </div>
                 </div>
                 {pageAnalysis && (
-                    <Card className="my-4 mx-6 shadow-none">
-                        <CardHeader>
-                            <CardTitle>
-                                <Hint label={pageAnalysisOpen ? 'Collapse the analysis' : 'Expand the analysis'} className="w-full">
-                                <button
-                                    onClick={() => setPageAnalysisOpen(v => !v)}
-                                    className="flex w-full items-center gap-2 text-sm text-left hover:opacity-80 transition-opacity"
-                                >
-                                    <Sparkles className="h-4 w-4 text-primary" />
-                                    ASSESSMENT RESULTS — DESKTOP + MOBILE
-                                    <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${pageAnalysisOpen ? 'rotate-180' : ''}`} />
-                                </button>
-                                </Hint>
-                            </CardTitle>
-                        </CardHeader>
-                        {pageAnalysisOpen && (
-                        <CardContent className="text-xs">
-                            {pageAnalysis.status === 'running' && (
-                                <div className="flex flex-col gap-2">
-                                    <div className="flex items-center gap-2 text-muted-foreground">
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                                        {pageAnalysis.markdown ? 'Writing the performance analysis…' : 'Reviewing Desktop & Mobile results…'}
-                                    </div>
-                                    {pageAnalysis.markdown && (
-                                        <pre className="whitespace-pre-wrap border-t border-border pt-2 font-mono text-[11px] leading-relaxed text-foreground/80">{pageAnalysis.markdown}</pre>
-                                    )}
+                    <AnalysisCard
+                        state={pageAnalysis}
+                        heading="ASSESSMENT RESULTS — DESKTOP + MOBILE"
+                        icon={<Sparkles className="h-4 w-4 text-primary" />}
+                        open={pageAnalysisOpen}
+                        onToggle={() => setPageAnalysisOpen(v => !v)}
+                        onRetry={runPageAnalysis}
+                        retryHint="Run the combined Desktop + Mobile analysis again"
+                        runningLabel="Reviewing Desktop & Mobile results…"
+                        writingLabel="Writing the performance analysis…"
+                    />
+                )}
+                {deepDive && (
+                    <AnalysisCard
+                        state={deepDive}
+                        // Name what was compared, not its hashes — the resolved ref
+                        // (release/v3.14.1) is what the user recognises.
+                        heading={`FULL ASSESSMENT — ${refName(deepDiveMeta?.before, desktopConfig.beforeLabel)} → ${refName(deepDiveMeta?.after, desktopConfig.afterLabel)}`}
+                        icon={<Wrench className="h-4 w-4 text-primary" />}
+                        open={deepDiveOpen}
+                        onToggle={() => setDeepDiveOpen(v => !v)}
+                        onRetry={runFullAssessment}
+                        retryHint="Locate the repository again and re-run the investigation"
+                        runningLabel="Reading the repository and correlating commits…"
+                        writingLabel="Writing the cause attribution…"
+                        progress={deepDiveProgress}
+                        onCancel={() => window.electronAPI.pagespeedInsight.cancelAttribution()}
+                        footer={deepDiveMeta && (
+                            <div className="mt-3 space-y-1 border-t border-border pt-2 text-[11px] text-muted-foreground">
+                                <div>
+                                    {refName(deepDiveMeta.before, desktopConfig.beforeLabel)}
+                                    {deepDiveMeta.before?.short && ` (${deepDiveMeta.before.short})`}
+                                    {' → '}
+                                    {refName(deepDiveMeta.after, desktopConfig.afterLabel)}
+                                    {deepDiveMeta.after?.short && ` (${deepDiveMeta.after.short})`}
                                 </div>
-                            )}
-                            {pageAnalysis.status === 'error' && (
-                                <div className="flex flex-col items-start gap-2">
-                                    <div className="flex items-center gap-2 text-destructive">
-                                        <AlertTriangle className="h-4 w-4" />
-                                        <span>{pageAnalysis.error || 'Something went wrong.'}</span>
-                                    </div>
-                                    <Hint label="Run the combined Desktop + Mobile analysis again">
-                                        <Button variant="outline" size="sm" onClick={runPageAnalysis}>
-                                            <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-                                        </Button>
-                                    </Hint>
+                                <div>
+                                    {deepDiveMeta.repoRoot} · {deepDiveMeta.commitCount ?? 0} commit(s), {deepDiveMeta.filesChanged ?? 0} file(s) changed
+                                    {deepDiveMeta.costUsd !== undefined && ` · $${deepDiveMeta.costUsd.toFixed(2)}`}
                                 </div>
-                            )}
-                            {pageAnalysis.status === 'done' && (
-                                <div className="ps-analysis-content" dangerouslySetInnerHTML={{ __html: marked.parse(pageAnalysis.markdown, { async: false }) as string }} />
-                            )}
-                        </CardContent>
+                                {deepDiveMeta.warnings?.map(w => (
+                                    <div key={w.code} className={w.code === 'REPO_MUTATED' ? 'text-destructive' : 'text-warning'}>
+                                        {w.code}: {w.message}
+                                    </div>
+                                ))}
+                            </div>
                         )}
-                    </Card>
+                    />
                 )}
                 <PageSpeedResults ref={desktopRef} config={desktopConfig} onAuditingChange={setDesktopAuditing} onResultsChange={onResultsChange} grouped />
                 <PageSpeedResults ref={mobileRef} config={mobileConfig} onAuditingChange={setMobileAuditing} onResultsChange={onResultsChange} grouped />

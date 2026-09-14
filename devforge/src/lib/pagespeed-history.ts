@@ -30,6 +30,10 @@ export interface PageSpeedHistorySnapshot {
     mobile: StrategySnapshot;
     // Page-level Claude analysis (Desktop + Mobile combined); absent on older entries.
     pageAnalysis?: { markdown: string } | null;
+    // Full Assessment — the repository investigation. Expensive to regenerate, so the
+    // report is kept; the repo path deliberately is NOT, so an exported snapshot never
+    // carries someone's local directory layout.
+    pageDeepDive?: { markdown: string; beforeRef: string; afterRef: string } | null;
 }
 
 // Entries saved before runs/aggregation replaced runMode carry the old shape.
@@ -47,6 +51,25 @@ export function migrateConfig(config: LegacyConfig): PageSpeedConfiguration {
     };
 }
 
+// `runHistory` is most of a snapshot's bytes, and most of that is `details.items`.
+// Only one run contributes `opportunities` to the aggregate and to the evidence diff
+// (the one whose fetchTime the aggregate kept), so every other run can shed its
+// detail tables. Titles, scores and savings survive — only the per-resource rows of
+// the non-representative runs are dropped.
+export function slimForStorage(slot: SerializedAuditSlot): SerializedAuditSlot {
+    if (!slot || typeof slot !== 'object' || !slot.runHistory?.length) return slot;
+    const keepIdx = slot.runHistory.findIndex(r => r.fetchTime === slot.fetchTime);
+    return {
+        ...slot,
+        runHistory: slot.runHistory.map((run, i) => i === keepIdx ? run : {
+            ...run,
+            ...(run.opportunities
+                ? { opportunities: run.opportunities.map(({ details, ...rest }) => rest) }
+                : {}),
+        }),
+    };
+}
+
 export function loadHistory(): PageSpeedHistorySnapshot[] {
     try {
         const v = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
@@ -57,10 +80,22 @@ export function loadHistory(): PageSpeedHistorySnapshot[] {
     }
 }
 
-export function saveSnapshot(snapshot: PageSpeedHistorySnapshot): PageSpeedHistorySnapshot[] {
+// Returns the new list plus whatever went wrong. A silently dropped save looks
+// identical to a successful one, which is how a full history quietly ate runs.
+export function saveSnapshot(snapshot: PageSpeedHistorySnapshot): { entries: PageSpeedHistorySnapshot[]; error?: string } {
     const next = [snapshot, ...loadHistory().filter(s => s.id !== snapshot.id)].slice(0, MAX_ENTRIES);
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch { /* ignore quota */ }
-    return next;
+    try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+    } catch (err) {
+        const quota = err instanceof DOMException && (err.name === 'QuotaExceededError' || err.code === 22);
+        return {
+            entries: loadHistory(),
+            error: quota
+                ? 'History storage is full — this run was not saved. Delete some saved runs and try again.'
+                : `History could not be saved: ${err instanceof Error ? err.message : String(err)}`,
+        };
+    }
+    return { entries: next };
 }
 
 export function deleteSnapshot(id: string): PageSpeedHistorySnapshot[] {

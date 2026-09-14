@@ -47,6 +47,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.on('pagespeed-insight:analyze-chunk', fn);
             return () => ipcRenderer.removeListener('pagespeed-insight:analyze-chunk', fn);
         },
+        // Full Assessment: locate a repository, check it, then investigate it read-only.
+        pickRepo: () => ipcRenderer.invoke('pagespeed-insight:pick-repo'),
+        validateRepo: (payload) => ipcRenderer.invoke('pagespeed-insight:validate-repo', payload),
+        analyzeAttribution: (payload) => ipcRenderer.invoke('pagespeed-insight:analyze-attribution', payload),
+        cancelAttribution: () => ipcRenderer.invoke('pagespeed-insight:analyze-attribution-cancel'),
+        onAttributionChunk: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('pagespeed-insight:attribution-chunk', fn);
+            return () => ipcRenderer.removeListener('pagespeed-insight:attribution-chunk', fn);
+        },
+        onAttributionProgress: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('pagespeed-insight:attribution-progress', fn);
+            return () => ipcRenderer.removeListener('pagespeed-insight:attribution-progress', fn);
+        },
     },
 
     commands: {

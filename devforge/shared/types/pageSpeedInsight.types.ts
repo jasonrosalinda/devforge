@@ -20,6 +20,21 @@ export interface AuditDetails {
     headings?: AuditDetailsHeading[];
     items?: Record<string, unknown>[];
     overallSavingsMs?: number;
+    // Set when `items` was capped at parse time; `itemCount` is the pre-cap length,
+    // so a before/after diff can still say "40 of 214 requests shown".
+    itemsTruncated?: boolean;
+    itemCount?: number;
+}
+
+// A Lighthouse audit that PASSED (score >= 0.9) on this run, recorded WITHOUT `details`
+// so a before/after diff can report "this was fixed" instead of the audit silently
+// vanishing from `opportunities`. ~90 bytes each.
+export interface PageSpeedPassedAudit {
+    auditKey: string;
+    title: string;
+    score: number;
+    displayValue?: string | undefined;
+    metricSavings?: Record<string, number> | undefined;
 }
 
 export interface PageSpeedOpportunity {
@@ -45,6 +60,7 @@ export interface PageSpeedInsightResult {
     errorResponse?: PageSpeedErrorResponse;
     runHistory?: PageSpeedInsightResult[];
     opportunities?: PageSpeedOpportunity[] | undefined;
+    passedAudits?: PageSpeedPassedAudit[] | undefined;
     interactive?: PageSpeedMetrics | undefined;
     performanceScore?: number | undefined;
     lighthouseVersion?: string | undefined;

@@ -29,6 +29,65 @@ export interface IncidentPayload {
     uptimeRobotIncidents?: unknown[] | undefined;
 }
 
+// A label ("v3.14.1") resolved against the audited site's repository. When it does
+// not resolve, `candidates` carries near-miss tags for the manual override.
+export interface GitRefResolution {
+    label: string;
+    resolved: boolean;
+    ref?: string;
+    sha?: string;
+    short?: string;
+    describe?: string;
+    date?: string;
+    reason?: string;
+    candidates?: string[];
+}
+
+export interface AttributionWarning {
+    code: string;
+    message: string;
+}
+
+export interface RepoValidation {
+    success: boolean;
+    code?: string;
+    error?: string;
+    root?: string;
+    branch?: string | null;
+    remote?: string | null;
+    dirtyFiles?: number;
+    before?: GitRefResolution;
+    after?: GitRefResolution;
+    warnings?: AttributionWarning[];
+}
+
+export interface AttributionProgress {
+    phase: 'start' | 'init' | 'tool' | 'denied';
+    tool?: string;
+    detail?: string;
+}
+
+export interface AttributionResult {
+    success: boolean;
+    code?: string;
+    error?: string;
+    analysis?: string;
+    before?: GitRefResolution;
+    after?: GitRefResolution;
+    meta?: {
+        costUsd?: number;
+        numTurns?: number;
+        durationMs?: number;
+        repoRoot?: string;
+        before?: GitRefResolution;
+        after?: GitRefResolution;
+        commitCount?: number;
+        filesChanged?: number;
+        deniedTools?: string[];
+        warnings?: AttributionWarning[];
+    };
+}
+
 export interface IElectronAPI {
     // Azure Chart Capture  (existing — Puppeteer)
     azure: IAzureAPI;
@@ -45,6 +104,22 @@ export interface IElectronAPI {
         analyze: (payload: { url: string; summary: string }) => Promise<{ success: boolean; analysis?: string; error?: string }>;
         saveBrief: (payload: { markdown: string }) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
         onAnalyzeChunk: (cb: (data: { url?: string; chunk: string }) => void) => () => void;
+
+        // Full Assessment — read-only investigation of the audited site's repository.
+        pickRepo: () => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
+        validateRepo: (payload: { repoPath: string; beforeLabel?: string; afterLabel?: string }) => Promise<RepoValidation>;
+        analyzeAttribution: (payload: {
+            repoPath: string;
+            summary: string;
+            urls?: string[];
+            beforeLabel?: string;
+            afterLabel?: string;
+            beforeRef?: string;
+            afterRef?: string;
+        }) => Promise<AttributionResult>;
+        cancelAttribution: () => Promise<{ success: boolean; running: boolean }>;
+        onAttributionChunk: (cb: (data: { chunk: string }) => void) => () => void;
+        onAttributionProgress: (cb: (data: AttributionProgress) => void) => () => void;
     };
 
     // Auto-updater

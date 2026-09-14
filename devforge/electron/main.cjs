@@ -70,6 +70,13 @@ app.whenReady().then(() => {
     }
 
     try {
+        require('./ipc/pagespeed-attribution.cjs')(mainWindow);
+        console.log('✅ pagespeed-attribution handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load pagespeed-attribution.cjs:', err);
+    }
+
+    try {
         require('./ipc/commands.cjs')();
         console.log('✅ commands handlers registered');
     } catch (err) {

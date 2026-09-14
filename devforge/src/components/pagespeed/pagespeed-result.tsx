@@ -11,6 +11,7 @@ import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults } from '@/lib/pageSpeedUtils';
+import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { StrategySnapshot } from '@/lib/pagespeed-history';
@@ -1262,6 +1263,38 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             ].join('\n');
         })();
 
+        // Which metrics actually got worse past the configured threshold — feeds the
+        // evidence ranking so the audits that plausibly caused the regression survive
+        // truncation instead of being crowded out by unrelated ones.
+        const regressedMetrics = (() => {
+            const defs = [
+                ['SI', 'speedIndex'], ['LCP', 'largestContentfulPaint'], ['CLS', 'cumulativeLayoutShift'],
+                ['TBT', 'totalBlockingTime'], ['FCP', 'firstContentfulPaint'],
+            ] as const;
+            return defs
+                .filter(([, key]) => {
+                    const b = r1?.[key]?.numericValue ?? 0;
+                    const a = r2?.[key]?.numericValue ?? 0;
+                    return b > 0 && a > b * (1 + config.improvementThreshold / 100);
+                })
+                .map(([label]) => label);
+        })();
+
+        // The resource-level account of what changed on the page — this is the causal
+        // evidence the model needs to explain WHY a metric moved.
+        const evidenceSection = buildEvidenceDiffSection(
+            r1, r2,
+            { before: config.beforeLabel, after: config.afterLabel },
+            {
+                regressedMetrics,
+                shownMetrics: {
+                    SI: displayAudit.SI, LCP: displayAudit.LCP, CLS: displayAudit.CLS,
+                    TBT: displayAudit.TBT, FCP: displayAudit.FCP,
+                },
+                pageOrigin: (() => { try { return new URL(url).origin; } catch { return undefined; } })(),
+            },
+        );
+
         return [
             `URL: ${url}`,
             `Strategy: ${config.strategy}`,
@@ -1269,6 +1302,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             '',
             slot(config.beforeLabel, r1, h1),
             slot(config.afterLabel, r2, h2),
+            evidenceSection,
             matchedSection,
         ].join('\n');
     };
@@ -1314,7 +1348,8 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         }
     };
 
-    const runAnalysis = (index: number) => startAnalysis(index, buildAnalysisSummary(index), config.urls[index] ?? '');
+    // Per-URL analysis panels were removed — the page-level Run Assessment and Full
+    // Assessment already cover every URL in one pass. -1 is the all-URLs key.
     const runAllAnalysis = () => startAnalysis(-1, buildAllUrlsSummary(), `all ${config.urls.length} URLs`);
 
     // Build an AI-agent fix brief: the analysis + raw data + an instruction header for a coding agent.
@@ -1450,11 +1485,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 )}
             </div>
         );
-    };
-
-    const renderAnalysisSection = (index: number): React.ReactNode => {
-        if (!(config.comparisonMode && getSlot1(index) && getSlot2(index))) return null;
-        return renderAnalysisPanel(index, () => runAnalysis(index), `Analyze ${config.beforeLabel} vs ${config.afterLabel}`, 'CLAUDE ANALYSIS');
     };
 
     // Values appearing in BOTH before and after run sets for a metric (any run index) —
@@ -1875,8 +1905,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             );
                                                         })()}
 
-                                                        {/* Claude before/after analysis (comparison mode, both sides audited) */}
-                                                        {!copying && renderAnalysisSection(index)}
                                                     </div>
                                                 </TableCell>
                                             </TableRow>
