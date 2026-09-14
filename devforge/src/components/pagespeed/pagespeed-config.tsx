@@ -426,9 +426,9 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                     <FieldLabel htmlFor="switch-show-warnings" className="my-3">
                                         <Field orientation="horizontal">
                                             <FieldContent>
-                                                <FieldTitle>Show Warnings &amp; Errors</FieldTitle>
+                                                <FieldTitle>Show Warnings</FieldTitle>
                                             </FieldContent>
-                                            <Hint label="Show Lighthouse errors and warnings under each URL in the results table">
+                                            <Hint label="Show Lighthouse warnings in the results table - errors always show">
                                                 <Switch id="switch-show-warnings" checked={config.showWarnings} onCheckedChange={onShowWarningsChange} />
                                             </Hint>
                                         </Field>

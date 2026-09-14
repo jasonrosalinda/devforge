@@ -129,6 +129,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         if (next.has(key)) next.delete(key); else next.add(key);
         return next;
     });
+    // Per-run warning/error lists inside the Individual Runs table — collapsed by default.
+    const [expandedRunMessages, setExpandedRunMessages] = useState<Set<string>>(new Set());
+    const toggleRunMessages = (key: string) => setExpandedRunMessages(prev => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        return next;
+    });
     const [analyses, setAnalyses] = useState<Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>>({});
     const abortControllerRef = useRef<AbortController | null>(null);
     const activeAuditsRef = useRef(0);
@@ -648,10 +655,30 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         if (slot1 === null || slot2 === null) return null;
         const r1 = slot1 || undefined;
         const r2 = slot2 || undefined;
-        const messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(r1, r2);
+        // Errors always surface; warnings are opt-in.
+        const messages: PageSpeedInsightResultMessage[] = getPageSpeedInsightResultMessages(r1, r2)
+            .filter(m => m.isError || config.showWarnings);
 
-        if (messages.length === 0 || !config.showWarnings) return null;
-        return <CollapsibleMessages messages={messages} forceExpanded={true} />;
+        if (messages.length === 0) return null;
+        // Multi-run rows carry the full text per run, so the URL cell shows an
+        // icon + count only — the detail lives in the Individual Runs table.
+        const hasRunHistory = !!(r1?.runHistory?.length || r2?.runHistory?.length);
+        if (!hasRunHistory) return <CollapsibleMessages messages={messages} forceExpanded={true} />;
+
+        const errorCount = messages.filter(m => m.isError).length;
+        const warningCount = messages.length - errorCount;
+        const label = [
+            errorCount > 0 ? `${errorCount} error(s)` : '',
+            warningCount > 0 ? `${warningCount} warning(s)` : '',
+        ].filter(Boolean).join(' / ');
+        return (
+            <Hint label={`${label} across the runs - expand this URL to see which run each one came from`}>
+                <span className={`ml-1 mt-1 inline-flex items-center gap-0.5 ${errorCount > 0 ? 'text-error' : 'text-warning'}`}>
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    <span className="text-[10px] font-medium">{errorCount > 0 ? errorCount : warningCount}</span>
+                </span>
+            </Hint>
+        );
     };
 
     const cellValue = (slot: AuditSlot, metric: PageSpeedMetrics | undefined): React.ReactNode => {
@@ -672,6 +699,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const r = slot as PageSpeedInsightResult;
         const err = r.errorResponse;
         return !!err && (err.code !== 0 || (Array.isArray(err.message) ? err.message.some(m => m.length > 0) : err.message.length > 0));
+    };
+
+    // A partial failure still yields usable aggregates, so only a slot whose every
+    // run errored reads as "Audit failed." — the rest just carry the error badge.
+    const slotAllRunsFailed = (slot: AuditSlot): boolean => {
+        if (slot === false) return true;
+        if (!slot) return false;
+        const history = (slot as PageSpeedInsightResult).runHistory;
+        if (history?.length) return history.every(r => slotHasError(r));
+        return slotHasError(slot);
     };
 
     const retryButton = (
@@ -1441,6 +1478,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const matches = crossRunMatches(index);
         const hl = (key: 'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint', run: PageSpeedInsightResult): string =>
             matches.get(key)?.has(run[key]?.displayValue ?? '') ? ' italic font-semibold text-warning' : '';
+        // Run + shown metrics + the trailing re-run column (hidden while copying as image).
+        const runColCount = 1
+            + [displayAudit.SI, displayAudit.LCP, displayAudit.CLS, displayAudit.TBT, displayAudit.FCP].filter(Boolean).length
+            + (copying ? 0 : 1);
         return (
             <table className="w-full text-xs">
                 <thead>
@@ -1456,11 +1497,37 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 </thead>
                 <tbody>
                     {history.map((run, runIdx) => {
-                        const rerunning = rerunningRuns.has(`${slotKey}-${index}-${runIdx}`);
+                        const runKey = `${slotKey}-${index}-${runIdx}`;
+                        const rerunning = rerunningRuns.has(runKey);
+                        // Warnings/errors belonging to THIS run — shown inline instead of piling up on the
+                        // URL cell. Errors always surface; warnings are opt-in.
+                        const runMessages = getPageSpeedInsightResultMessages(run, undefined)
+                            .filter(m => m.isError || config.showWarnings);
+                        const runErrorCount = runMessages.filter(m => m.isError).length;
+                        const runWarningCount = runMessages.length - runErrorCount;
+                        // Copying as image flattens everything open so the snapshot keeps the detail.
+                        const messagesOpen = copying || expandedRunMessages.has(runKey);
+                        const badgeLabel = [
+                            runErrorCount > 0 ? `${runErrorCount} error(s)` : '',
+                            runWarningCount > 0 ? `${runWarningCount} warning(s)` : '',
+                        ].filter(Boolean).join(' / ');
                         return (
-                            <tr key={runIdx} className="border-b border-border/50 last:border-0">
+                            <React.Fragment key={runIdx}>
+                            <tr className={`border-b border-border/50 ${messagesOpen && runMessages.length > 0 ? '' : 'last:border-0'}`}>
                                 <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
                                     #{runIdx + 1}<span className="ml-1 text-[10px] opacity-70">{formatRunTime(run.fetchTime)}</span>
+                                    {runMessages.length > 0 && (
+                                        <Hint label={messagesOpen ? `Hide the ${badgeLabel} from run #${runIdx + 1}` : `Show the ${badgeLabel} from run #${runIdx + 1}`}>
+                                            <button
+                                                onClick={() => toggleRunMessages(runKey)}
+                                                className={`ml-1.5 inline-flex items-center gap-0.5 align-middle rounded px-1 py-0.5 hover:bg-muted transition-colors ${runErrorCount > 0 ? 'text-error' : 'text-warning'}`}
+                                            >
+                                                <AlertTriangle className="h-3 w-3" />
+                                                <span className="text-[10px] font-medium">{runMessages.length}</span>
+                                                <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${messagesOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                            </button>
+                                        </Hint>
+                                    )}
                                 </td>
                                 {displayAudit.SI && <td className={`text-center py-1 px-2${hl('speedIndex', run)}`}>{historyMetricValue(run.speedIndex)}</td>}
                                 {displayAudit.LCP && <td className={`text-center py-1 px-2${hl('largestContentfulPaint', run)}`}>{historyMetricValue(run.largestContentfulPaint)}</td>}
@@ -1481,6 +1548,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                     </td>
                                 )}
                             </tr>
+                            {runMessages.length > 0 && messagesOpen && (
+                                <tr className="border-b border-border/50 last:border-0">
+                                    <td colSpan={runColCount} className="px-2 pb-2">
+                                        <div className="ml-4 space-y-1 border-l border-border pl-2">
+                                            {runMessages.map((m, j) => (
+                                                <p key={j} className={`text-xs ${m.isError ? 'text-error' : 'text-warning'}`}>* {m.message}</p>
+                                            ))}
+                                        </div>
+                                    </td>
+                                </tr>
+                            )}
+                            </React.Fragment>
                         );
                     })}
                 </tbody>
@@ -1690,7 +1769,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         {getResultMessageForUrl(slot1, slot2)}
                                                         {!copying && (slotHasError(slot1) || slotHasError(slot2)) && (
                                                             <div className="flex items-center gap-1 mt-1">
-                                                                <span className="text-xs text-destructive">Audit failed.</span>
+                                                                {(slotAllRunsFailed(slot1) || slotAllRunsFailed(slot2)) && (
+                                                                    <span className="text-xs text-destructive">Audit failed.</span>
+                                                                )}
                                                                 {retryButton(index, slot1, setResults1, '1')}
                                                                 {!displayAudit.singleResult && retryButton(index, slot2, setResults2, '2')}
                                                             </div>
