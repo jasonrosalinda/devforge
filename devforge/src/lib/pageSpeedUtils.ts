@@ -268,3 +268,45 @@ export function aggregatePageSpeedInsightResults(
 
     return result;
 }
+// ─── Keeping per-row state aligned when the URL list is edited ────────────────
+// Results, analyses and expanded-row state are all stored positionally, indexed
+// against `config.urls`. Removing (or reordering) a URL therefore slides every
+// later row's data onto the wrong URL unless the stored rows are remapped first.
+
+/**
+ * For each URL in `nextUrls`, the index it occupied in `prevUrls`, or -1 when it
+ * is new. Duplicate URLs each consume a distinct previous slot, left to right.
+ */
+export function mapUrlsToPreviousIndexes(prevUrls: string[], nextUrls: string[]): number[] {
+    const available = new Map<string, number[]>();
+    prevUrls.forEach((url, i) => {
+        const slots = available.get(url);
+        if (slots) slots.push(i); else available.set(url, [i]);
+    });
+    return nextUrls.map(url => available.get(url)?.shift() ?? -1);
+}
+
+/** Re-order positional row data onto the new URL positions; new rows come back `undefined`. */
+export function realignSlots<T>(slots: T[], indexMap: number[]): (T | undefined)[] {
+    return indexMap.map(prevIndex => (prevIndex === -1 ? undefined : slots[prevIndex]));
+}
+
+/** Re-key an index-keyed record (e.g. per-row analyses) onto the new URL positions. */
+export function realignIndexedRecord<T>(record: Record<number, T>, indexMap: number[]): Record<number, T> {
+    const next: Record<number, T> = {};
+    indexMap.forEach((prevIndex, nextIndex) => {
+        if (prevIndex === -1) return;
+        const value = record[prevIndex];
+        if (value !== undefined) next[nextIndex] = value;
+    });
+    return next;
+}
+
+/** Re-key an index-keyed set (e.g. expanded rows) onto the new URL positions. */
+export function realignIndexSet(set: Set<number>, indexMap: number[]): Set<number> {
+    const next = new Set<number>();
+    indexMap.forEach((prevIndex, nextIndex) => {
+        if (prevIndex !== -1 && set.has(prevIndex)) next.add(nextIndex);
+    });
+    return next;
+}

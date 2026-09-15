@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PageSpeedInsightResult, PageSpeedMetrics } from '@shared/types/pageSpeedInsight.types';
-import { compareRunToBaseline, findUnwinnableMetrics, type ComparableMetricKey } from './pageSpeedUtils';
+import { compareRunToBaseline, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
 
 const ALL: ComparableMetricKey[] = [
     'speedIndex', 'largestContentfulPaint', 'cumulativeLayoutShift', 'totalBlockingTime', 'firstContentfulPaint',
@@ -126,5 +126,65 @@ describe('findUnwinnableMetrics', () => {
             ALL,
         );
         expect(blockers.map(b => b.key).sort()).toEqual(['cumulativeLayoutShift', 'totalBlockingTime']);
+    });
+});
+
+describe('mapUrlsToPreviousIndexes', () => {
+    it('keeps every row aligned when a middle URL is removed', () => {
+        const prev = ['https://a', 'https://b', 'https://c'];
+        const next = ['https://a', 'https://c'];
+        expect(mapUrlsToPreviousIndexes(prev, next)).toEqual([0, 2]);
+    });
+
+    it('marks appended URLs as having no previous slot', () => {
+        expect(mapUrlsToPreviousIndexes(['https://a'], ['https://a', 'https://b'])).toEqual([0, -1]);
+    });
+
+    it('follows a reorder', () => {
+        expect(mapUrlsToPreviousIndexes(['https://a', 'https://b'], ['https://b', 'https://a'])).toEqual([1, 0]);
+    });
+
+    it('gives each duplicate its own previous slot, then -1', () => {
+        const prev = ['https://a', 'https://a'];
+        const next = ['https://a', 'https://a', 'https://a'];
+        expect(mapUrlsToPreviousIndexes(prev, next)).toEqual([0, 1, -1]);
+    });
+
+    it('is identity when nothing changed', () => {
+        const urls = ['https://a', 'https://b'];
+        expect(mapUrlsToPreviousIndexes(urls, urls)).toEqual([0, 1]);
+    });
+});
+
+describe('realignSlots', () => {
+    it('carries results across a removal instead of shifting them onto the wrong URL', () => {
+        const slots = ['resA', 'resB', 'resC'];
+        const map = mapUrlsToPreviousIndexes(['https://a', 'https://b', 'https://c'], ['https://a', 'https://c']);
+        expect(realignSlots(slots, map)).toEqual(['resA', 'resC']);
+    });
+
+    it('leaves a brand-new URL unaudited', () => {
+        expect(realignSlots(['resA'], [0, -1])).toEqual(['resA', undefined]);
+    });
+});
+
+describe('realignIndexedRecord', () => {
+    it('re-keys per-row records to the new positions', () => {
+        const analyses = { 0: 'a', 1: 'b', 2: 'c' };
+        expect(realignIndexedRecord(analyses, [0, 2])).toEqual({ 0: 'a', 1: 'c' });
+    });
+
+    it('drops entries whose row is gone', () => {
+        expect(realignIndexedRecord({ 1: 'b' }, [0, 2])).toEqual({});
+    });
+});
+
+describe('realignIndexSet', () => {
+    it('moves expanded rows to their new index', () => {
+        expect([...realignIndexSet(new Set([0, 2]), [0, 2])]).toEqual([0, 1]);
+    });
+
+    it('drops expanded rows that were removed', () => {
+        expect([...realignIndexSet(new Set([1]), [0, 2])]).toEqual([]);
     });
 });

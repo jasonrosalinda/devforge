@@ -414,8 +414,8 @@ export default function PageSpeedResultPage() {
         setMobileConfig({ ...snapshot.config, strategy: 'mobile', apiKey });
         setRestoredConfig({ ...snapshot.config, apiKey });
         setRestoreToken(t => t + 1);
-        desktopRef.current?.restoreSnapshot(snapshot.desktop);
-        mobileRef.current?.restoreSnapshot(snapshot.mobile);
+        desktopRef.current?.restoreSnapshot(snapshot.desktop, snapshot.config.urls);
+        mobileRef.current?.restoreSnapshot(snapshot.mobile, snapshot.config.urls);
         setPageAnalysis(snapshot.pageAnalysis?.markdown
             ? { status: 'done', markdown: snapshot.pageAnalysis.markdown, error: null }
             : null);

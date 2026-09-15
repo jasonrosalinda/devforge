@@ -18,7 +18,9 @@ export interface AuditDetailsHeading {
 export interface AuditDetails {
     type: string;
     headings?: AuditDetailsHeading[];
-    items?: Record<string, unknown>[];
+    // Lighthouse mostly returns an array here, but some detail types (e.g. `checklist`)
+    // return an object map instead — so every reader must narrow before iterating.
+    items?: Record<string, unknown>[] | Record<string, unknown>;
     overallSavingsMs?: number;
     // Set when `items` was capped at parse time; `itemCount` is the pre-cap length,
     // so a before/after diff can still say "40 of 214 requests shown".

@@ -17,6 +17,7 @@ export default defineConfig({
     globals: true,
     include: [
       'electron/**/*.test.mjs',
+      'shared/**/*.test.ts',
       'src/**/*.test.ts',
       'src/**/*.test.tsx',
     ],

@@ -10,7 +10,7 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, compareRunToBaseline, findUnwinnableMetrics, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, compareRunToBaseline, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -31,7 +31,7 @@ export interface PageSpeedResultsHandle {
         times2: AuditTimes;
         analyses: Record<number, { status: AnalysisStatus; markdown: string; error: string | null }>;
     };
-    restoreSnapshot: (snapshot: StrategySnapshot) => void;
+    restoreSnapshot: (snapshot: StrategySnapshot, urls: string[]) => void;
     // Markdown-ish data summary of every audited URL (before/after, runs, insights,
     // cross-run identical values) — feeds the page-level Desktop+Mobile AI analysis.
     getAnalysisSummary: () => string;
@@ -149,12 +149,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [auditEnd, setAuditEnd] = useState<Date | null>(null);
     const [times1, setTimes1] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
     const [times2, setTimes2] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
-    const [elapsed, setElapsed] = useState(0);
     const isAuditing = auditing1 || auditing2;
     const isRetryingAny = retryingRows.size > 0;
     // One brute at a time — each one can fire up to 10 audits at the API.
     const isBrutingAny = Object.keys(bruteProgress).length > 0;
-    const timerActive = isAuditing || isRetryingAny;
 
     // Let the parent re-evaluate results-dependent UI (e.g. header "Copy as Table" button)
     // whenever this strategy's results change — refs alone don't trigger parent re-renders.
@@ -162,6 +160,26 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         onResultsChange?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [results1, results2]);
+
+    // Results, analyses and expanded rows are all stored positionally against `config.urls`.
+    // Editing the list (removing a URL, reordering) would otherwise slide every later row's
+    // numbers onto the wrong URL, so carry each row's data to its new position by URL.
+    const urlsRef = useRef(config.urls);
+    useEffect(() => {
+        const prevUrls = urlsRef.current;
+        if (prevUrls.length === config.urls.length && prevUrls.every((u, i) => u === config.urls[i])) return;
+        urlsRef.current = config.urls;
+        const indexMap = mapUrlsToPreviousIndexes(prevUrls, config.urls);
+        setResults1(prev => realignSlots(prev, indexMap));
+        setResults2(prev => realignSlots(prev, indexMap));
+        setAnalyses(prev => realignIndexedRecord(prev, indexMap));
+        setExpandedHistory(prev => realignIndexSet(prev, indexMap));
+        // Open/collapsed drawer state is keyed by `index-...` strings, so a shifted row
+        // would inherit a neighbour's toggles. Cheaper to reset than to re-key.
+        setExpandedInsights(new Set());
+        setCollapsedRunCards(new Set());
+        setExpandedRunMessages(new Set());
+    }, [config.urls]);
 
     // Aggregation only applies when a URL's runs collapse into one row, which happens at
     // audit time — so switching Average↔Median afterwards has to recompute the stored rows
@@ -179,15 +197,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         setResults1(prev => reaggregate(prev));
         setResults2(prev => reaggregate(prev));
     }, [config.aggregation]);
-
-    useEffect(() => {
-        if (!timerActive || !auditStart) return;
-        setElapsed(0);
-        const id = setInterval(() => {
-            setElapsed(Math.round((Date.now() - auditStart.getTime()) / 1000));
-        }, 1000);
-        return () => clearInterval(id);
-    }, [timerActive, auditStart]);
 
     const displayAudit = displayPageSpeedAudit(config);
     const showAnalyzeButton = config.urls.length > 0 && !isNullOrEmpty(config.apiKey);
@@ -299,7 +308,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const audit1 = () => runAudit(setResults1, setAuditing1, auditing2, '1');
     const audit2 = () => runAudit(setResults2, setAuditing2, auditing1, '2');
 
-    const restoreSnapshot = (snapshot: StrategySnapshot) => {
+    const restoreSnapshot = (snapshot: StrategySnapshot, urls: string[]) => {
         // Saved runs never carry `null` (loading); JSON turned `undefined` slots
         // into `null`, so map them back so the table renders "no run" not a spinner.
         const reviveSlots = (slots: StrategySnapshot['results1']): AuditSlot[] =>
@@ -315,6 +324,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         };
 
         abortControllerRef.current?.abort();
+        // The restored config's URLs arrive as a prop a render later; pin them now so the
+        // realign effect sees no change and leaves the restored rows alone.
+        urlsRef.current = urls;
         setResults1(reviveSlots(snapshot.results1));
         setResults2(reviveSlots(snapshot.results2));
         setTimes1(reviveTimes(snapshot.times1));
@@ -938,14 +950,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return isNaN(d.getTime()) ? '-' : d.toLocaleString();
     };
 
-    const formatWindow = (start: Date, end: Date | null): string => {
-        // Live windows recompute each second — the `elapsed` timer re-renders the component.
-        const endMs = end ? end.getTime() : Date.now();
-        const secs = Math.max(0, Math.round((endMs - start.getTime()) / 1000));
-        const dur = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
-        return `${start.toLocaleString()}${end ? ` – ${end.toLocaleString()}` : ''} · ${dur}`;
-    };
-
     const scoreColor = (score: number | null): string => {
         if (score === null) return 'text-muted-foreground';
         if (score >= 0.9) return 'text-success';
@@ -1044,7 +1048,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         if (!details) return false;
         const d = details as { type?: string; items?: unknown[]; headings?: unknown[] };
         if (d.type === 'list' && Array.isArray(d.items) && d.items.length > 0) return true;
-        if ((details.headings?.length ?? 0) > 0 && (details.items?.length ?? 0) > 0) return true;
+        if ((details.headings?.length ?? 0) > 0 && Array.isArray(details.items) && details.items.length > 0) return true;
         return !!treeChains(details);
     };
 
@@ -1537,7 +1541,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             <React.Fragment key={runIdx}>
                             <tr className={`border-b border-border/50 ${messagesOpen && runMessages.length > 0 ? '' : 'last:border-0'}`}>
                                 <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
-                                    #{runIdx + 1}<span className="ml-1 text-[10px] opacity-70">{formatRunTime(run.fetchTime)}</span>
+                                    <Hint label={`Run #${runIdx + 1}${run.fetchTime ? ` - ${formatRunTime(run.fetchTime)}` : ''}`}>
+                                        <span>#{runIdx + 1}</span>
+                                    </Hint>
                                     {runMessages.length > 0 && (
                                         <Hint label={messagesOpen ? `Hide the ${badgeLabel} from run #${runIdx + 1}` : `Show the ${badgeLabel} from run #${runIdx + 1}`}>
                                             <button
@@ -1937,18 +1943,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     .ps-analysis-content a { color: hsl(var(--primary)); }
                     .ps-analysis-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .6rem; color: hsl(var(--muted-foreground)); margin: .4rem 0; }
                 `}</style>
-                {(times1.start || times2.start) && (
-                    <div className="mt-2 text-right text-xs text-muted-foreground space-y-0.5">
-                        {config.comparisonMode ? (
-                            <>
-                                {times1.start && <div><span className="font-medium">{config.beforeLabel}:</span> {formatWindow(times1.start, times1.end)}</div>}
-                                {times2.start && <div><span className="font-medium">{config.afterLabel}:</span> {formatWindow(times2.start, times2.end)}</div>}
-                            </>
-                        ) : (
-                            times1.start && <div>{formatWindow(times1.start, times1.end)}</div>
-                        )}
-                    </div>
-                )}
             </CardContent>
         </Card>
     );

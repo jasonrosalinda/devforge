@@ -49,7 +49,10 @@ const CAP_SORT_KEY: Record<string, string> = {
 
 function capDetails(key: string, details: AuditDetails): AuditDetails {
     const items = details.items;
-    if (!items || items.length <= MAX_DETAIL_ITEMS) return details;
+    // Some Lighthouse detail types (e.g. `checklist`) hand back `items` as an object
+    // map, not an array. Capping one would throw and fail the ENTIRE run, so leave
+    // any non-array `items` exactly as it came.
+    if (!Array.isArray(items) || items.length <= MAX_DETAIL_ITEMS) return details;
     const sortKey = CAP_SORT_KEY[key];
     const ordered = sortKey
         ? [...items].sort((a, b) => (Number(b[sortKey]) || 0) - (Number(a[sortKey]) || 0))

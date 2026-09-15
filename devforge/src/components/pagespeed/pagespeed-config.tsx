@@ -287,10 +287,10 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                         </FieldSet>
                                         <Field>
                                             <Hint label="Add the URL above to the audit list" className="w-full">
-                                                <Button onClick={onAddUrl} className="w-full" variant="outline">Add</Button>
+                                                <Button onClick={onAddUrl} className="w-full" variant="outline" disabled={isAuditing}>Add</Button>
                                             </Hint>
                                             <Hint label="Load a .txt file with one URL per line - invalid lines are skipped" className="w-full">
-                                                <Button onClick={onWebUrlsUploadClick} className="w-full" variant="outline">Upload</Button>
+                                                <Button onClick={onWebUrlsUploadClick} className="w-full" variant="outline" disabled={isAuditing}>Upload</Button>
                                             </Hint>
                                             <input ref={webUrlsInputUpload} type="file" accept=".txt" onChange={handleWebUrlsUpload} className="hidden" />
                                         </Field>
@@ -311,8 +311,8 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                                         <ItemTitle className="text-sm break-all">{url}</ItemTitle>
                                                     </ItemContent>
                                                     <ItemActions>
-                                                        <Hint label="Remove this URL from the audit list">
-                                                            <Button size="sm" variant="ghost" onClick={() => onRemoveUrl(url)}>
+                                                        <Hint label={isAuditing ? 'Finish or cancel the audit before changing the URL list' : 'Remove this URL from the audit list'}>
+                                                            <Button size="sm" variant="ghost" onClick={() => onRemoveUrl(url)} disabled={isAuditing}>
                                                                 <Trash2 className="mr-1 h-4 w-4" />
                                                             </Button>
                                                         </Hint>

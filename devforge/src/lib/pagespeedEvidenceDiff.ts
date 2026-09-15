@@ -344,7 +344,8 @@ const readRows = (
 ): Map<string, ReadRow> => {
     const out = new Map<string, ReadRow>();
     const reader = ITEM_READERS[auditKey];
-    if (!reader || !details?.items) return out;
+    // `items` is an object map for some Lighthouse detail types — not iterable.
+    if (!reader || !Array.isArray(details?.items)) return out;
     for (const item of details.items) {
         let row: ReadRow | null = null;
         try {
@@ -448,7 +449,7 @@ export function rankAuditDiff(d: Omit<AuditDiff, 'rank'>, opts: EvidenceDiffOpti
 
 const lcpNode = (snap: AuditSnapshot | undefined): { selector?: string; label?: string } | undefined => {
     const items = snap?.details?.items;
-    if (!items) return undefined;
+    if (!Array.isArray(items)) return undefined;
     for (const item of items) {
         const node = item.node as Record<string, unknown> | undefined;
         if (!node) continue;
