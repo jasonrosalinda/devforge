@@ -21,7 +21,7 @@ import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
 import { CrashMonitoringRows } from './crashMonitoringSection';
 import { PerformanceRows } from './performanceSection';
-import { perfTotals, chartTotals, perfChartRows } from './performance';
+import { perfSummary, hasPerfData } from './performance';
 import { UserRows } from './userSection';
 import { ExceptionLocationChart } from './exceptionLocationChart';
 import { ExceptionSiteTable } from './exceptionSiteTable';
@@ -30,7 +30,7 @@ import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { useCopyElementAsImage, loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { useIpReputation } from '@/hooks/useIpReputation';
-import { UI, resolveCssColor } from '@/lib/chart-colors';
+import { UI, PERF_COLORS, resolveCssColor } from '@/lib/chart-colors';
 
 
 // ─── Exception tabs: Unclassified / Timeout / Socket / OOM ───────────────────
@@ -1309,9 +1309,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       );
       const dataUrl = canvas.toDataURL('image/png');
 
-      // Only present when that side's Performance row is actually expanded on
-      // screen — a collapsed or hidden section leaves no [data-teams-perf-chart]
-      // node to find, so it's simply left out rather than force-expanded.
+      // The chart sits above the Performance row and is drawn whether or not the row is
+      // expanded, so this finds it as long as the section and the block are on screen —
+      // a hidden block leaves no [data-teams-perf-chart] node, and is simply left out.
       const capturePerfChart = async (tag: 'fe' | 'api') => {
         const el = card.querySelector(`[data-teams-perf-chart="${tag}"]`) as HTMLElement | null;
         if (!el) return null;
@@ -1324,33 +1324,54 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       // The chart already shows the shape over time; these are the same totals as the
       // on-screen Performance row's own summary cells, one labelled figure at a time
       // rather than packed into that row's dense "5xx (%) / 4xx (%) / total" form.
+      /** One figure per row, name left and value right — same shape as the tables above. */
+      const perfRow = (name: string, value: string, color?: string) =>
+        `<tr><td style="padding:4px 10px;">${name}</td>` +
+        `<td align="right" style="padding:4px 10px;${color ? `color:${color};` : ''}">${value}</td></tr>`;
+
+      // The figures go in whenever that side has request telemetry, with or without a
+      // chart image: a capture that could not be taken (block hidden, card off screen)
+      // used to take the whole block with it, so a paste silently lost the numbers too.
       const perfBlock = (label: string, url: string | null, perf: EndpointPerformance | null | undefined) => {
-        if (!url) return '';
-        // Same split as the on-screen Performance row: app-wide totals for everything
-        // except "slowest", which only exists as an endpoint rollup — falls back to
-        // the merged endpoint set if the app-wide timeline came back empty.
-        const t = perfTotals(perf?.endpoints);
-        const overall = chartTotals(perfChartRows(perf?.overallSeries ?? undefined));
-        const total = overall.count > 0 ? overall.count : t.requests;
-        const fourXx = overall.count > 0 ? overall.c4 : t.fourXx;
-        const fiveXx = overall.count > 0 ? overall.c5 : t.fiveXx;
-        const peakP95 = overall.count > 0 ? overall.peakP95 : t.worstP95;
-        const avgMs = overall.count > 0 ? overall.avgMs : t.avgMs;
-        const success = Math.max(0, total - fourXx - fiveXx);
+        if (!hasPerfData(perf)) return '';
+        const f = perfSummary(perf);
         return (
           `<p style="margin:0;">&nbsp;</p>` +
           `<p style="font-weight:700;margin:0;">${label}</p>` +
-          `<p style="margin:0;"><img src="${url}" style="width:100%;display:block;"/></p>` +
-          `<p style="margin:4px 0 0;">` +
-          `<b>Request:</b> Total - ${total.toLocaleString()}` +
-          ` | Success - ${success.toLocaleString()} (${fmtPct(success, total)})` +
-          ` | 4xx - ${fourXx.toLocaleString()} (${fmtPct(fourXx, total)})` +
-          ` | 5xx - ${fiveXx.toLocaleString()} (${fmtPct(fiveXx, total)})` +
-          `</p>` +
-          `<p style="margin:2px 0 0;">` +
-          `<b>Response:</b> Average - ${fmtDuration(avgMs)} | P95 - ${fmtDuration(peakP95)} | Max - ${fmtDuration(t.slowest)}` +
-          `</p>`
+          (url ? `<p style="margin:0;"><img src="${url}" style="width:100%;display:block;"/></p>` : '') +
+          // Same blank line the top chart gets before the Metrics table, so the figures
+          // read as a block under the chart rather than stuck to its bottom edge.
+          `<p style="margin:0;">&nbsp;</p>` +
+          // A table, like every other figure on the paste: the run of pipe-separated
+          // pairs read as a sentence and put the numbers at seven different left edges.
+          // Labelled and coloured the way the chart's own legend labels them, so this
+          // reads as that chart's caption rather than a second set of numbers.
+          `<table border="1" cellspacing="0" ${tableStyle}>` +
+          `<tr><td colspan="2" style="padding:4px 10px;"><b>Request</b></td></tr>` +
+          perfRow('total', f.total.toLocaleString()) +
+          perfRow('successful', `${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`, PERF_COLORS.ok) +
+          perfRow('4xx', `${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`, f.fourXx > 0 ? PERF_COLORS.fourXx : undefined) +
+          perfRow('5xx', `${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`, f.fiveXx > 0 ? PERF_COLORS.fiveXx : undefined) +
+          `<tr><td colspan="2" style="padding:4px 10px;"><b>Response</b></td></tr>` +
+          perfRow('P95 peak', fmtDuration(f.peakP95)) +
+          perfRow('average', fmtDuration(f.avgMs)) +
+          perfRow('slowest', fmtDuration(f.slowest)) +
+          `</table>`
         );
+      };
+
+      /** The same figures for the plain-text flavour, which carried none of this before. */
+      const perfLines = (label: string, perf: EndpointPerformance | null | undefined): string[] => {
+        if (!hasPerfData(perf)) return [];
+        const f = perfSummary(perf);
+        return [
+          '',
+          label,
+          `Request: total - ${f.total.toLocaleString()} | successful - ${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`
+            + ` | 4xx - ${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`
+            + ` | 5xx - ${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`,
+          `Response: P95 peak - ${fmtDuration(f.peakP95)} | average - ${fmtDuration(f.avgMs)} | slowest - ${fmtDuration(f.slowest)}`,
+        ];
       };
 
       const toTableRows = (list: typeof rows) => list.map(r =>
@@ -1385,6 +1406,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         'Metrics | Average | P99 | Max',
         ...rows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`),
         ...(statusRows.length ? ['', ...statusRows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`)] : []),
+        ...perfLines('Frontend', metrics.requestInsights?.performance),
+        ...perfLines('API', metrics.apiRequestInsights?.performance),
         '',
         `Remarks: ${remarksText || '—'}`,
       ].join('\n');

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Rocket, Loader2, ExternalLink, TriangleAlert, Settings as SettingsIcon, LogIn, RefreshCw, Copy, Download, CheckCircle2, Circle } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/page-header';
@@ -15,6 +15,9 @@ import { parseRunbookSections, collectImageUrls, extractGoals, extractReleaseLab
 import { RunbookTable } from '@/components/release-pilot/runbookTable';
 import { ReleaseSummary, summaryClipboard } from '@/components/release-pilot/releaseSummary';
 import { ImageLightbox, type LightboxImage } from '@/components/release-pilot/imageLightbox';
+import {
+  TokenStatusPill, TokenIssueBanner, tokenBlocked, type TokenStatus,
+} from '@/components/release-pilot/tokenStatusPill';
 
 interface RunbookResult {
   ok: boolean;
@@ -97,6 +100,10 @@ export default function ReleasePilotPage() {
   const [imgDebug, setImgDebug] = useState<{ fetched: number; total: number; sampleUrl?: string | undefined; status?: number | undefined; err?: string | undefined; textHead?: string | undefined } | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [tokenStatus, setTokenStatus] = useState<TokenStatus>({ state: 'checking' });
+  // A network-level check failure ('error') still allows a try — the page fetch
+  // may work where the probe didn't. A rejected token never will.
+  const tokenDead = tokenBlocked(tokenStatus.state) && tokenStatus.state !== 'error';
   const [activeTab, setActiveTab] = useState('summary');
   const [closure, setClosure] = useState(false);
 
@@ -190,6 +197,21 @@ export default function ReleasePilotPage() {
       .catch(() => setConnected(false));
   }, [confluenceBaseUrl]);
 
+  // Validate the API token itself (separate from the browser session — the page
+  // fetch uses the token, so an expired one fails every load).
+  const checkToken = useCallback(async () => {
+    if (!confluenceBaseUrl) { setTokenStatus({ state: 'no-base' }); return; }
+    setTokenStatus({ state: 'checking' });
+    try {
+      const s = await window.electronAPI?.confluence?.tokenStatus({ baseUrl: confluenceBaseUrl, email, apiToken });
+      setTokenStatus((s as TokenStatus) ?? { state: 'error', detail: 'Confluence bridge unavailable.' });
+    } catch (e) {
+      setTokenStatus({ state: 'error', detail: e instanceof Error ? e.message : String(e) });
+    }
+  }, [confluenceBaseUrl, email, apiToken]);
+
+  useEffect(() => { void checkToken(); }, [checkToken]);
+
   async function handleConnect() {
     if (!confluenceBaseUrl || connecting) return;
     setConnecting(true);
@@ -264,6 +286,8 @@ export default function ReleasePilotPage() {
         setError('Confluence bridge unavailable.');
       } else if (!res.ok) {
         setError(res.error || 'Failed to load runbook.');
+        // An auth-shaped failure means the token state on screen is stale.
+        if (/\b40[13]\b/.test(res.error || '')) void checkToken();
       } else {
         setRunbookHistory(pushHistory(RUNBOOK_HIST_KEY, url.trim()));
         // Primary: attachments downloaded by the main process via the REST
@@ -344,7 +368,9 @@ export default function ReleasePilotPage() {
         title="Release Pilot"
         subtitle="Load a Confluence deployment runbook — activity table + all screenshots, including ones inside expand drawers."
         actions={confluenceBaseUrl ? (
-          connecting ? (
+          <div className="flex items-center gap-2">
+          <TokenStatusPill status={tokenStatus} onRecheck={() => void checkToken()} />
+          {connecting ? (
             <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
               Connecting…
@@ -378,7 +404,8 @@ export default function ReleasePilotPage() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-          )
+          )}
+          </div>
         ) : undefined}
       />
 
@@ -390,6 +417,10 @@ export default function ReleasePilotPage() {
           </span>
         </div>
       )}
+
+      {/* An expired or rejected token fails every load — say so before the user
+          pastes a URL, and carry the fix with the message. */}
+      {hasCreds && <TokenIssueBanner status={tokenStatus} onRecheck={() => void checkToken()} />}
 
 
       {/* URL inputs — release plan (goals) + runbook, one Load button */}
@@ -420,8 +451,16 @@ export default function ReleasePilotPage() {
             {runbookHistory.map((u, i) => <option key={i} value={u} />)}
           </datalist>
         </div>
-        <Hint label={!hasCreds ? 'Add your Confluence credentials in Settings first' : 'Fetch the runbook from this Confluence page and build the release summary'}>
-          <Button onClick={handleLoad} disabled={!hasCreds || loading || !url.trim()} className="gap-1.5 shrink-0 self-stretch h-auto">
+        <Hint
+          label={
+            !hasCreds
+              ? 'Add your Confluence credentials in Settings first'
+              : tokenDead
+                ? 'The Confluence API token is not usable — replace it in Settings → Atlassian, then Re-check'
+                : 'Fetch the runbook from this Confluence page and build the release summary'
+          }
+        >
+          <Button onClick={handleLoad} disabled={!hasCreds || tokenDead || loading || !url.trim()} className="gap-1.5 shrink-0 self-stretch h-auto">
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
             {loading ? 'Loading…' : 'Load'}
           </Button>

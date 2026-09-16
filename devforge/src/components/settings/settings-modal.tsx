@@ -37,8 +37,32 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
   const [showPagespeed, setShowPagespeed] = useState(false);
   const [showUptimeRobot, setShowUptimeRobot] = useState(false);
   const [showAtlassianToken, setShowAtlassianToken] = useState(false);
+  const [tokenTest, setTokenTest] = useState<{ testing: boolean; state?: string; text?: string }>({ testing: false });
 const [newMonitorId, setNewMonitorId] = useState('');
   const [newPlatformUrl, setNewPlatformUrl] = useState('');
+
+  // Check the token the user just typed, before saving — an expired token is
+  // otherwise only discovered when a runbook load fails.
+  async function testAtlassianToken() {
+    const { confluenceBaseUrl, email, apiToken } = draft.atlassian;
+    if (!confluenceBaseUrl || !email || !apiToken) {
+      setTokenTest({ testing: false, state: 'missing', text: 'Fill in base URL, email, and token first.' });
+      return;
+    }
+    setTokenTest({ testing: true });
+    try {
+      const r = await window.electronAPI?.confluence?.tokenStatus({ baseUrl: confluenceBaseUrl, email, apiToken });
+      const state = r?.state ?? 'error';
+      const text =
+        state === 'valid' ? `Token valid${r?.displayName ? ` — ${r.displayName}` : ''}.`
+          : state === 'expired' ? 'Rejected (401) — expired, revoked, or the email does not match this token.'
+          : state === 'forbidden' ? `Forbidden (403) — token has no Confluence access${r?.detail ? `: ${r.detail}` : ''}.`
+          : r?.detail || 'Could not reach Confluence.';
+      setTokenTest({ testing: false, state, text });
+    } catch (e) {
+      setTokenTest({ testing: false, state: 'error', text: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
   function addPlatformUrl() {
     const url = newPlatformUrl.trim();
@@ -583,7 +607,35 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   </button>
                 </Hint>
               </div>
-              <p className="text-xs text-muted-foreground">Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">id.atlassian.com → API tokens</a>. Used with Basic auth to fetch runbook pages + attachments.</p>
+              <p className="text-xs text-muted-foreground">Used with Basic auth to fetch runbook pages + attachments. Atlassian tokens expire (one year at most) — when one does, Release Pilot shows <span className="text-foreground">API token expired</span> and every load fails with 401.</p>
+
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5">
+                <div className="mb-1.5 text-xs font-medium text-foreground">How to create and apply a token</div>
+                <ol className="list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
+                  <li>
+                    Open{' '}
+                    <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">
+                      id.atlassian.com → Security → API tokens
+                    </a>.
+                  </li>
+                  <li>Click <span className="text-foreground">Create API token</span> — the classic one, not “with scopes”; that is what the Confluence REST API here accepts.</li>
+                  <li>Name it <span className="font-mono text-foreground">devForge</span>, set an expiry, create it, and copy the value — it is shown only once.</li>
+                  <li>Paste it above with the matching account email, then <span className="text-foreground">Test token</span> and <span className="text-foreground">Save</span>.</li>
+                  <li>Revoke the old token on that same Atlassian page once the new one tests green.</li>
+                </ol>
+                <div className="mt-2 flex items-center gap-2">
+                  <Hint label="Call Confluence with these credentials and report what it says">
+                    <Button size="sm" variant="outline" onClick={testAtlassianToken} disabled={tokenTest.testing}>
+                      {tokenTest.testing ? 'Testing…' : 'Test token'}
+                    </Button>
+                  </Hint>
+                  {tokenTest.text && (
+                    <span className={`text-xs ${tokenTest.state === 'valid' ? 'text-success' : 'text-destructive'}`}>
+                      {tokenTest.text}
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )}

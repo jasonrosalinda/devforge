@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { EndpointPerformance } from '@shared/types/azureMetrics.types';
 import { EndpointPerfChart } from './azureMetricChart';
-import { CellSkeleton, PanelSkeleton, SkeletonBlock } from './loadingSkeleton';
+import { CellSkeleton, ListSkeleton, SkeletonBlock } from './loadingSkeleton';
 import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { UI } from '@/lib/chart-colors';
 import {
-  perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
+  perfChartRows, perfSummary, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
   PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR, httpStatusLabel,
 } from './performance';
 
@@ -30,103 +30,64 @@ const DEP_GRID = '1fr 150px 52px 48px 52px 52px 56px';
 const CODE_GRID = '48px 3fr 1fr';
 
 /**
- * The Performance section's body: one endpoint charted, every endpoint listed.
+ * What the chart plots and what it totals.
  *
- * The list doubles as the chart's selector rather than sitting beside a dropdown —
- * the row already carries the figures you would pick on, so the thing you read and
- * the thing you click are the same thing.
+ * The chart sits outside the Performance panel now, so the plotted series is derived from
+ * the selection rather than owned beside it — both the chart and the panel's failure-code
+ * block read the same figures from here instead of computing their own.
  */
-export function PerformancePanel({
-  perf, fmtMs, syncId, deps, onRequestDeps, captureTag,
+function perfChartState(
+  perf: EndpointPerformance,
+  deps: EndpointDepsState | undefined,
+  selected: string | null,
+) {
+  // With no row selected the chart draws the whole set, which ships with the details
+  // payload — so the default view is on screen immediately and costs no round trip.
+  const overallRows = perfChartRows(perf.overallSeries ?? undefined);
+  const chartRows = selected ? perfChartRows(deps?.series) : overallRows;
+  return {
+    overallRows,
+    chartRows,
+    bin: selected ? deps?.bin : perf.overallBin,
+    // In flight only applies to a selection: the total is already here or it is not.
+    chartLoading: Boolean(selected && deps?.loading && chartRows.length === 0),
+    // What the bars on screen add up to.
+    ct: chartTotals(chartRows),
+  };
+}
+
+/**
+ * The endpoint chart, on its own above the Performance row.
+ *
+ * It sits outside the collapsible panel because it is the one part of Performance worth
+ * reading without asking for it — the shape of the traffic and where the errors fall — while
+ * the endpoint table underneath is the drill-down you open deliberately.
+ */
+export function PerformanceChart({
+  perf, fmtMs, syncId, deps, selected, captureTag,
 }: {
   perf: EndpointPerformance;
   fmtMs: (ms: number | null) => string;
   /** Card-wide hover group, so the crosshair tracks the CPU/memory chart. */
   syncId?: string | undefined;
-  /** The charted endpoint's downstream calls, fetched on selection by the card. */
   deps?: EndpointDepsState | undefined;
-  onRequestDeps?: ((endpoint: string) => void) | undefined;
-  /** Tags the chart + legend below (not the endpoint table) with [data-teams-perf-chart]
-   *  so copyForTeams can screenshot it on its own, only when this panel is actually
-   *  expanded and on screen. */
+  /** The charted endpoint, or null for the set-wide total. */
+  selected: string | null;
+  /** Tags the chart + legend with [data-teams-perf-chart] so copyForTeams can screenshot
+   *  it on its own. Always on screen now, so the capture no longer depends on the panel
+   *  being expanded. */
   captureTag?: string | undefined;
 }) {
   const { endpoints } = perf;
-  /**
-   * The charted endpoint, or null for the set-wide total.
-   *
-   * Null is the default rather than the busiest endpoint: opening on one arbitrary row
-   * answers a question nobody asked yet, and the figures printed on the collapsed row are
-   * the set's totals — so the chart under them should be the same traffic. Picking a row
-   * drills in; picking it again comes back out.
-   */
-  const [selected, setSelected] = useState<string | null>(null);
+  const { overallRows, chartRows, bin, chartLoading, ct } = perfChartState(perf, deps, selected);
 
-  // Reset when the fetch returns a different endpoint set — otherwise a URL held over
-  // from the previous time range stays selected while having no row to deselect it from.
-  const signature = endpoints.map(e => e.url).join('|');
-  const lastSignature = useRef(signature);
-  if (lastSignature.current !== signature) {
-    lastSignature.current = signature;
-    setSelected(null);
-  }
-
-  // Ask for the charted endpoint's calls — on first render for the default selection, and
-  // again whenever the selection moves. The hook de-duplicates, so a re-select of an
-  // endpoint already answered costs nothing.
-  useEffect(() => {
-    if (selected) onRequestDeps?.(selected);
-  }, [selected, onRequestDeps]);
-
-  const selectedDeps = deps?.deps ?? [];
-  const dt = depTotals(selectedDeps);
-
-  /** The one downstream call charted, or null. Cleared whenever the endpoint changes — a
-   *  call held over from the previous endpoint has no row left to deselect it from. */
-  const [selectedDep, setSelectedDep] = useState<string | null>(null);
-  const lastEndpoint = useRef(selected);
-  if (lastEndpoint.current !== selected) {
-    lastEndpoint.current = selected;
-    setSelectedDep(null);
-  }
-  const chartedDep = selectedDeps.find(d => depKey(d) === selectedDep);
-  const depRows = depChartRows(chartedDep?.series);
-
-  const [showAllRows, setShowAllRows] = useState(false);
-  const visibleEndpoints = showAllRows ? endpoints : endpoints.slice(0, ROW_CAP);
-  const hiddenRows = endpoints.length - visibleEndpoints.length;
-
-  // With no row selected the chart draws the whole set, which ships with the details
-  // payload — so the default view is on screen immediately and costs no round trip.
-  const overallRows = perfChartRows(perf.overallSeries ?? undefined);
-  const bin = selected ? deps?.bin : perf.overallBin;
-  const chartRows = selected ? perfChartRows(deps?.series) : overallRows;
-  // In flight only applies to a selection: the total is already here or it is not.
-  const chartLoading = Boolean(selected && deps?.loading && chartRows.length === 0);
-
-  /**
-   * Which codes the charted endpoint's failures actually were.
-   *
-   * 5xx first, then 4xx, each by volume — the same ordering the endpoint table uses, and
-   * for the same reason: one 500 is worth more attention than four hundred 404s.
-   *
-   * Per selection only. The default view is every endpoint at once, where a merged code
-   * list would say the site returned 404s without saying by whom, which is not actionable.
-   */
-  const codes = selected
-    ? [...(deps?.codes ?? [])].sort((a, b) =>
-        (a.cls === b.cls ? 0 : a.cls === '5xx' ? -1 : 1) || b.count - a.count)
-    : [];
-
-  // What the bars on screen add up to. The legend is where a reader is already looking to
-  // decode the colours, so the figure for each colour belongs there rather than in a
-  // separate summary line — and in the default view these are the only totals on the card
-  // that cover every endpoint.
-  const ct = chartTotals(chartRows);
   /** Share of the charted traffic, never rounding a real value down to '0.0%'. */
   const share = (n: number) =>
     ct.count > 0 && n > 0 ? (n / ct.count < 0.001 ? '<0.1%' : `${(n / ct.count * 100).toFixed(1)}%`) : '0%';
 
+  // The legend is where a reader is already looking to decode the colours, so the figure
+  // for each colour belongs there rather than in a separate summary line — and in the
+  // default view these are the only totals on the card that cover every endpoint.
   const chip = (color: string, label: string, value: number, tip: string) => (
     <span key={label} title={tip} style={{ color: UI.textDim, whiteSpace: 'nowrap' }}>
       <span style={{ color }}>■</span> {label}{' '}
@@ -137,12 +98,8 @@ export function PerformancePanel({
     </span>
   );
 
-  const num = (v: number, color: string, tip: string) => (
-    <span className="tabular-nums" style={{ color, textAlign: 'right' }} title={tip}>{v.toLocaleString()}</span>
-  );
-
   return (
-    <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
+    <div style={{ fontSize: 10, padding: '2px 8px 0' }}>
       {/* Names what the bars are. The set-wide total and one busy endpoint draw the same
           shape, so without this line the two states are indistinguishable. */}
       <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 1 }}>
@@ -154,7 +111,7 @@ export function PerformancePanel({
                   above cover the merged set only — so the two totals will not agree, and
                   a reader who assumes they should will read the gap as a bug. */}
               <span style={{ color: UI.textDim }}> — all requests to this site, including the ones
-              outside the {endpoints.length}-endpoint list below. Click a row to chart one.</span></>}
+              outside the {endpoints.length}-endpoint list in Performance below. Expand it and click a row to chart one.</span></>}
       </div>
 
       {/* paddingBottom (not the legend row's own margin) is what html2canvas actually
@@ -218,9 +175,78 @@ export function PerformancePanel({
           it: this is instruction rather than measurement, and mixing it in made the centred
           figures wrap around a sentence. */}
       <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
-        bar height is requests per {bin ?? 'bucket'} — click a row to chart it, click it again for the total.
+        bar height is requests per {bin ?? 'bucket'} — click an endpoint row in Performance to chart it, click it again for the total.
       </div>
 
+    </div>
+  );
+}
+
+/**
+ * The Performance section's body: one endpoint charted, every endpoint listed.
+ *
+ * The list doubles as the chart's selector rather than sitting beside a dropdown —
+ * the row already carries the figures you would pick on, so the thing you read and
+ * the thing you click are the same thing.
+ */
+export function PerformancePanel({
+  perf, fmtMs, syncId, deps, selected, onSelect,
+}: {
+  perf: EndpointPerformance;
+  fmtMs: (ms: number | null) => string;
+  /** Card-wide hover group, so the crosshair tracks the CPU/memory chart. */
+  syncId?: string | undefined;
+  /** The charted endpoint's downstream calls, fetched on selection by the card. */
+  deps?: EndpointDepsState | undefined;
+  /** The charted endpoint, or null for the set-wide total. Owned by the row wrapper,
+   *  since the chart it drives now sits outside this panel. */
+  selected: string | null;
+  onSelect: (url: string | null) => void;
+}) {
+  const { endpoints } = perf;
+
+  const selectedDeps = deps?.deps ?? [];
+  const dt = depTotals(selectedDeps);
+
+  /** The one downstream call charted, or null. Cleared whenever the endpoint changes — a
+   *  call held over from the previous endpoint has no row left to deselect it from. */
+  const [selectedDep, setSelectedDep] = useState<string | null>(null);
+  const lastEndpoint = useRef(selected);
+  if (lastEndpoint.current !== selected) {
+    lastEndpoint.current = selected;
+    setSelectedDep(null);
+  }
+  const chartedDep = selectedDeps.find(d => depKey(d) === selectedDep);
+  const depRows = depChartRows(chartedDep?.series);
+
+  const [showAllRows, setShowAllRows] = useState(false);
+  const visibleEndpoints = showAllRows ? endpoints : endpoints.slice(0, ROW_CAP);
+  const hiddenRows = endpoints.length - visibleEndpoints.length;
+
+  // Only the failure-code block below needs the plotted totals now; the chart itself
+  // is drawn above the row by PerformanceChart, off the same state.
+  const { ct } = perfChartState(perf, deps, selected);
+
+  /**
+   * Which codes the charted endpoint's failures actually were.
+   *
+   * 5xx first, then 4xx, each by volume — the same ordering the endpoint table uses, and
+   * for the same reason: one 500 is worth more attention than four hundred 404s.
+   *
+   * Per selection only. The default view is every endpoint at once, where a merged code
+   * list would say the site returned 404s without saying by whom, which is not actionable.
+   */
+  const codes = selected
+    ? [...(deps?.codes ?? [])].sort((a, b) =>
+        (a.cls === b.cls ? 0 : a.cls === '5xx' ? -1 : 1) || b.count - a.count)
+    : [];
+
+  const num = (v: number, color: string, tip: string) => (
+    <span className="tabular-nums" style={{ color, textAlign: 'right' }} title={tip}>{v.toLocaleString()}</span>
+  );
+
+  return (
+    <div style={{ fontSize: 10, padding: '2px 8px 4px' }}>
       {/* Above the table, not below it: this describes how the list was built and how it is
           ordered, which is what a reader needs before reading it rather than after. */}
       <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
@@ -248,7 +274,7 @@ export function PerformancePanel({
         return (
           <div
             key={e.url}
-            onClick={() => setSelected(prev => (prev === e.url ? null : e.url))}
+            onClick={() => onSelect(e.url === selected ? null : e.url)}
             title={`${e.url}\n\n${e.count.toLocaleString()} requests, ${e.fourXx.toLocaleString()} 4xx, ${e.fiveXx.toLocaleString()} 5xx\navg ${fmtMs(e.avgMs)} · P95 ${fmtMs(e.p95)} · P99 ${fmtMs(e.p99)} · max ${fmtMs(e.maxMs)}\n\n${on ? 'Click again to go back to the set-wide total' : 'Click to chart it and load its downstream calls'}`}
             style={{
               display: 'grid', gridTemplateColumns: GRID, gap: 6, marginBottom: 1,
@@ -491,24 +517,60 @@ export function PerformanceRows({
   captureTag?: string | undefined;
 }) {
   const has = hasPerfData(perf);
-  // The merged endpoint set (10 busiest + 10 worst-4xx + every 5xx) is what the table
-  // below charts, but it is a subset of the app's real traffic — `slowest` has no
-  // app-wide equivalent (only endpoint rollups carry a single worst request), so it
-  // still comes from here.
-  const t = perfTotals(perf?.endpoints);
-  // Everything else on the row uses the same app-wide series the chart defaults to
-  // when nothing is selected, so the collapsed row and the "every endpoint" chart
-  // it expands into never disagree. Falls back to the merged set only when the
-  // app-wide timeline itself came back empty for the window.
-  const overall = chartTotals(perfChartRows(perf?.overallSeries ?? undefined));
-  const total = overall.count > 0 ? overall.count : t.requests;
-  const fourXx = overall.count > 0 ? overall.c4 : t.fourXx;
-  const fiveXx = overall.count > 0 ? overall.c5 : t.fiveXx;
-  const peakP95 = overall.count > 0 ? overall.peakP95 : t.worstP95;
-  const avgMs = overall.count > 0 ? overall.avgMs : t.avgMs;
+  // The row quotes the same app-wide figures the chart above it draws, so the two can
+  // never disagree — see perfSummary for the fallback when that timeline is empty.
+  const t = perfSummary(perf);
+  const { total, fourXx, fiveXx, peakP95, avgMs } = t;
+
+  /**
+   * The charted endpoint, or null for the set-wide total.
+   *
+   * Lives here rather than in the panel because the chart it drives sits outside the
+   * panel now. Null is the default: opening on one arbitrary row answers a question
+   * nobody asked yet, and the figures printed on the row are the set's totals — so the
+   * chart above them should be the same traffic. Picking a row drills in; picking it
+   * again comes back out.
+   */
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Collapsing the panel takes the endpoint list — and with it the only way to deselect —
+  // off screen, so the chart goes back to the app-wide total rather than being stuck on
+  // an endpoint with no row to click.
+  const wasExpanded = useRef(expanded);
+  if (wasExpanded.current !== expanded) {
+    wasExpanded.current = expanded;
+    if (!expanded) setSelected(null);
+  }
+
+  // Reset when the fetch returns a different endpoint set — otherwise a URL held over
+  // from the previous time range stays selected while having no row to deselect it from.
+  const signature = (perf?.endpoints ?? []).map(e => e.url).join('|');
+  const lastSignature = useRef(signature);
+  if (lastSignature.current !== signature) {
+    lastSignature.current = signature;
+    setSelected(null);
+  }
+
+  // Ask for the charted endpoint's calls whenever the selection moves. The hook
+  // de-duplicates, so a re-select of an endpoint already answered costs nothing.
+  useEffect(() => {
+    if (selected) onRequestDeps?.(selected);
+  }, [selected, onRequestDeps]);
 
   return (
     <>
+      {/* The chart, above the Performance row rather than inside it: the traffic shape and
+          where the errors fall are worth reading without expanding anything, while the
+          endpoint table below is the drill-down you open deliberately. */}
+      {(has || loading) && (
+        <tr>
+          <td colSpan={4} style={{ paddingTop: 2, paddingBottom: 0 }}>
+            {has && perf
+              ? <PerformanceChart perf={perf} fmtMs={fmtMs} syncId={syncId} deps={deps} selected={selected} captureTag={captureTag} />
+              : <SkeletonBlock className="w-full rounded-md" style={{ height: 170 }} />}
+          </td>
+        </tr>
+      )}
       {/* Always clickable: the endpoint data arrives with the card's lazy details fetch,
           so a row that only opened once it had figures would never open at all —
           expanding it is what asks for them. */}
@@ -520,7 +582,7 @@ export function PerformanceRows({
       >
         <td
           className="text-muted-foreground font-bold"
-          title="Performance: the ten busiest endpoints, the ten worst 4xx, and every endpoint with a 5xx, merged into one set. Each row carries rate, errors and duration together. Expand to chart one endpoint's traffic, errors and latency on a single plot."
+          title="Performance: the ten busiest endpoints, the ten worst 4xx, and every endpoint with a 5xx, merged into one set. Each row carries rate, errors and duration together. Expand to list them and click one to chart it in place of the app-wide total above."
         >
           Performance
           {expanded
@@ -585,13 +647,14 @@ export function PerformanceRows({
         <tr>
           <td colSpan={4} style={{ paddingTop: 2, paddingBottom: 6 }}>
             {loading && !has
-              ? <PanelSkeleton rows={5} chartHeight={150} />
+              // The chart above the row carries its own skeleton, so this one is list-only.
+              ? <ListSkeleton rows={5} />
               : error
                 ? <span className="text-[10px] text-destructive">{error}</span>
                 : unavailableMessage
                   ? <span className="text-[10px] text-muted-foreground italic">{unavailableMessage}</span>
                   : has && perf
-                    ? <PerformancePanel perf={perf} fmtMs={fmtMs} syncId={syncId} deps={deps} onRequestDeps={onRequestDeps} captureTag={captureTag} />
+                    ? <PerformancePanel perf={perf} fmtMs={fmtMs} syncId={syncId} deps={deps} selected={selected} onSelect={setSelected} />
                     : <span className="text-[10px] text-muted-foreground italic">No request telemetry in this window</span>
             }
           </td>

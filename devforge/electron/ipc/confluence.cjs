@@ -28,6 +28,23 @@ function sess() {
   return session.fromPartition(PARTITION);
 }
 
+// Read a short snippet of an error response body. Atlassian states the actual
+// reason there ("Current user not permitted to use Confluence", a scope error,
+// …); without it every failure collapses into a bare status number.
+async function errDetail(res) {
+  try {
+    const text = (await res.text()).slice(0, 400);
+    try {
+      const j = JSON.parse(text);
+      return String(j.message || j.reason || (j.data && j.data.message) || text).slice(0, 220);
+    } catch {
+      return text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
+    }
+  } catch {
+    return '';
+  }
+}
+
 async function hasAuthCookie(base) {
   try {
     const cookies = await sess().cookies.get({ url: base });
@@ -178,6 +195,39 @@ module.exports = function registerConfluenceHandlers() {
     return { connected: base ? await hasAuthCookie(base) : false };
   });
 
+  // Validate the stored API token against the same REST API the runbook fetch
+  // uses. Atlassian tokens expire (max 1 year, and they can be revoked), and an
+  // expired one fails every page load with a bare status — so check it up front.
+  //   valid     — token works
+  //   expired   — 401: expired, revoked, or the email doesn't match the token
+  //   forbidden — 403: authenticated but not allowed (no Confluence access, or a
+  //               scoped token missing the Confluence read scope)
+  ipcMain.handle('confluence:tokenStatus', async (_event, { baseUrl, email, apiToken }) => {
+    const base = normalizeBase(baseUrl);
+    if (!base) return { state: 'no-base' };
+    if (!email || !apiToken) return { state: 'missing' };
+    try {
+      const res = await fetch(`${base}/wiki/rest/api/user/current`, {
+        headers: { Accept: 'application/json', Authorization: authHeader(email, apiToken) },
+      });
+      if (res.ok) {
+        const me = await res.json().catch(() => ({}));
+        return {
+          state: 'valid',
+          status: res.status,
+          displayName: (me && me.displayName) || '',
+          accountEmail: (me && me.email) || '',
+          checkedAt: Date.now(),
+        };
+      }
+      const detail = await errDetail(res);
+      const state = res.status === 401 ? 'expired' : res.status === 403 ? 'forbidden' : 'error';
+      return { state, status: res.status, detail, checkedAt: Date.now() };
+    } catch (err) {
+      return { state: 'error', status: 0, detail: (err && err.message) || String(err), checkedAt: Date.now() };
+    }
+  });
+
   // Sign out — clear the session's cookies/storage.
   ipcMain.handle('confluence:logout', async () => {
     try { await sess().clearStorageData(); return { ok: true }; }
@@ -198,6 +248,14 @@ module.exports = function registerConfluenceHandlers() {
       const wiki = `${base}/wiki`;
       const connected = await hasAuthCookie(base);
 
+      // Only the page id is taken from the pasted URL — a page from a different
+      // site than the configured base silently queries the wrong tenant.
+      let hostMismatch = null;
+      try {
+        const pu = new URL(pageUrl);
+        if (pu.origin.toLowerCase() !== new URL(base).origin.toLowerCase()) hostMismatch = pu.origin;
+      } catch { /* pageUrl may be a bare id */ }
+
       // Page content + attachment list via REST (API token works for REST).
       const headers = { Accept: 'application/json' };
       if (email && apiToken) headers.Authorization = authHeader(email, apiToken);
@@ -206,9 +264,22 @@ module.exports = function registerConfluenceHandlers() {
         `${wiki}/rest/api/content/${pageId}?expand=body.export_view,body.storage,version,history,space`,
         { headers },
       );
-      if (cRes.status === 401) return { ok: false, error: 'Auth failed (401) — check email / API token, or Connect Confluence.' };
-      if (cRes.status === 404) return { ok: false, error: 'Page not found (404) — check the URL / access.' };
-      if (!cRes.ok) return { ok: false, error: `Confluence responded ${cRes.status}.` };
+      if (!cRes.ok) {
+        const detail = await errDetail(cRes);
+        // Retry the same page through the signed-in browser session. Its status
+        // separates "this account/page is blocked" from "the API token is".
+        const viaSession = await sessGetJson(
+          `${wiki}/rest/api/content/${pageId}?expand=version`,
+        );
+        const parts = [`Confluence responded ${cRes.status}.`];
+        if (detail) parts.push(detail);
+        if (!headers.Authorization) parts.push('No API token was sent — set email + API token in Settings → Atlassian.');
+        if (hostMismatch) parts.push(`Page URL host ${hostMismatch} ≠ base URL ${base} in Settings.`);
+        parts.push(`(token auth ${cRes.status}, session auth ${viaSession.status}${connected ? '' : ', not signed in'})`);
+        if (cRes.status === 401) parts[0] = 'Auth failed (401) — check email / API token, or Connect Confluence.';
+        if (cRes.status === 404) parts[0] = 'Page not found (404) — check the URL / access.';
+        return { ok: false, error: parts.join(' ') };
+      }
       const c = await cRes.json();
 
       const html = (c.body && c.body.export_view && c.body.export_view.value) ||

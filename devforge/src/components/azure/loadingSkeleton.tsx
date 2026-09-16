@@ -68,19 +68,26 @@ export function PanelSkeletonRow({ rows = 4, chartHeight = 110 }: { rows?: numbe
   );
 }
 
+/** A list-only placeholder, for panels that hold rows without a chart of their own. */
+export function ListSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="flex flex-col gap-1" style={{ padding: '2px 8px 4px' }} aria-busy="true" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <SkeletonBlock className="h-2.5" style={{ width: `${70 - i * 8}%` }} />
+          <SkeletonBlock className="h-2.5 ml-auto" style={{ width: 44 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** A list-only placeholder, for sections that expand to rows without a chart. */
 export function ListSkeletonRow({ rows = 5 }: { rows?: number }) {
   return (
     <tr>
       <td colSpan={4} style={{ paddingTop: 2, paddingBottom: 6 }}>
-        <div className="flex flex-col gap-1" style={{ padding: '2px 8px 4px' }} aria-busy="true" aria-label="Loading">
-          {Array.from({ length: rows }, (_, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <SkeletonBlock className="h-2.5" style={{ width: `${70 - i * 8}%` }} />
-              <SkeletonBlock className="h-2.5 ml-auto" style={{ width: 44 }} />
-            </div>
-          ))}
-        </div>
+        <ListSkeleton rows={rows} />
       </td>
     </tr>
   );

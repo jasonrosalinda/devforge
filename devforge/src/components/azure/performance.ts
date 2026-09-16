@@ -154,6 +154,36 @@ export function perfTotals(endpoints: EndpointPerfRow[] | undefined) {
   };
 }
 
+/**
+ * One side's headline figures, in the same words the chart's legend uses.
+ *
+ * App-wide for everything the timeline covers, falling back to the merged endpoint set
+ * when that timeline came back empty — except `slowest`, which only exists as an endpoint
+ * rollup. The collapsed Performance row, the chart caption and the Teams copy all read
+ * from here, so none of them can quote a different number for the same window.
+ */
+export function perfSummary(perf: EndpointPerformance | null | undefined) {
+  const t = perfTotals(perf?.endpoints);
+  const overall = chartTotals(perfChartRows(perf?.overallSeries ?? undefined));
+  const appWide = overall.count > 0;
+  const total = appWide ? overall.count : t.requests;
+  const fourXx = appWide ? overall.c4 : t.fourXx;
+  const fiveXx = appWide ? overall.c5 : t.fiveXx;
+  return {
+    total,
+    fourXx,
+    fiveXx,
+    /** The remainder, not a counted class: a request is successful by not being either. */
+    successful: Math.max(0, total - fourXx - fiveXx),
+    peakP95: appWide ? overall.peakP95 : t.worstP95,
+    avgMs: appWide ? overall.avgMs : t.avgMs,
+    /** The single slowest request to any endpoint in the merged set — no app-wide equivalent. */
+    slowest: t.slowest,
+    endpoints: t.endpoints,
+    failing: t.failing,
+  };
+}
+
 /** True once there is anything to show. Rows without a timeline are still worth
  *  listing — the table is useful on its own, the chart is the drill-down. */
 export function hasPerfData(perf: EndpointPerformance | null | undefined): boolean {

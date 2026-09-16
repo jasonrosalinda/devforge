@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { perfChartRows, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals } from './performance';
+import { perfChartRows, perfSummary, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals } from './performance';
 import { UI } from '@/lib/chart-colors';
-import type { EndpointPerfRow } from '@shared/types/azureMetrics.types';
+import type { EndpointPerfRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
 
 const pt = (over: Partial<{ t: string; count: number; c4: number; c5: number; avgMs: number; p95: number }> = {}) =>
   ({ t: '10:00', count: 0, c4: 0, c5: 0, avgMs: 0, p95: 0, ...over });
@@ -198,5 +198,45 @@ describe('depKey', () => {
   it('is stable for the same triple', () => {
     expect(depKey({ type: 'Http', target: 'api', name: 'GET /x' }))
       .toBe(depKey({ type: 'Http', target: 'api', name: 'GET /x' }));
+  });
+});
+
+describe('perfSummary', () => {
+  const perf = (over: Partial<EndpointPerformance> = {}): EndpointPerformance =>
+    ({ endpoints: [], ...over } as EndpointPerformance);
+
+  it('prefers the app-wide timeline over the merged endpoint set', () => {
+    const s = perfSummary(perf({
+      endpoints: [row({ count: 100, fourXx: 10, fiveXx: 2, avgMs: 50, p95: 400, maxMs: 900 })],
+      overallSeries: [pt({ count: 1000, c4: 40, c5: 5, avgMs: 20, p95: 300 })],
+    }));
+    expect(s.total).toBe(1000);
+    expect(s.fourXx).toBe(40);
+    expect(s.fiveXx).toBe(5);
+    expect(s.peakP95).toBe(300);
+    expect(s.avgMs).toBe(20);
+    // Only ever an endpoint rollup — the app-wide series carries no single worst request.
+    expect(s.slowest).toBe(900);
+  });
+
+  it('falls back to the merged set when the app-wide timeline came back empty', () => {
+    const s = perfSummary(perf({
+      endpoints: [row({ count: 100, fourXx: 10, fiveXx: 2, avgMs: 50, p95: 400, maxMs: 900 })],
+    }));
+    expect(s.total).toBe(100);
+    expect(s.fourXx).toBe(10);
+    expect(s.fiveXx).toBe(2);
+    expect(s.peakP95).toBe(400);
+    expect(s.avgMs).toBe(50);
+  });
+
+  it('derives successful as the remainder, never negative', () => {
+    expect(perfSummary(perf({ endpoints: [row({ count: 10, fourXx: 4, fiveXx: 3 })] })).successful).toBe(3);
+    expect(perfSummary(perf({ endpoints: [row({ count: 5, fourXx: 4, fiveXx: 4 })] })).successful).toBe(0);
+  });
+
+  it('is all zeroes for an app with no request telemetry', () => {
+    const s = perfSummary(undefined);
+    expect(s).toMatchObject({ total: 0, fourXx: 0, fiveXx: 0, successful: 0, peakP95: 0, avgMs: 0, slowest: 0 });
   });
 });

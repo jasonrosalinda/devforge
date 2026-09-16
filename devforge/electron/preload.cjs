@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetchImages: (opts) => ipcRenderer.invoke('confluence:fetchImages', opts),
         login: (opts) => ipcRenderer.invoke('confluence:login', opts),
         authStatus: (opts) => ipcRenderer.invoke('confluence:authStatus', opts),
+        tokenStatus: (opts) => ipcRenderer.invoke('confluence:tokenStatus', opts),
         logout: () => ipcRenderer.invoke('confluence:logout'),
         saveSummary: (opts) => ipcRenderer.invoke('confluence:saveSummary', opts),
     },

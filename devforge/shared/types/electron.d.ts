@@ -183,6 +183,15 @@ export interface IElectronAPI {
         }>;
         login(opts: { baseUrl: string }): Promise<{ ok: boolean; error?: string }>;
         authStatus(opts: { baseUrl: string }): Promise<{ connected: boolean }>;
+        /** Validates the stored API token against /wiki/rest/api/user/current. */
+        tokenStatus(opts: { baseUrl: string; email: string; apiToken: string }): Promise<{
+            state: 'no-base' | 'missing' | 'valid' | 'expired' | 'forbidden' | 'error';
+            status?: number;
+            detail?: string;
+            displayName?: string;
+            accountEmail?: string;
+            checkedAt?: number;
+        }>;
         logout(): Promise<{ ok: boolean; error?: string }>;
         saveSummary(opts: { html: string; title?: string | undefined }): Promise<{ ok: boolean; path?: string; error?: string }>;
     };
