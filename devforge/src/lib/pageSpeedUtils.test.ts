@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { PageSpeedInsightResult, PageSpeedMetrics } from '@shared/types/pageSpeedInsight.types';
-import { compareRunToBaseline, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
+import type { PageSpeedConfiguration, PageSpeedInsightResult, PageSpeedMetrics } from '@shared/types/pageSpeedInsight.types';
+import { allRunsFailed, compareRunToBaseline, defaultPageSpeedConfiguration, displayPageSpeedAudit, improvementPercent, findUnwinnableMetrics, resultHasError, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
 
 const ALL: ComparableMetricKey[] = [
     'speedIndex', 'largestContentfulPaint', 'cumulativeLayoutShift', 'totalBlockingTime', 'firstContentfulPaint',
@@ -186,5 +186,131 @@ describe('realignIndexSet', () => {
 
     it('drops expanded rows that were removed', () => {
         expect([...realignIndexSet(new Set([1]), [0, 2])]).toEqual([]);
+    });
+});
+
+// The rule that decides whether a finished audit counts as a failure — it drives
+// both the "Audit failed." badge and the auto-retry loop, so a change here changes
+// how many times a URL is re-audited.
+describe('resultHasError', () => {
+    it('is false for a clean result', () => {
+        expect(resultHasError(run())).toBe(false);
+    });
+
+    it('is false for the empty error response a successful parse carries', () => {
+        expect(resultHasError({ ...run(), errorResponse: { code: 0, message: '' } })).toBe(false);
+    });
+
+    it('is true when a message came back', () => {
+        expect(resultHasError({ ...run(), errorResponse: { code: 0, message: 'Failed to fetch' } })).toBe(true);
+    });
+
+    it('is true when only a code came back', () => {
+        expect(resultHasError({ ...run(), errorResponse: { code: 500, message: '' } })).toBe(true);
+    });
+
+    it('reads an array message, ignoring empty entries', () => {
+        expect(resultHasError({ ...run(), errorResponse: { code: 0, message: ['', ''] } })).toBe(false);
+        expect(resultHasError({ ...run(), errorResponse: { code: 0, message: ['', 'Failed to fetch'] } })).toBe(true);
+    });
+});
+
+describe('allRunsFailed', () => {
+    const failed = (msg = 'Failed to fetch') => ({ ...run(), errorResponse: { code: 0, message: msg } });
+
+    it('is false for a clean result', () => {
+        expect(allRunsFailed(run())).toBe(false);
+    });
+
+    it('is true when every run in the history errored', () => {
+        expect(allRunsFailed({ ...failed(), runHistory: [failed(), failed()] })).toBe(true);
+    });
+
+    it('is false when one run survived — the aggregate is still usable', () => {
+        expect(allRunsFailed({ ...failed(), runHistory: [failed(), run()] })).toBe(false);
+    });
+
+    it('falls back to the aggregate when there is no run history', () => {
+        expect(allRunsFailed(failed())).toBe(true);
+    });
+});
+
+// The Improvement column. A CLS of 0 is the best result a page can post, so the
+// distinction these cover — "measured zero" vs "never measured" — is the difference
+// between reading +100% and reading a dash.
+describe('improvementPercent', () => {
+    const measured = (numericValue: number, displayValue: string): PageSpeedMetrics =>
+        ({ numericValue, displayValue, numericUnit: 'unitless' });
+    const absent: PageSpeedMetrics = { numericValue: 0, displayValue: '', numericUnit: '' };
+
+    it('reads a drop to a measured zero as a full improvement', () => {
+        expect(improvementPercent(measured(0.004, '0.004'), measured(0, '0'))).toBe(100);
+    });
+
+    it('computes the percentage from the displayed value, not the raw one', () => {
+        // Displayed "1.3 s" against "1.3 s" is 0%, even though the raw ms differ.
+        expect(improvementPercent(measured(1340, '1.3'), measured(1290, '1.3'))).toBe(0);
+    });
+
+    it('is negative when the metric regressed', () => {
+        expect(improvementPercent(measured(2, '2'), measured(3, '3'))).toBe(-50);
+    });
+
+    it('is null when the after run never measured the metric', () => {
+        expect(improvementPercent(measured(2, '2'), absent)).toBeNull();
+    });
+
+    it('is null when the before run never measured the metric', () => {
+        expect(improvementPercent(absent, measured(2, '2'))).toBeNull();
+    });
+
+    it('is null when either metric is missing entirely', () => {
+        expect(improvementPercent(undefined, measured(2, '2'))).toBeNull();
+        expect(improvementPercent(measured(2, '2'), undefined)).toBeNull();
+    });
+
+    it('is null when the baseline is zero — there is no percentage of nothing', () => {
+        expect(improvementPercent(measured(0, '0'), measured(0, '0'))).toBeNull();
+    });
+
+    it('falls back to the raw value when the displayed one is not a number', () => {
+        expect(improvementPercent(measured(200, 'n/a'), measured(100, 'n/a'))).toBe(50);
+    });
+});
+
+// Which columns the results table draws. "Before only" / "After only" exist so a
+// comparison run can be presented as a single column without re-running it, and the
+// enum is what makes hiding BOTH sides unrepresentable.
+describe('displayPageSpeedAudit', () => {
+    const cfg = (over: Partial<PageSpeedConfiguration> = {}): PageSpeedConfiguration =>
+        ({ ...defaultPageSpeedConfiguration('desktop'), comparisonMode: true, showImprovement: true, ...over });
+
+    it('draws both columns and the improvement by default', () => {
+        const d = displayPageSpeedAudit(cfg());
+        expect([d.before, d.after, d.improvement]).toEqual([true, true, true]);
+    });
+
+    it('drops the after column when showing before only', () => {
+        const d = displayPageSpeedAudit(cfg({ comparisonColumns: 'before' }));
+        expect([d.before, d.after]).toEqual([true, false]);
+    });
+
+    it('drops the before column when showing after only', () => {
+        const d = displayPageSpeedAudit(cfg({ comparisonColumns: 'after' }));
+        expect([d.before, d.after]).toEqual([false, true]);
+    });
+
+    it('hides the improvement when a side is hidden — a delta needs a visible baseline', () => {
+        expect(displayPageSpeedAudit(cfg({ comparisonColumns: 'before' })).improvement).toBe(false);
+        expect(displayPageSpeedAudit(cfg({ comparisonColumns: 'after' })).improvement).toBe(false);
+    });
+
+    it('ignores the setting outside comparison mode', () => {
+        const d = displayPageSpeedAudit(cfg({ comparisonMode: false, comparisonColumns: 'before' }));
+        expect([d.singleResult, d.before, d.after, d.improvement]).toEqual([true, false, false, false]);
+    });
+
+    it('still honours showImprovement being off', () => {
+        expect(displayPageSpeedAudit(cfg({ showImprovement: false })).improvement).toBe(false);
     });
 });

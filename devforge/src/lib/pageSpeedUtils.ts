@@ -10,6 +10,7 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         urls: [],
 
         comparisonMode: false,
+        comparisonColumns: 'both',
         beforeLabel: 'Before',
         afterLabel: 'After',
         improvementThreshold: 20,
@@ -45,9 +46,11 @@ export function displayPageSpeedAudit(config: PageSpeedConfiguration): PageSpeed
         TBT: config.showTBT,
         FCP: config.showFCP,
         singleResult: !config.comparisonMode,
-        before: config.comparisonMode,
-        after: config.comparisonMode,
-        improvement: config.showImprovement,
+        before: config.comparisonMode && config.comparisonColumns !== 'after',
+        after: config.comparisonMode && config.comparisonColumns !== 'before',
+        // A percentage with no visible baseline reads as unexplained, so the delta
+        // goes when either side does.
+        improvement: config.showImprovement && config.comparisonMode && (config.comparisonColumns ?? 'both') === 'both',
     }
 }
 
@@ -309,4 +312,78 @@ export function realignIndexSet(set: Set<number>, indexMap: number[]): Set<numbe
         if (prevIndex !== -1 && set.has(prevIndex)) next.add(nextIndex);
     });
     return next;
+}
+
+/**
+ * Whether a finished audit carries an error from the API or from Lighthouse.
+ *
+ * A successful parse still attaches an `errorResponse`, zeroed — so presence of the
+ * object means nothing and only a non-zero code or a non-empty message counts.
+ */
+export function resultHasError(result: PageSpeedInsightResult | undefined): boolean {
+    const err = result?.errorResponse;
+    if (!err) return false;
+    const hasMessage = Array.isArray(err.message)
+        ? err.message.some(m => m.length > 0)
+        : err.message.length > 0;
+    return err.code !== 0 || hasMessage;
+}
+
+/**
+ * Whether every run of a multi-run audit errored.
+ *
+ * The distinction that matters for retrying: a partial failure still aggregates into
+ * usable metrics, so re-running it would throw away numbers the user can read. Only a
+ * total failure — nothing measured — is worth another attempt.
+ */
+export function allRunsFailed(result: PageSpeedInsightResult | undefined): boolean {
+    if (!result) return false;
+    const history = result.runHistory;
+    if (history?.length) return history.every(r => resultHasError(r));
+    return resultHasError(result);
+}
+
+/**
+ * Whether the audit actually measured this metric.
+ *
+ * Needed because a zero is ambiguous on its own: an absent metric arrives as
+ * `emptyPageSpeedMetrics()` — numericValue 0 — and a perfect CLS is also 0. Only the
+ * display string tells them apart: "" when nothing was measured, "0" when it was.
+ */
+export function metricMeasured(metric: PageSpeedMetrics | undefined): boolean {
+    if (!metric) return false;
+    if (String(metric.displayValue ?? '').trim() !== '') return true;
+    return metric.numericValue > 0;
+}
+
+/**
+ * The metric as DISPLAYED, so a comparison matches the numbers on screen — "1.3 s"
+ * against "1.3 s" is 0%, not a delta hidden by rounding. Falls back to the raw value
+ * when the display string carries no number.
+ */
+export function displayedMetricValue(metric: PageSpeedMetrics | undefined): number {
+    if (!metric) return 0;
+    const n = parseFloat(String(metric.displayValue).replace(/,/g, ''));
+    return Number.isFinite(n) ? n : metric.numericValue;
+}
+
+/**
+ * Percent improvement from `before` to `after`, positive when the metric got faster.
+ * Null means "no percentage exists", which the caller renders as a dash:
+ *
+ *  - either run never measured the metric — nothing to compare;
+ *  - the baseline is zero — a share of nothing is undefined, not 100%.
+ *
+ * A measured zero in `after` is NOT one of those cases: dropping CLS to 0 is the best
+ * outcome a page can post and reads as +100%. Testing the number for falsiness instead
+ * of the measurement for presence is what previously blanked exactly that result.
+ */
+export function improvementPercent(
+    before: PageSpeedMetrics | undefined,
+    after: PageSpeedMetrics | undefined,
+): number | null {
+    if (!metricMeasured(before) || !metricMeasured(after)) return null;
+    const b = displayedMetricValue(before);
+    if (!b) return null;
+    return ((b - displayedMetricValue(after)) / b) * 100;
 }

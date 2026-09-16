@@ -135,9 +135,14 @@ interface SummarySection { heading: string; dates: DateGroup[] }
 const SANITY_RE = /\bit\s+internal\s+testing\b/i;
 const QC_RE = /start[:\s]+qc\s*testing/i;
 // Monitoring rows — GA real-time + PSM checking/monitoring — whose 15-min
-// screenshots feed this section. Postproduction monitoring is explicitly
-// excluded. (QC_RE / SANITY_RE never contain "monitor", no overlap.)
-const GA_RE = /^(?!.*postproduction).*\bmonitor/i;
+// screenshots feed this section. (QC_RE / SANITY_RE never contain "monitor",
+// no overlap.)
+//
+// Excluded by name: postproduction monitoring, and server / health monitoring.
+// The last two carry infrastructure graphs, not GA real-time screenshots — under
+// the "GA Monitoring" heading their drawers render as a picture with no Active
+// User / page-view lines beside it, reading as a GA capture that failed to parse.
+const GA_RE = /^(?!.*(?:postproduction|(?:server|health)[\s-]+monitor)).*\bmonitor/i;
 
 interface LogEntry {
   html: string;             // logbook cell HTML (drawers + images preserved)

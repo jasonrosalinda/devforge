@@ -466,6 +466,14 @@ export function EndpointPerfChart({
   }
 
   const fmtMs = msFormatter ?? ((ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`);
+  /** Share of the bucket's total. A real-but-tiny error rate must not render as "0.0%" —
+   *  the difference between no 5xx and a handful of them is the whole point of the row. */
+  const fmtPct = (n: number, total: number) => {
+    if (total <= 0) return '—';
+    const p = (n / total) * 100;
+    if (p === 0) return '0%';
+    return p < 0.1 ? '<0.1%' : `${p.toFixed(1)}%`;
+  };
   const spanMs = rows.length > 1
     ? new Date(rows[rows.length - 1]!.t).getTime() - new Date(rows[0]!.t).getTime()
     : 0;
@@ -496,16 +504,16 @@ export function EndpointPerfChart({
     );
 
     return (
-      <div style={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 11, padding: '6px 8px', minWidth: 168 }}>
+      <div style={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 11, padding: '6px 8px', minWidth: 196 }}>
         <div style={{ color: UI.textMuted, marginBottom: 4 }}>
           {new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         </div>
         {line(countNoun, `${row.count.toLocaleString()}${per}`, UI.text)}
-        {line(segmentLabels?.ok ?? 'successful', row.ok.toLocaleString(), okColor, true)}
+        {line(segmentLabels?.ok ?? 'successful', `${row.ok.toLocaleString()} (${fmtPct(row.ok, row.count)})`, okColor, true)}
         {/* Applicable classes always shown, including at zero: "4xx 0" is a fact about the
             bucket, whereas an absent line reads as "not measured". */}
-        {showFourXx && line(segmentLabels?.c4 ?? '4xx', row.c4.toLocaleString(), row.c4 ? fourXxColor : UI.textDim, true)}
-        {line(segmentLabels?.c5 ?? '5xx', row.c5.toLocaleString(), row.c5 ? fiveXxColor : UI.textDim, true)}
+        {showFourXx && line(segmentLabels?.c4 ?? '4xx', `${row.c4.toLocaleString()} (${fmtPct(row.c4, row.count)})`, row.c4 ? fourXxColor : UI.textDim, true)}
+        {line(segmentLabels?.c5 ?? '5xx', `${row.c5.toLocaleString()} (${fmtPct(row.c5, row.count)})`, row.c5 ? fiveXxColor : UI.textDim, true)}
         <div style={{ borderTop: `1px solid ${UI.border}`, margin: '4px 0' }} />
         {line('P95', fmtMs(row.p95), lineColor)}
         {line('Average', fmtMs(row.avgMs), lineColor)}

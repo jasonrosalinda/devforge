@@ -78,6 +78,9 @@ export interface PageSpeedConfiguration {
     aggregation: "average" | "median";
     urls: string[];
     comparisonMode: boolean;
+    /** Which side of a comparison the table draws. One enum rather than two booleans:
+     *  hiding BOTH runs leaves nothing to read, so it must not be representable. */
+    comparisonColumns: "both" | "before" | "after";
     beforeLabel: string;
     afterLabel: string;
     improvementThreshold: number;

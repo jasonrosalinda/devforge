@@ -15,6 +15,15 @@ const THRESHOLDS = {
     interactive:            { good: 3800,  poor: 7300  },
 };
 
+// A metric the audit actually measured. A zero alone cannot say: an absent metric
+// arrives zeroed, and a perfect CLS or TBT is also zero — only the display string
+// separates them ("" vs "0"). Mirrors metricMeasured in src/lib/pageSpeedUtils.ts.
+function measured(metric) {
+    if (!metric) return false;
+    if (String(metric.displayValue ?? '').trim() !== '') return true;
+    return (metric.numericValue ?? 0) > 0;
+}
+
 function ratingLabel(metric, key) {
     const v = metric?.numericValue;
     if (v == null) return '—';
@@ -281,7 +290,9 @@ function renderComparisonStrategy(label, data) {
             let change = '—';
             if (r1 && r1 !== false && r2 && r2 !== false) {
                 const n1 = r1[key]?.numericValue; const n2 = r2[key]?.numericValue;
-                if (n1 && n2) {
+                // Presence, not truthiness: a drop to a measured 0 is the best result
+                // a page can post and must read as +100%, not as "no data".
+                if (measured(r1[key]) && measured(r2[key]) && n1) {
                     const pct = ((n1 - n2) / n1 * 100).toFixed(1);
                     change = Number(pct) >= 0 ? `+${pct}% ✅` : `${pct}% ❌`;
                 }
@@ -298,7 +309,7 @@ function renderComparisonStrategy(label, data) {
         if (!r1 || r1 === false || !r2 || r2 === false) return;
         METRIC_KEYS.forEach(([key, abbr]) => {
             const n1 = r1[key]?.numericValue; const n2 = r2[key]?.numericValue;
-            if (n1 && n2) {
+            if (measured(r1[key]) && measured(r2[key]) && n1) {
                 const pct = ((n1 - n2) / n1 * 100);
                 if (pct < 0) regressions.push({ url, abbr, pct: pct.toFixed(1), before: r1[key].displayValue, after: r2[key].displayValue });
             }
@@ -341,10 +352,14 @@ function renderComparisonStrategy(label, data) {
 
 function renderStrategy(label, data) {
     if (!data) return `## ${label}\n_No results._\n\n`;
-    const { results1, config } = data;
+    const { results1, results2, config } = data;
     const urls = config.urls;
 
-    if (config.comparisonMode) return renderComparisonStrategy(label, data);
+    const columns = config.comparisonColumns ?? 'both';
+    if (config.comparisonMode && columns === 'both') return renderComparisonStrategy(label, data);
+    // A comparison presented as one side only reports as a plain single-run audit of
+    // that side — the same thing the results table and the Teams copy show.
+    const shown = config.comparisonMode && columns === 'after' ? results2 : results1;
 
     let md = `## ${label} (${config.strategy.toUpperCase()})\n\n`;
     md += `- **Mode:** Google PageSpeed API\n`;
@@ -352,7 +367,7 @@ function renderStrategy(label, data) {
     md += `- **URLs audited:** ${urls.length}\n\n`;
 
     urls.forEach((url, i) => {
-        md += renderUrlDetail(url, results1[i]);
+        md += renderUrlDetail(url, shown[i]);
     });
 
     return md;

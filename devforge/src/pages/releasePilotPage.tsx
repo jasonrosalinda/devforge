@@ -11,6 +11,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useSettings } from '@/context/settings-context';
+import { useSettingsUi } from '@/context/settings-ui-context';
 import { parseRunbookSections, collectImageUrls, extractGoals, extractReleaseLabel, extractProdSchedule, type RunbookAttachment } from '@/lib/parse-runbook';
 import { RunbookTable } from '@/components/release-pilot/runbookTable';
 import { ReleaseSummary, summaryClipboard } from '@/components/release-pilot/releaseSummary';
@@ -83,6 +84,7 @@ function pushHistory(key: string, url: string): string[] {
 
 export default function ReleasePilotPage() {
   const { settings } = useSettings();
+  const { openSettings } = useSettingsUi();
   const { confluenceBaseUrl, email, apiToken } = settings.atlassian;
   const hasCreds = !!(confluenceBaseUrl && email && apiToken);
 
@@ -413,7 +415,19 @@ export default function ReleasePilotPage() {
         <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
           <SettingsIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
-            Add your Confluence base URL, email, and API token in <span className="font-medium text-foreground">Settings → Atlassian</span> before loading a runbook.
+            Add your Confluence base URL, email, and API token in{' '}
+            {/* The fix is one click from the message rather than a place to go find:
+                this banner is the only thing on the page until the creds exist. */}
+            <Hint label="Open Settings on the Atlassian tab">
+              <button
+                type="button"
+                onClick={() => openSettings('atlassian')}
+                className="font-medium text-info underline underline-offset-2 hover:opacity-80"
+              >
+                Settings → Atlassian
+              </button>
+            </Hint>{' '}
+            before loading a runbook.
           </span>
         </div>
       )}

@@ -10,7 +10,7 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, compareRunToBaseline, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, compareRunToBaseline, improvementPercent, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -201,7 +201,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const displayAudit = displayPageSpeedAudit(config);
     const showAnalyzeButton = config.urls.length > 0 && !isNullOrEmpty(config.apiKey);
     const toast = Toast();
+    // Columns drawn for each metric. Comparison mode can show one side only, so this
+    // is a count of what is actually visible rather than a 1-vs-3 guess.
+    const columnsPerMetric = displayAudit.singleResult
+        ? 1
+        : [displayAudit.before, displayAudit.after, displayAudit.improvement].filter(Boolean).length;
+    // Only a two-sided comparison needs a label under each metric. With one side hidden
+    // every label would read the same, so the row carries no information and goes.
     const hasSubHead = !!(displayAudit.before && displayAudit.after);
+    // Which run each expanded row may show. Hiding a comparison column hides that run
+    // everywhere, so the detail below a URL matches the columns above it.
+    const showSide1 = displayAudit.singleResult || displayAudit.before;
+    const showSide2 = displayAudit.after;
     const isMultiRun = config.runs > 1;
 
 
@@ -234,19 +245,38 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
     const MAX_RETRIES = 2;
 
+    /**
+     * Re-runs an audit until it produces something usable, at most MAX_RETRIES times.
+     *
+     * Two kinds of failure have to be caught here, and only one of them throws. A
+     * transport error rejects; but a Lighthouse failure ("Failed to fetch", a page that
+     * never finished loading) is caught per run inside googleApi and comes back as a
+     * *resolved* result carrying an errorResponse. Retrying only on a rejection left
+     * exactly the failure the user sees in the table — every metric a dash — with no
+     * second attempt at all, so a resolved total failure is retried the same as a throw.
+     *
+     * A partial failure is kept, not retried: its surviving runs still aggregate into
+     * numbers worth reading, and re-running would discard them for no gain.
+     */
     const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal, runs?: number): Promise<PageSpeedInsightResult> => {
         let lastError: unknown;
+        let lastFailed: PageSpeedInsightResult | undefined;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
-                return await audit(url, signal, runs);
+                const result = await audit(url, signal, runs);
+                if (!allRunsFailed(result)) return result;
+                lastFailed = result;
             } catch (err) {
                 if (err instanceof DOMException && err.name === 'AbortError') throw err;
                 lastError = err;
-                if (attempt < MAX_RETRIES) {
-                    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-                }
+            }
+            if (attempt < MAX_RETRIES) {
+                await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
             }
         }
+        // Attempts exhausted. A failed result is worth more than a throw — it carries the
+        // API's own message, which the row prints under the URL.
+        if (lastFailed) return lastFailed;
         throw lastError;
     }, [audit]);
 
@@ -620,18 +650,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [auditWithRetry, config.urls, config.runs, config.aggregation, config.comparisonMode, config.beforeLabel, config.afterLabel, results1, results2, bruteProgress]);
 
-    // Use the value as DISPLAYED (rounded) so the improvement % is consistent
-    // with the numbers shown — e.g. "1.3 s" vs "1.3 s" reads 0%, not a delta
-    // hidden by rounding. Falls back to the raw numericValue if unparseable.
-    const displayNum = (m?: PageSpeedMetrics): number => {
-        if (!m) return 0;
-        const n = parseFloat(String(m.displayValue).replace(/,/g, ''));
-        return Number.isFinite(n) ? n : m.numericValue;
-    };
-
-    const calculateImprovement = (before: number, after: number): React.ReactNode => {
-        if (!before || !after) return <div>-</div>;
-        const improvement = ((before - after) / before) * 100;
+    const calculateImprovement = (before?: PageSpeedMetrics, after?: PageSpeedMetrics): React.ReactNode => {
+        const improvement = improvementPercent(before, after);
+        if (improvement === null) return <div>-</div>;
         const formatted = improvement.toFixed(2);
         const color = improvement >= 0
             ? 'text-success'
@@ -666,12 +687,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             { show: displayAudit.FCP, label: 'FCP', key: 'firstContentfulPaint' },
         ] as const).filter(m => m.show);
 
-        const single = displayAudit.singleResult;
-        const showImp = !single && displayAudit.improvement;
+        // A hidden comparison column collapses the copy to one value column too, so the
+        // pasted table matches the screen. `primaryOf` picks whichever run that column is.
+        const single = !(showSide1 && showSide2);
+        const primaryOf = <T,>(a: T, b: T): T => (showSide1 ? a : b);
+        const soloLabel = showSide1 ? config.beforeLabel : config.afterLabel;
+        const showImp = displayAudit.improvement;
         const td = (v: string, extra = '') => `<td style="padding:6px;border:1px solid #ccc${extra}">${v}</td>`;
-        const impCell = (b?: number, a?: number): string => {
-            if (!b || !a) return td('-');
-            const pct = ((b - a) / b) * 100;
+        const impCell = (b?: PageSpeedMetrics, a?: PageSpeedMetrics): string => {
+            const pct = improvementPercent(b, a);
+            if (pct === null) return td('-');
             const text = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
             const color = pct >= 0 ? '#16a34a' : (Math.abs(pct) > config.improvementThreshold ? '#dc2626' : '#ea580c');
             return td(text, `;color:${color};font-weight:600`);
@@ -679,7 +704,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
         const headCells = ['URL'];
         for (const m of metricDefs) {
-            if (single) headCells.push(m.label);
+            if (single) headCells.push(displayAudit.singleResult ? m.label : `${m.label} (${soloLabel})`);
             else {
                 headCells.push(`${m.label} (${config.beforeLabel})`, `${m.label} (${config.afterLabel})`);
                 if (showImp) headCells.push(`${m.label} Δ`);
@@ -694,17 +719,17 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             for (const m of metricDefs) {
                 const v1 = r1?.[m.key]?.displayValue ?? '-';
                 const v2 = r2?.[m.key]?.displayValue ?? '-';
-                if (single) tds += td(v1);
+                if (single) tds += td(primaryOf(v1, v2));
                 else {
                     tds += td(v1) + td(v2);
-                    if (showImp) tds += impCell(displayNum(r1?.[m.key]), displayNum(r2?.[m.key]));
+                    if (showImp) tds += impCell(r1?.[m.key], r2?.[m.key]);
                 }
             }
             let html = `<tr>${tds}</tr>`;
 
             // Individual runs (Average run mode) — grouped under the URL as #N sub-rows,
             // run values aligned to their Before/After columns.
-            const h1 = r1?.runHistory ?? [];
+            const h1 = (single ? primaryOf(r1, r2) : r1)?.runHistory ?? [];
             const h2 = single ? [] : (r2?.runHistory ?? []);
             const runCount = Math.max(h1.length, h2.length);
             if (runCount > 1) {
@@ -756,9 +781,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             const r1 = getSlot1(i) || undefined;
             const r2 = getSlot2(i) || undefined;
             const parts = metricDefs.map(m => single
-                ? `${m.label} ${r1?.[m.key]?.displayValue ?? '-'}`
+                ? `${m.label} ${primaryOf(r1, r2)?.[m.key]?.displayValue ?? '-'}`
                 : `${m.label} ${r1?.[m.key]?.displayValue ?? '-'} → ${r2?.[m.key]?.displayValue ?? '-'}`);
-            const h1 = r1?.runHistory ?? [];
+            const h1 = (single ? primaryOf(r1, r2) : r1)?.runHistory ?? [];
             const h2 = single ? [] : (r2?.runHistory ?? []);
             const runCount = Math.max(h1.length, h2.length);
             let runLines = '';
@@ -791,9 +816,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         toast.promise(copy, { loading: 'Copying…', success: 'Copied for Teams', error: 'Copy failed' });
     };
 
-    const thSpan = (!displayAudit.before || !displayAudit.after)
-        ? 1
-        : (displayAudit.improvement ? 3 : 2);
+    const thSpan = columnsPerMetric;
 
     const tableHead = (label: string): React.ReactNode => (
         <TableHead colSpan={thSpan} className="text-center border">{label}</TableHead>
@@ -806,16 +829,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             <>
                 {[...Array(showMetrics)].map((_, i) => (
                     <React.Fragment key={i}>
-                        {displayAudit.singleResult ? (
-                            <TableHead className="text-center text-sm border">Value</TableHead>
-                        ) : (
-                            <>
-                                <TableHead className="text-center text-sm border">{config.beforeLabel}</TableHead>
-                                <TableHead className="text-center text-sm border">{config.afterLabel}</TableHead>
-                                {displayAudit.improvement && (
-                                    <TableHead className="text-center text-sm border">Improvement</TableHead>
-                                )}
-                            </>
+                        {displayAudit.before && <TableHead className="text-center text-sm border">{config.beforeLabel}</TableHead>}
+                        {displayAudit.after && <TableHead className="text-center text-sm border">{config.afterLabel}</TableHead>}
+                        {displayAudit.improvement && (
+                            <TableHead className="text-center text-sm border">Improvement</TableHead>
                         )}
                     </React.Fragment>
                 ))}
@@ -871,23 +888,14 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return '-';
     };
 
-    const slotHasError = (slot: AuditSlot) => {
-        if (slot === false) return true;
-        if (!slot || slot === null) return false;
-        const r = slot as PageSpeedInsightResult;
-        const err = r.errorResponse;
-        return !!err && (err.code !== 0 || (Array.isArray(err.message) ? err.message.some(m => m.length > 0) : err.message.length > 0));
-    };
+    // `false` is the slot for an audit that threw outright — no result to inspect.
+    // Everything else defers to the shared predicates, so the badge below and the
+    // retry loop above cannot drift apart on what counts as a failure.
+    const slotHasError = (slot: AuditSlot) => slot === false || (!!slot && resultHasError(slot));
 
     // A partial failure still yields usable aggregates, so only a slot whose every
     // run errored reads as "Audit failed." — the rest just carry the error badge.
-    const slotAllRunsFailed = (slot: AuditSlot): boolean => {
-        if (slot === false) return true;
-        if (!slot) return false;
-        const history = (slot as PageSpeedInsightResult).runHistory;
-        if (history?.length) return history.every(r => slotHasError(r));
-        return slotHasError(slot);
-    };
+    const slotAllRunsFailed = (slot: AuditSlot): boolean => slot === false || (!!slot && allRunsFailed(slot));
 
     const retryButton = (
         index: number,
@@ -1598,7 +1606,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     // Calculate total column count for the history row's colSpan
     const totalColCount = (() => {
         const metricCount = [displayAudit.SI, displayAudit.LCP, displayAudit.CLS, displayAudit.TBT, displayAudit.FCP].filter(Boolean).length;
-        const columnsPerMetric = displayAudit.singleResult ? 1 : (displayAudit.improvement ? 3 : 2);
         return 1 + metricCount * columnsPerMetric; // 1 for URL column
     })();
 
@@ -1612,18 +1619,20 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         <>
             {show && (
                 <>
-                    <TableCell className="text-center border">
-                        {cellValue(slot1, metrics1)}
-                    </TableCell>
-                    {!displayAudit.singleResult && (
+                    {(displayAudit.singleResult || displayAudit.before) && (
+                        <TableCell className="text-center border">
+                            {cellValue(slot1, metrics1)}
+                        </TableCell>
+                    )}
+                    {displayAudit.after && (
                         <TableCell className="text-center border">
                             {cellValue(slot2, metrics2)}
                         </TableCell>
                     )}
-                    {!displayAudit.singleResult && displayAudit.improvement && (
+                    {displayAudit.improvement && (
                         <TableCell className="text-center border">
                             {metrics1 && metrics2
-                                ? calculateImprovement(displayNum(metrics1), displayNum(metrics2))
+                                ? calculateImprovement(metrics1, metrics2)
                                 : isAuditing
                                     ? <Skeleton className="mx-auto h-4 w-12" />
                                     : '-'}
@@ -1783,13 +1792,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             {url}
                                                         </a>
                                                         {getResultMessageForUrl(slot1, slot2)}
-                                                        {!copying && (slotHasError(slot1) || slotHasError(slot2)) && (
+                                                        {!copying && ((showSide1 && slotHasError(slot1)) || (showSide2 && slotHasError(slot2))) && (
                                                             <div className="flex items-center gap-1 mt-1">
-                                                                {(slotAllRunsFailed(slot1) || slotAllRunsFailed(slot2)) && (
+                                                                {((showSide1 && slotAllRunsFailed(slot1)) || (showSide2 && slotAllRunsFailed(slot2))) && (
                                                                     <span className="text-xs text-destructive">Audit failed.</span>
                                                                 )}
-                                                                {retryButton(index, slot1, setResults1, '1')}
-                                                                {!displayAudit.singleResult && retryButton(index, slot2, setResults2, '2')}
+                                                                {showSide1 && retryButton(index, slot1, setResults1, '1')}
+                                                                {showSide2 && retryButton(index, slot2, setResults2, '2')}
                                                             </div>
                                                         )}
                                                     </div>
@@ -1809,7 +1818,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                 <TableCell colSpan={totalColCount} className="p-0">
                                                     <div className="px-4 py-3">
                                                         {/* Slot 1: runs table + consolidated insights across those runs */}
-                                                        {history1 && (() => {
+                                                        {history1 && showSide1 && (() => {
                                                             const cardKey = `runs-${index}-1`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             return (
@@ -1831,7 +1840,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         })()}
 
                                                         {/* Slot 2 (comparison mode) */}
-                                                        {history2 && !displayAudit.singleResult && (() => {
+                                                        {history2 && showSide2 && (() => {
                                                             const cardKey = `runs-${index}-2`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             const bruteKey = `2-${index}`;
@@ -1879,7 +1888,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         })()}
 
                                                         {/* Single-run slots (no run history): per-slot label + Re-run, then insights */}
-                                                        {!history1 && result1 && (() => {
+                                                        {!history1 && result1 && showSide1 && (() => {
                                                             const cardKey = `single-${index}-1`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             return (
@@ -1898,7 +1907,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                             );
                                                         })()}
 
-                                                        {!history2 && result2 && !displayAudit.singleResult && (() => {
+                                                        {!history2 && result2 && showSide2 && (() => {
                                                             const cardKey = `single-${index}-2`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
                                                             return (

@@ -86,6 +86,13 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
         });
     };
 
+    const onComparisonColumnsChange = (value: string) => {
+        onSetConfigState({
+            ...config,
+            comparisonColumns: value as PageSpeedConfiguration['comparisonColumns'],
+        });
+    };
+
     const onBeforeLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         onSetConfigState({
             ...config,
@@ -359,6 +366,22 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                                             </FieldDescription>
                                                         </FieldContent>
                                                         <Input id="after-label" value={config.afterLabel} onChange={onAfterLabelChange} />
+                                                    </Field>
+                                                    <Field>
+                                                        <FieldContent>
+                                                            <FieldTitle>Columns</FieldTitle>
+                                                            <FieldDescription className="text-xs text-muted-foreground">
+                                                                Show one side only to present a comparison run as a single column. The Improvement column needs both.
+                                                            </FieldDescription>
+                                                        </FieldContent>
+                                                        <Select value={config.comparisonColumns} onValueChange={onComparisonColumnsChange}>
+                                                            <SelectTrigger id="select-comparison-columns" className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value="both">{config.beforeLabel || 'Before'} and {config.afterLabel || 'After'}</SelectItem>
+                                                                <SelectItem value="before">{config.beforeLabel || 'Before'} only</SelectItem>
+                                                                <SelectItem value="after">{config.afterLabel || 'After'} only</SelectItem>
+                                                            </SelectContent>
+                                                        </Select>
                                                     </Field>
                                                 </>
                                             )}

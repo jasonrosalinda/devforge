@@ -459,10 +459,16 @@ export default function PageSpeedResultPage() {
             { label: 'DESKTOP', bundle: desktop },
             { label: 'MOBILE', bundle: mobile },
         ];
-        const comparisonMode = desktopConfig.comparisonMode;
+        // A comparison run can be presented as one side only. `bothColumns` is what the
+        // two-column layout and the % row hang off; `soloAfter` says which run the single
+        // column carries when one side is hidden.
+        const columns = desktopConfig.comparisonColumns ?? 'both';
+        const bothColumns = desktopConfig.comparisonMode && columns === 'both';
+        const soloAfter = desktopConfig.comparisonMode && columns === 'after';
         const beforeLabel = desktopConfig.beforeLabel || 'Before';
         const afterLabel = desktopConfig.afterLabel || 'After';
-        const colsPerMetric = comparisonMode ? 2 : 1;
+        const colsPerMetric = bothColumns ? 2 : 1;
+        const soloSlot = <T,>(before: T, after: T): T => (soloAfter ? after : before);
         const colsPerStrategy = metricDefs.length * colsPerMetric;
 
         // The legacy align attribute rides along with the CSS: Teams and Word drop
@@ -492,8 +498,10 @@ export default function PageSpeedResultPage() {
             `<tr>${th('URL', 1, 4, ';background:#fff')}${th(`PAGESPEED${aggLabel}`, strategies.length * colsPerStrategy)}</tr>` +
             `<tr>${strategies.map(s => th(s.label, colsPerStrategy)).join('')}</tr>` +
             `<tr>${strategies.map(() => metricDefs.map(m => th(m.label, colsPerMetric)).join('')).join('')}</tr>` +
-            (comparisonMode
-                ? `<tr>${strategies.map(() => metricDefs.map(() => th(beforeLabel) + th(afterLabel)).join('')).join('')}</tr>`
+            (desktopConfig.comparisonMode
+                ? `<tr>${strategies.map(() => metricDefs.map(() => bothColumns
+                    ? th(beforeLabel) + th(afterLabel)
+                    : th(soloAfter ? afterLabel : beforeLabel)).join('')).join('')}</tr>`
                 : '');
 
         const cellText = (slot: AuditSlot, key: MetricKey): string => (slot ? slot[key]?.displayValue ?? '-' : '-');
@@ -507,7 +515,7 @@ export default function PageSpeedResultPage() {
         desktopConfig.urls.forEach((url, i) => {
             const slots = strategies.map(s => ({ before: s.bundle.results1[i], after: s.bundle.results2[i] }));
             const numRuns = Math.max(0, ...slots.flatMap(s => [s.before, s.after]).map(s => (s && s.runHistory?.length) || 0));
-            const rowCount = (numRuns > 0 ? numRuns + 1 : 1) + (comparisonMode ? 1 : 0);
+            const rowCount = (numRuns > 0 ? numRuns + 1 : 1) + (bothColumns ? 1 : 0);
 
             let urlCellEmitted = false;
             const urlCell = () => {
@@ -520,7 +528,7 @@ export default function PageSpeedResultPage() {
             // get highlighted — same jitter-spotting rule as the per-strategy Copy for Teams.
             const matchedByStrategy = slots.map(s => {
                 const map = new Map<MetricKey, Set<string>>();
-                if (!comparisonMode) return map;
+                if (!bothColumns) return map;
                 const h1 = (s.before ? s.before.runHistory : undefined) ?? [];
                 const h2 = (s.after ? s.after.runHistory : undefined) ?? [];
                 if (!h1.length || !h2.length) return map;
@@ -537,7 +545,7 @@ export default function PageSpeedResultPage() {
                 const rowHtml = slots.map((s, si) => metricDefs.map(m => {
                     const beforeRun = s.before ? s.before.runHistory?.[r] : undefined;
                     const afterRun = s.after ? s.after.runHistory?.[r] : undefined;
-                    if (!comparisonMode) return td(cellText(beforeRun, m.key));
+                    if (!bothColumns) return td(cellText(soloSlot(beforeRun, afterRun), m.key));
                     const hl = (v: string) => (v !== '-' && matchedByStrategy[si]?.get(m.key)?.has(v)) ? HL : '';
                     const bv = cellText(beforeRun, m.key);
                     const av = cellText(afterRun, m.key);
@@ -547,12 +555,12 @@ export default function PageSpeedResultPage() {
             }
 
             const avgRowHtml = slots.map(s => metricDefs.map(m => {
-                if (!comparisonMode) return td(cellText(s.before, m.key), ';background:#f2f2f2');
+                if (!bothColumns) return td(cellText(soloSlot(s.before, s.after), m.key), ';background:#f2f2f2');
                 return td(cellText(s.before, m.key), ';background:#f2f2f2') + td(cellText(s.after, m.key), ';background:#f2f2f2');
             }).join('')).join('');
             bodyRows.push(`<tr>${urlCell()}${avgRowHtml}</tr>`);
 
-            if (comparisonMode) {
+            if (bothColumns) {
                 const pctRowHtml = slots.map(s => metricDefs.map(m => {
                     const b = cellNum(s.before, m.key);
                     const a = cellNum(s.after, m.key);
@@ -584,9 +592,9 @@ export default function PageSpeedResultPage() {
             const parts = strategies.map(s => {
                 const before = s.bundle.results1[i];
                 const after = s.bundle.results2[i];
-                const metrics = metricDefs.map(m => comparisonMode
+                const metrics = metricDefs.map(m => bothColumns
                     ? `${m.label} ${cellText(before, m.key)} → ${cellText(after, m.key)}`
-                    : `${m.label} ${cellText(before, m.key)}`).join(', ');
+                    : `${m.label} ${cellText(soloSlot(before, after), m.key)}`).join(', ');
                 return `${s.label}: ${metrics}`;
             }).join(' | ');
             return `${url}: ${parts}`;

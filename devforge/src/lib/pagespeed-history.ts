@@ -48,6 +48,7 @@ export function migrateConfig(config: LegacyConfig): PageSpeedConfiguration {
         ...rest,
         runs: rest.runs ?? (runMode === 'average' ? 3 : 1),
         aggregation: rest.aggregation ?? 'average',
+        comparisonColumns: rest.comparisonColumns ?? 'both',
     };
 }
 
