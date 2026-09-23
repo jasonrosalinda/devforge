@@ -1,5 +1,5 @@
 import type { Page } from "@/types/pages.types";
-import { Home, Rocket, ScanSearch } from "lucide-react";
+import { Home, Rocket, ScanSearch, Wrench } from "lucide-react";
 import { SiPagespeedinsights } from "react-icons/si";
 import { AiOutlineTranslation } from "react-icons/ai";
 import { TbActivity } from "react-icons/tb";
@@ -10,6 +10,8 @@ import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
+import ToolboxPage from "@/pages/toolboxPage";
+import { TOOLBOX_KEYWORDS } from "@/components/toolbox/toolbox-registry";
 
 export const pages: Page[] = [
     {
@@ -47,6 +49,13 @@ export const pages: Page[] = [
         url: "#",
         icon: AiOutlineTranslation,
         component: LocalizationPage
+    },
+    {
+        title: "Toolbox",
+        url: "#",
+        icon: Wrench,
+        component: ToolboxPage,
+        keywords: TOOLBOX_KEYWORDS
     }
 ]
 
