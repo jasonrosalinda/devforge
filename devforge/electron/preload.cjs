@@ -82,6 +82,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
         lookup: (opts) => ipcRenderer.invoke('ipapi:lookup', opts),
     },
 
+    backgroundMonitor: {
+        setEnabled: (enabled) => ipcRenderer.invoke('monitor:set-enabled', enabled),
+        alert: (opts) => ipcRenderer.invoke('monitor:alert', opts),
+        onCheckNow: (cb) => {
+            const fn = () => cb();
+            ipcRenderer.on('monitor:check-now', fn);
+            return () => ipcRenderer.removeListener('monitor:check-now', fn);
+        },
+    },
+
     confluence: {
         fetchRunbook: (opts) => ipcRenderer.invoke('confluence:fetchRunbook', opts),
         fetchImages: (opts) => ipcRenderer.invoke('confluence:fetchImages', opts),

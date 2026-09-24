@@ -10,7 +10,7 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ExceptionLocationSeries, ExceptionSiteRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -22,6 +22,7 @@ import { RestartRows } from './restartSection';
 import { CrashMonitoringRows } from './crashMonitoringSection';
 import { PerformanceRows } from './performanceSection';
 import { perfSummary, hasPerfData } from './performance';
+import { cardStatus, type Status } from './status';
 import { UserRows } from './userSection';
 import { ExceptionLocationChart } from './exceptionLocationChart';
 import { ExceptionSiteTable } from './exceptionSiteTable';
@@ -753,11 +754,87 @@ function renderSocketTab(
   );
 }
 
-type Status = 'healthy' | 'warning' | 'critical';
-export function getStatus(cpuAvg: number, memAvg: number, cpuP99?: number, memP99?: number): Status {
-  if (cpuAvg > 90 || memAvg > 95 || (cpuP99 ?? 0) >= 100 || (memP99 ?? 0) >= 100) return 'critical';
-  if (cpuAvg > 70 || memAvg > 80  || (cpuP99 ?? 0) > 85  || (memP99 ?? 0) > 90)  return 'warning';
-  return 'healthy';
+export { getStatus } from './status';
+/** Instance rows as the Instances block shows them: FE and API merged by name, an
+ *  instance with neither a health figure nor a series left out. Shared with Copy for
+ *  Teams so the paste can never count a different set than the card. */
+function deriveInstanceRows(metrics: AppMetrics, rangeEnd: string | undefined) {
+  const feInstances = metrics.instances ?? [];
+  const apiInstances = metrics.apiInstances ?? [];
+  const feNames = new Set(feInstances.map(i => i.name.toLowerCase()));
+  const apiNames = new Set(apiInstances.map(i => i.name.toLowerCase()));
+  const allInstances = [
+    ...feInstances.map(i => ({ ...i, role: apiNames.has(i.name.toLowerCase()) ? 'both' : 'fe' as const })),
+    ...apiInstances
+      .filter(i => !feNames.has(i.name.toLowerCase()))
+      .map(i => ({ ...i, role: 'api' as const })),
+  ];
+
+  // Derived once and used by both the collapsed header summary and the
+  // expanded chart, so the latest-health figures in the two can never
+  // disagree.
+  return allInstances.map((inst, i) => {
+    const shortInstName = inst.name.split('_').slice(-1)[0] || inst.name;
+    const apiOnly = inst.role === 'api';
+    const activeSeries = apiOnly
+      ? (metrics.apiInstanceHealthSeries ?? [])
+      : (metrics.instanceHealthSeries ?? []);
+    const seriesIdx = activeSeries.findIndex(
+      s => s.name === inst.name ||
+           s.name.toLowerCase() === inst.name.toLowerCase() ||
+           s.name.toLowerCase().includes(shortInstName.toLowerCase()) ||
+           inst.name.toLowerCase().includes(s.name.toLowerCase())
+    );
+    const series = seriesIdx >= 0 ? activeSeries[seriesIdx] : undefined;
+    const points = series?.series ?? [];
+    const vals = points.map(p => p.v);
+    const apiOnlyIdx = apiOnly
+      ? apiInstances.filter(a => !feNames.has(a.name.toLowerCase())).findIndex(a => a.name === inst.name)
+      : -1;
+    const colorIdx = apiOnly
+      ? (feInstances.length + (apiOnlyIdx >= 0 ? apiOnlyIdx : i)) % INSTANCE_PALETTE.length
+      : seriesIdx >= 0 ? seriesIdx % INSTANCE_PALETTE.length : i % INSTANCE_PALETTE.length;
+    // API instances with no metric data still have an ARM health status.
+    const statusFallback = (apiOnly && inst.healthPct === null && !vals.length)
+      ? (inst.healthStatus === 'Healthy' ? 100 : inst.healthStatus === 'Degraded' ? 70 : inst.healthStatus === 'Stopped' ? 0 : null)
+      : null;
+    const fallbackPct = inst.healthPct ?? statusFallback;
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
+    const minVal = vals.length ? Math.min(...vals) : fallbackPct;
+    // Latest = the most recent bucket in which the instance actually
+    // served traffic. No-data buckets are excluded upstream, so this
+    // is a real reading rather than an assumed 100%.
+    const latest = vals.length ? (vals[vals.length - 1] ?? null) : fallbackPct;
+    const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
+    const seriesRoleName = series?.roleName ?? null;
+
+    // Lifecycle. A point exists in the series only for buckets where
+    // the instance produced traffic, so the first point ≈ when it came
+    // online and the last ≈ its final activity. An instance still
+    // reporting at the end of the range is shown as running to the
+    // range end rather than to its last bucket, which would otherwise
+    // read as though it had disappeared.
+    const firstSeenIso = points.length ? (points[0]?.t ?? null) : null;
+    const lastSeenIso = points.length ? (points[points.length - 1]?.t ?? null) : null;
+    const fmtDt = (iso: string) => new Date(iso).toLocaleString(undefined, {
+      month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    const rangeEndMs = rangeEnd ? new Date(rangeEnd).getTime() : Date.now();
+    const stillActive = lastSeenIso
+      ? (rangeEndMs - new Date(lastSeenIso).getTime()) <= 15 * 60 * 1000
+      : false;
+    const lifecycle = firstSeenIso && lastSeenIso
+      ? `${fmtDt(firstSeenIso)} → ${stillActive ? fmtDt(new Date(rangeEndMs).toISOString()) : fmtDt(lastSeenIso)}`
+      : null;
+
+    return {
+      name: inst.name,
+      label: seriesRoleName ? `${seriesRoleName}: ${shortName}` : shortName,
+      shortName, seriesRoleName, avg, minVal, latest, points,
+      lifecycle, stillActive, healthStatus: inst.healthStatus,
+      color: INSTANCE_PALETTE[colorIdx] ?? UI.textMuted,
+    };
+  }).filter(r => r.avg !== null || r.points.length > 0);
 }
 
 const STATUS_COLORS: Record<Status, string> = {
@@ -1256,6 +1333,18 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       name: 'DB Memory',
       avg: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, p99: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, max: `${(+metrics.dbMemory!.max).toFixed(2)}%`,
     });
+    // The same set the Instances block lists. Active = anything not marked Stopped,
+    // so a Degraded or Unhealthy worker still counts as running.
+    const instanceRows = visibleBlocks.instances ? deriveInstanceRows(metrics, rangeEnd) : [];
+    if (instanceRows.length) {
+      const stopped = instanceRows.filter(r => r.healthStatus.toLowerCase() === 'stopped').length;
+      statusRows.push({
+        name: 'Instances',
+        avg: `${(instanceRows.length - stopped).toLocaleString()} active`,
+        p99: `${stopped.toLocaleString()} stopped`,
+        max: `${instanceRows.length.toLocaleString()} total`,
+      });
+    }
     // Mirrors the gating on the SnatPortsRows usages below: one combined row when
     // FE and API share a plan, otherwise a row per plan (API only when it has one
     // of its own — a shared or absent API already left it out of the picture).
@@ -1324,55 +1413,81 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       // The chart already shows the shape over time; these are the same totals as the
       // on-screen Performance row's own summary cells, one labelled figure at a time
       // rather than packed into that row's dense "5xx (%) / 4xx (%) / total" form.
-      /** One figure per row, name left and value right — same shape as the tables above. */
-      const perfRow = (name: string, value: string, color?: string) =>
-        `<tr><td style="padding:4px 10px;">${name}</td>` +
-        `<td align="right" style="padding:4px 10px;${color ? `color:${color};` : ''}">${value}</td></tr>`;
 
       // The figures go in whenever that side has request telemetry, with or without a
       // chart image: a capture that could not be taken (block hidden, card off screen)
       // used to take the whole block with it, so a paste silently lost the numbers too.
-      const perfBlock = (label: string, url: string | null, perf: EndpointPerformance | null | undefined) => {
-        if (!hasPerfData(perf)) return '';
-        const f = perfSummary(perf);
-        return (
-          `<p style="margin:0;">&nbsp;</p>` +
-          `<p style="font-weight:700;margin:0;">${label}</p>` +
-          (url ? `<p style="margin:0;"><img src="${url}" style="width:100%;display:block;"/></p>` : '') +
-          // Same blank line the top chart gets before the Metrics table, so the figures
-          // read as a block under the chart rather than stuck to its bottom edge.
-          `<p style="margin:0;">&nbsp;</p>` +
-          // A table, like every other figure on the paste: the run of pipe-separated
-          // pairs read as a sentence and put the numbers at seven different left edges.
-          // Labelled and coloured the way the chart's own legend labels them, so this
-          // reads as that chart's caption rather than a second set of numbers.
-          `<table border="1" cellspacing="0" ${tableStyle}>` +
-          `<tr><td colspan="2" style="padding:4px 10px;"><b>Request</b></td></tr>` +
-          perfRow('total', f.total.toLocaleString()) +
-          perfRow('successful', `${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`, PERF_COLORS.ok) +
-          perfRow('4xx', `${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`, f.fourXx > 0 ? PERF_COLORS.fourXx : undefined) +
-          perfRow('5xx', `${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`, f.fiveXx > 0 ? PERF_COLORS.fiveXx : undefined) +
-          `<tr><td colspan="2" style="padding:4px 10px;"><b>Response</b></td></tr>` +
-          perfRow('P95 peak', fmtDuration(f.peakP95)) +
-          perfRow('average', fmtDuration(f.avgMs)) +
-          perfRow('slowest', fmtDuration(f.slowest)) +
-          `</table>`
-        );
-      };
+      const perfSides = ([
+        { label: 'Frontend', url: fePerfUrl, perf: metrics.requestInsights?.performance },
+        { label: 'API', url: apiPerfUrl, perf: metrics.apiRequestInsights?.performance },
+      ] as const)
+        .filter(s => hasPerfData(s.perf))
+        .map(s => ({ label: s.label, url: s.url, f: perfSummary(s.perf) }));
 
-      /** The same figures for the plain-text flavour, which carried none of this before. */
-      const perfLines = (label: string, perf: EndpointPerformance | null | undefined): string[] => {
-        if (!hasPerfData(perf)) return [];
-        const f = perfSummary(perf);
-        return [
-          '',
-          label,
-          `Request: total - ${f.total.toLocaleString()} | successful - ${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`
-            + ` | 4xx - ${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`
-            + ` | 5xx - ${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`,
-          `Response: P95 peak - ${fmtDuration(f.peakP95)} | average - ${fmtDuration(f.avgMs)} | slowest - ${fmtDuration(f.slowest)}`,
-        ];
-      };
+      // The charts sit side by side, each under its own label, in a borderless layout
+      // table (the one side-by-side layout Teams keeps on paste); the figures follow in one table.
+      const perfCharts = perfSides.length
+        ? `<p style="margin:0;">&nbsp;</p>` +
+          `<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%;"><tr>` +
+          perfSides.map((s, i) =>
+            `<td valign="top" style="width:${100 / perfSides.length}%;padding:0${i > 0 ? ' 0 0 8px' : ''};">` +
+            `<p style="font-weight:700;margin:0;">${s.label}</p>` +
+            (s.url ? `<img src="${s.url}" style="width:100%;display:block;"/>` : '') +
+            `</td>`,
+          ).join('') +
+          `</tr></table>`
+        : '';
+
+      type PerfSummary = ReturnType<typeof perfSummary>;
+      type PerfFigure = { name: string; value: (f: PerfSummary) => string; color?: (f: PerfSummary) => string | undefined };
+      const perfFigures: { section: string; figures: PerfFigure[] }[] = [
+        { section: 'Request', figures: [
+          { name: 'total',      value: f => f.total.toLocaleString() },
+          { name: 'successful', value: f => `${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`, color: () => PERF_COLORS.ok },
+          { name: '4xx',        value: f => `${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`, color: f => f.fourXx > 0 ? PERF_COLORS.fourXx : undefined },
+          { name: '5xx',        value: f => `${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`, color: f => f.fiveXx > 0 ? PERF_COLORS.fiveXx : undefined },
+        ] },
+        { section: 'Response', figures: [
+          { name: 'P95 peak', value: f => fmtDuration(f.peakP95) },
+          { name: 'average',  value: f => fmtDuration(f.avgMs) },
+          { name: 'slowest',  value: f => fmtDuration(f.slowest) },
+        ] },
+      ];
+
+      // One table, one value column per side, so Frontend and API read across a row
+      // instead of being compared between two tables a chart-height apart.
+      // Labelled and coloured the way the charts' own legends label them.
+      // Side names head the columns once; section rows only carry their own name.
+      const perfCell = (value: string, color?: string) =>
+        `<td style="padding:4px 10px;${color ? `color:${color};` : ''}">${value}</td>`;
+      const perfBlankCells = perfSides.map(() => `<td style="padding:4px 10px;"></td>`).join('');
+      const perfTable = perfSides.length
+        ? `<table border="1" cellspacing="0" ${tableStyle}>` +
+          `<tr><td style="padding:4px 10px;"></td>` +
+          perfSides.map(s => `<td style="padding:4px 10px;"><b>${s.label}</b></td>`).join('') +
+          `</tr>` +
+          perfFigures.map(({ section, figures }) =>
+            `<tr><td style="padding:4px 10px;"><b>${section}</b></td>${perfBlankCells}</tr>` +
+            figures.map(fig =>
+              `<tr><td style="padding:4px 10px;">${fig.name}</td>` +
+              perfSides.map(s => perfCell(fig.value(s.f), fig.color?.(s.f))).join('') +
+              `</tr>`,
+            ).join(''),
+          ).join('') +
+          `</table>`
+        : '';
+
+      /** The same figures for the plain-text flavour, laid out like the table. */
+      const perfLines: string[] = perfSides.length
+        ? [
+            '',
+            ['', ...perfSides.map(s => s.label)].join(' | '),
+            ...perfFigures.flatMap(({ section, figures }) => [
+              section,
+              ...figures.map(fig => [fig.name, ...perfSides.map(s => fig.value(s.f))].join(' | ')),
+            ]),
+          ]
+        : [];
 
       const toTableRows = (list: typeof rows) => list.map(r =>
         `<tr><td style="padding:4px 10px;"><b>${r.name}</b></td><td align="right" style="padding:4px 10px;">${r.avg}</td><td align="right" style="padding:4px 10px;">${r.p99}</td><td align="right" style="padding:4px 10px;">${r.max}</td></tr>`,
@@ -1383,19 +1498,17 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         `<p style="margin:0;">App Service Plan: <b>${appName}</b></p>` +
         `<p style="margin:0;">&nbsp;</p>` +
         `<p style="margin:0;"><img src="${dataUrl}" style="width:100%;display:block;"/></p>` +
-        `<p style="margin:0;">&nbsp;</p>` +
         `<table border="1" cellspacing="0" ${tableStyle}>` +
         `<tr><td style="padding:4px 10px;"><b>Metrics</b></td><td align="right" style="padding:4px 10px;"><b>Average</b></td><td align="right" style="padding:4px 10px;"><b>P99</b></td><td align="right" style="padding:4px 10px;"><b>Max</b></td></tr>` +
         toTableRows(rows) +
         `</table>` +
         (statusRows.length
-          ? `<p style="margin:0;">&nbsp;</p>` +
-            `<table border="1" cellspacing="0" ${tableStyle}>` +
+          ? `<table border="1" cellspacing="0" ${tableStyle}>` +
             toTableRows(statusRows) +
             `</table>`
           : '') +
-        perfBlock('Frontend', fePerfUrl, metrics.requestInsights?.performance) +
-        perfBlock('API', apiPerfUrl, metrics.apiRequestInsights?.performance) +
+        perfCharts +
+        perfTable +
         `<p style="margin:0;">&nbsp;</p>` +
         `<p style="margin:0;"><b style="color:#555;">Remarks: </b><b style="color:${remarksColor};">${remarksText || '—'}</b></p>` +
         `</div>`;
@@ -1406,8 +1519,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         'Metrics | Average | P99 | Max',
         ...rows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`),
         ...(statusRows.length ? ['', ...statusRows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`)] : []),
-        ...perfLines('Frontend', metrics.requestInsights?.performance),
-        ...perfLines('API', metrics.apiRequestInsights?.performance),
+        ...perfLines,
         '',
         `Remarks: ${remarksText || '—'}`,
       ].join('\n');
@@ -1464,9 +1576,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
 
 
 
-  const memPct = metrics.memUnit === 'MB' ? 0 : metrics.memory.avg;
-  const memP99Pct = metrics.memUnit === 'MB' ? 0 : metrics.memory.p99;
-  const status = getStatus(metrics.cpu.avg, memPct, metrics.cpu.p99, memP99Pct);
+  const status = cardStatus(metrics);
   const borderColor = STATUS_BORDER[status];
   const statusColor = STATUS_COLORS[status];
   const downtimeIntervals = metrics.availability?.downtimeIntervals ?? [];
@@ -1910,84 +2020,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 row inside each of the FE and API sections below, per App Insights
                 resource, carrying the busiest addresses and agents alongside the line. */}
             {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
-              const feInstances = metrics.instances ?? [];
-              const apiInstances = metrics.apiInstances ?? [];
-              const feNames = new Set(feInstances.map(i => i.name.toLowerCase()));
-              const apiNames = new Set(apiInstances.map(i => i.name.toLowerCase()));
-              const allInstances = [
-                ...feInstances.map(i => ({ ...i, role: apiNames.has(i.name.toLowerCase()) ? 'both' : 'fe' as const })),
-                ...apiInstances
-                  .filter(i => !feNames.has(i.name.toLowerCase()))
-                  .map(i => ({ ...i, role: 'api' as const })),
-              ];
-              const hasInstances = allInstances.length > 0;
+              const rows = deriveInstanceRows(metrics, rangeEnd);
+              const hasInstances = (metrics.instances?.length ?? 0) + (metrics.apiInstances?.length ?? 0) > 0;
               const hc = (v: number | null) => v == null ? UI.textMuted : v >= 99 ? UI.success : v >= 90 ? UI.warning : 'hsl(var(--destructive))';
-
-              // Derived once and used by both the collapsed header summary and the
-              // expanded chart, so the latest-health figures in the two can never
-              // disagree.
-              const rows = allInstances.map((inst, i) => {
-                      const shortInstName = inst.name.split('_').slice(-1)[0] || inst.name;
-                      const apiOnly = inst.role === 'api';
-                      const activeSeries = apiOnly
-                        ? (metrics.apiInstanceHealthSeries ?? [])
-                        : (metrics.instanceHealthSeries ?? []);
-                      const seriesIdx = activeSeries.findIndex(
-                        s => s.name === inst.name ||
-                             s.name.toLowerCase() === inst.name.toLowerCase() ||
-                             s.name.toLowerCase().includes(shortInstName.toLowerCase()) ||
-                             inst.name.toLowerCase().includes(s.name.toLowerCase())
-                      );
-                      const series = seriesIdx >= 0 ? activeSeries[seriesIdx] : undefined;
-                      const points = series?.series ?? [];
-                      const vals = points.map(p => p.v);
-                      const apiOnlyIdx = apiOnly
-                        ? apiInstances.filter(a => !feNames.has(a.name.toLowerCase())).findIndex(a => a.name === inst.name)
-                        : -1;
-                      const colorIdx = apiOnly
-                        ? (feInstances.length + (apiOnlyIdx >= 0 ? apiOnlyIdx : i)) % INSTANCE_PALETTE.length
-                        : seriesIdx >= 0 ? seriesIdx % INSTANCE_PALETTE.length : i % INSTANCE_PALETTE.length;
-                      // API instances with no metric data still have an ARM health status.
-                      const statusFallback = (apiOnly && inst.healthPct === null && !vals.length)
-                        ? (inst.healthStatus === 'Healthy' ? 100 : inst.healthStatus === 'Degraded' ? 70 : inst.healthStatus === 'Stopped' ? 0 : null)
-                        : null;
-                      const fallbackPct = inst.healthPct ?? statusFallback;
-                      const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : fallbackPct;
-                      const minVal = vals.length ? Math.min(...vals) : fallbackPct;
-                      // Latest = the most recent bucket in which the instance actually
-                      // served traffic. No-data buckets are excluded upstream, so this
-                      // is a real reading rather than an assumed 100%.
-                      const latest = vals.length ? (vals[vals.length - 1] ?? null) : fallbackPct;
-                      const shortName = inst.name.split('_').slice(-2).join('_') || inst.name;
-                      const seriesRoleName = series?.roleName ?? null;
-
-                      // Lifecycle. A point exists in the series only for buckets where
-                      // the instance produced traffic, so the first point ≈ when it came
-                      // online and the last ≈ its final activity. An instance still
-                      // reporting at the end of the range is shown as running to the
-                      // range end rather than to its last bucket, which would otherwise
-                      // read as though it had disappeared.
-                      const firstSeenIso = points.length ? (points[0]?.t ?? null) : null;
-                      const lastSeenIso = points.length ? (points[points.length - 1]?.t ?? null) : null;
-                      const fmtDt = (iso: string) => new Date(iso).toLocaleString(undefined, {
-                        month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-                      });
-                      const rangeEndMs = rangeEnd ? new Date(rangeEnd).getTime() : Date.now();
-                      const stillActive = lastSeenIso
-                        ? (rangeEndMs - new Date(lastSeenIso).getTime()) <= 15 * 60 * 1000
-                        : false;
-                      const lifecycle = firstSeenIso && lastSeenIso
-                        ? `${fmtDt(firstSeenIso)} → ${stillActive ? fmtDt(new Date(rangeEndMs).toISOString()) : fmtDt(lastSeenIso)}`
-                        : null;
-
-                return {
-                  name: inst.name,
-                  label: seriesRoleName ? `${seriesRoleName}: ${shortName}` : shortName,
-                  shortName, seriesRoleName, avg, minVal, latest, points,
-                  lifecycle, stillActive,
-                  color: INSTANCE_PALETTE[colorIdx] ?? UI.textMuted,
-                };
-              }).filter(r => r.avg !== null || r.points.length > 0);
 
               return (
                 <>

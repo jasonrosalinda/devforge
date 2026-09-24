@@ -6,17 +6,18 @@ export const USERS_COLOR = '#a371f7';
 export const UA_TRUNCATE = 90;
 
 /**
- * Avg / P99 / Max across buckets — deliberately not across requests.
+ * Avg / P95 / Max across buckets — deliberately not across requests.
  *
  * Each bucket already holds one distinct-client count, so there is nothing to average
  * within one. The figures therefore describe the shape of the line: avg is the typical
- * bucket, max is the busiest, and P99 sits just under it unless one bucket is a genuine
- * outlier. Nearest-rank percentile, matching the ARM summarize() the retired app-level
- * Users row used, so the numbers do not shift as this moves per-site.
+ * bucket, max is the busiest, and P95 is the busiest sustained stretch. Not P99: a
+ * nearest-rank P99 over fewer than 100 buckets is always the max, and a day at 15-minute
+ * buckets is under 100, so it only ever repeated the Peak cell. P95 separates from the
+ * max from 20 buckets up.
  */
 export function userStats(series: UserInsights['series'] | undefined) {
   const pts = series ?? [];
-  if (!pts.length) return { avg: 0, p99: 0, max: 0, peak: null, buckets: 0 };
+  if (!pts.length) return { avg: 0, p95: 0, max: 0, peak: null, current: null, buckets: 0 };
 
   const values = pts.map(p => p.users);
   const sorted = [...values].sort((a, b) => a - b);
@@ -24,9 +25,12 @@ export function userStats(series: UserInsights['series'] | undefined) {
 
   return {
     avg: Math.round(values.reduce((s, v) => s + v, 0) / values.length * 10) / 10,
-    p99: sorted[Math.ceil(sorted.length * 0.99) - 1] ?? 0,
+    p95: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0,
     max: Math.max(...values),
     peak,
+    // The latest bucket, not the latest reading of the day: telemetry lags a few
+    // minutes, so on a range ending now this bucket can still be filling in.
+    current: pts[pts.length - 1]!,
     buckets: pts.length,
   };
 }

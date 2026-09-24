@@ -142,6 +142,17 @@ export interface IElectronAPI {
         sync(opts: { subscriptionId: string; apps: { name: string; resourceGroup: string; type: string; appInsightsAppId?: string; apiName?: string; apiType?: string; apiInsightsAppId?: string }[] }): Promise<{ success: boolean; error?: string }>;
     };
 
+    // Background health monitor — tray icon plus a hidden worker window (see
+    // electron/ipc/background-monitor.cjs and src/monitor/monitorMain.ts)
+    backgroundMonitor: {
+        /** Create (true) or tear down (false) the tray and worker. Idempotent. */
+        setEnabled(enabled: boolean): Promise<void>;
+        /** Raise a tray balloon. Called by the worker. */
+        alert(opts: { title: string; body: string }): Promise<void>;
+        /** Tray menu → Check now. Returns an unsubscribe. */
+        onCheckNow(cb: () => void): () => void;
+    };
+
     // ipapi.is — bot/crawler/datacenter reputation lookup (proxied through main)
     ipapi: {
         lookup(opts: { ip: string }): Promise<{

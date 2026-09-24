@@ -40,6 +40,16 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  build: {
+    rollupOptions: {
+      // monitor.html is the hidden worker window behind the tray monitor
+      // (electron/ipc/background-monitor.cjs) — emitted next to index.html.
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        monitor: path.resolve(__dirname, 'monitor.html'),
+      },
+    },
+  },
   define: {
     __BUILD_NUMBER__: JSON.stringify(process.env.GITHUB_RUN_NUMBER || 'local'),
     __BUILD_DATE__: JSON.stringify(new Date().toISOString()),

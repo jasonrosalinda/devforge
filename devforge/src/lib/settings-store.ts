@@ -18,6 +18,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     email: '',
     apiToken: '',
   },
+  backgroundMonitor: {
+    enabled: false,
+    apps: [],
+  },
 };
 
 async function deriveKey(): Promise<CryptoKey> {
@@ -64,6 +68,7 @@ export async function loadSettings(): Promise<AppSettings> {
       azure: { ...DEFAULT_SETTINGS.azure, ...parsed.azure },
       apiKeys: { ...DEFAULT_SETTINGS.apiKeys, ...parsed.apiKeys },
       atlassian: { ...DEFAULT_SETTINGS.atlassian, ...parsed.atlassian },
+      backgroundMonitor: { ...DEFAULT_SETTINGS.backgroundMonitor, ...parsed.backgroundMonitor },
     };
   } catch {
     return DEFAULT_SETTINGS;

@@ -18,11 +18,22 @@ describe('userStats', () => {
     expect(s.peak).toEqual(pt('10:05', 30));
   });
 
-  it('uses nearest-rank P99, matching the ARM summarize it replaced', () => {
-    // 100 buckets, values 1..100 — ceil(100 * 0.99) - 1 = index 98, the 99th value.
+  it('uses nearest-rank P95', () => {
+    // 100 buckets, values 1..100 — ceil(100 * 0.95) - 1 = index 94, the 95th value.
     const s = userStats(Array.from({ length: 100 }, (_, i) => pt(`t${i}`, i + 1)));
-    expect(s.p99).toBe(99);
+    expect(s.p95).toBe(95);
     expect(s.max).toBe(100);
+  });
+
+  it('keeps P95 below the peak on a day of 15-minute buckets, where P99 would equal it', () => {
+    // 66 buckets, values 1..66 — ceil(66 * 0.95) - 1 = index 62, the 63rd value.
+    const s = userStats(Array.from({ length: 66 }, (_, i) => pt(`t${i}`, i + 1)));
+    expect(s.p95).toBe(63);
+    expect(s.max).toBe(66);
+  });
+
+  it('takes the latest bucket as current, not the peak', () => {
+    expect(userStats([pt('10:00', 5), pt('10:05', 30), pt('10:10', 12)]).current).toEqual(pt('10:10', 12));
   });
 
   it('rounds the average to one decimal rather than emitting a long float', () => {
@@ -35,12 +46,12 @@ describe('userStats', () => {
   });
 
   it('returns zeroes and no peak for an empty or missing series', () => {
-    expect(userStats([])).toEqual({ avg: 0, p99: 0, max: 0, peak: null, buckets: 0 });
+    expect(userStats([])).toEqual({ avg: 0, p95: 0, max: 0, peak: null, current: null, buckets: 0 });
     expect(userStats(undefined).peak).toBeNull();
   });
 
   it('handles a single bucket without a percentile that falls off the array', () => {
-    expect(userStats([pt('10:00', 7)])).toMatchObject({ avg: 7, p99: 7, max: 7, buckets: 1 });
+    expect(userStats([pt('10:00', 7)])).toMatchObject({ avg: 7, p95: 7, max: 7, buckets: 1 });
   });
 });
 
