@@ -5,6 +5,12 @@ const isDev = !app.isPackaged;
 
 Menu.setApplicationMenu(null);
 
+// Windows attributes tray balloons (shown as toasts on 10/11) to this id. Matches
+// appId in electron-builder.json5.
+if (process.platform === 'win32') app.setAppUserModelId('com.devforge.app');
+
+const backgroundMonitor = require('./ipc/background-monitor.cjs');
+
 function createWindow() {
     const mainWindow = new BrowserWindow({
         width: 1400,
@@ -104,6 +110,13 @@ app.whenReady().then(() => {
         console.error('❌ Failed to load ipapi.cjs:', err);
     }
 
+    try {
+        backgroundMonitor(mainWindow);
+        console.log('✅ background-monitor handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load background-monitor.cjs:', err);
+    }
+
     // ── Auto-updater ──────────────────────────────────────────────────────────
     if (!isDev) {
         const { autoUpdater } = require('electron-updater');
@@ -155,5 +168,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+    // The background monitor keeps devForge alive in the tray.
+    if (backgroundMonitor.isEnabled()) return;
     if (process.platform !== 'darwin') app.quit();
 });

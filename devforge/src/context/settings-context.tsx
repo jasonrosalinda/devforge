@@ -26,6 +26,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         subscriptionId: s.azure.subscriptionId,
         apps: s.azure.apps,
       });
+      // Main holds no settings of its own, so it learns at startup whether the
+      // tray and background worker should exist.
+      void window.electronAPI?.backgroundMonitor?.setEnabled(s.backgroundMonitor.enabled);
     });
   }, []);
 
@@ -36,6 +39,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       subscriptionId: s.azure.subscriptionId,
       apps: s.azure.apps,
     });
+    void window.electronAPI?.backgroundMonitor?.setEnabled(s.backgroundMonitor.enabled);
   }
 
   return (

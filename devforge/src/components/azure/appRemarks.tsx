@@ -277,18 +277,14 @@ function maxSeverity(a: RemarkSeverity, b: RemarkSeverity): RemarkSeverity {
   return order[a] >= order[b] ? a : b;
 }
 
-export function buildRemarks(
+/** One remark per kind, each with its own severity — `critical` means still active in
+ *  the trailing window. Split out of `buildRemarks` so the background monitor can read
+ *  single kinds (5xx, downtime) rather than parse the sentence. */
+export function collectRemarks(
   m: AppMetrics,
-  rangeStart?: string,
   rangeEnd?: string,
-  visibleBlocks?: VisibleBlocks,
   urMonitors?: UptimeRobotMonitor[],
-): RemarkResult {
-  const isKindVisible = (kind: RemarkKind): boolean => {
-    if (!visibleBlocks) return true;
-    const blockKey = KIND_TO_BLOCK[kind];
-    return visibleBlocks[blockKey] !== false;
-  };
+): MetricRemark[] {
   const remarks: MetricRemark[] = [];
 
   // One shared interval for everything below: all these series come from the
@@ -373,6 +369,23 @@ export function buildRemarks(
       severity: severityFromLastBad(downLastBad, rangeEnd, intervalMs),
     });
   }
+
+  return remarks;
+}
+
+export function buildRemarks(
+  m: AppMetrics,
+  rangeStart?: string,
+  rangeEnd?: string,
+  visibleBlocks?: VisibleBlocks,
+  urMonitors?: UptimeRobotMonitor[],
+): RemarkResult {
+  const isKindVisible = (kind: RemarkKind): boolean => {
+    if (!visibleBlocks) return true;
+    const blockKey = KIND_TO_BLOCK[kind];
+    return visibleBlocks[blockKey] !== false;
+  };
+  const remarks = collectRemarks(m, rangeEnd, urMonitors);
 
   const visibleRemarks = remarks.filter((r) => isKindVisible(r.kind));
   if (visibleRemarks.length === 0) return { text: '', severity: 'ok' };

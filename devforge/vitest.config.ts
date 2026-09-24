@@ -15,6 +15,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
+    // The electron/ipc suites shell out to real git; on Windows, under the
+    // parallel load of the full run, that regularly outlives the 5s default.
+    testTimeout: 20000,
     include: [
       'electron/**/*.test.mjs',
       'shared/**/*.test.ts',

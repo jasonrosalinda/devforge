@@ -79,9 +79,11 @@ export default function HomePage({ onNavigate = () => { }, search = "" }: HomePa
 
     const visiblePages = pages.filter((p) => p.title !== "Home");
 
-    const filtered = search.trim()
+    const query = search.trim().toLowerCase();
+    const filtered = query
         ? visiblePages.filter((p) =>
-            p.title.toLowerCase().includes(search.toLowerCase())
+            p.title.toLowerCase().includes(query) ||
+            p.keywords?.some((keyword) => keyword.includes(query))
         )
         : visiblePages;
 

@@ -7,6 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
+import { isElectron } from '@/lib/environment';
 import { useSettings } from '@/context/settings-context';
 import type { AppSettings, AzureAppEntry } from '@/types/settings.types';
 import { DEFAULT_SLO_MS } from '@/types/settings.types';
@@ -25,7 +27,7 @@ const EMPTY_APP: AzureAppEntry = {
   name: '',
 };
 
-export type SettingsTab = 'azure' | 'apikeys' | 'atlassian';
+export type SettingsTab = 'azure' | 'apikeys' | 'atlassian' | 'monitor';
 
 export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
   const { settings, updateSettings } = useSettings();
@@ -148,6 +150,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
           <button style={tabStyle('azure')} onClick={() => setTab('azure')}>Azure</button>
           <button style={tabStyle('apikeys')} onClick={() => setTab('apikeys')}>API Keys</button>
           <button style={tabStyle('atlassian')} onClick={() => setTab('atlassian')}>Atlassian</button>
+          <button style={tabStyle('monitor')} onClick={() => setTab('monitor')}>Background monitor</button>
         </div>
 
         {/* Azure Tab */}
@@ -556,6 +559,66 @@ const [newMonitorId, setNewMonitorId] = useState('');
             </div>
           </div>
         )}
+
+        {/* Background monitor Tab */}
+        {tab === 'monitor' && (() => {
+          const bm = draft.backgroundMonitor;
+          const setBm = (patch: Partial<typeof bm>) =>
+            setDraft(d => ({ ...d, backgroundMonitor: { ...d.backgroundMonitor, ...patch } }));
+          const allKeys = draft.azure.apps.map(a => a.name);
+          // Empty = all apps, so show every box ticked in that case.
+          const watched = bm.apps.length ? bm.apps : allKeys;
+          const toggleApp = (key: string, on: boolean) => {
+            // Empty means "all", so the last box cannot be unticked — turn the monitor off instead.
+            if (!on && watched.length === 1) return;
+            const next = on ? [...new Set([...watched, key])] : watched.filter(k => k !== key);
+            // Every box ticked collapses back to "all", so an app added later is watched too.
+            setBm({ apps: next.length === allKeys.length ? [] : next });
+          };
+          return (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs" htmlFor="bm-enabled">Run in the system tray</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Checks every minute in the background, over the last 6h at 1m buckets, and pops a tray alert on a new
+                    anomaly, a status getting worse, downtime or 5xx. The App Health Check page is not reloaded.
+                    Closing the window keeps devForge in the tray — quit from the tray menu.
+                  </p>
+                  {!isElectron() && (
+                    <p className="text-xs text-destructive">Desktop app only — has no effect in the browser.</p>
+                  )}
+                </div>
+                <Switch
+                  id="bm-enabled"
+                  checked={bm.enabled}
+                  onCheckedChange={v => setBm({ enabled: v })}
+                  disabled={!isElectron()}
+                />
+              </div>
+
+              <Separator />
+
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">Apps to watch</Label>
+                {allKeys.length === 0
+                  ? <p className="text-xs text-muted-foreground">No apps configured — add them on the Azure tab.</p>
+                  : draft.azure.apps.map(a => (
+                    <label key={a.name} className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={watched.includes(a.name)}
+                        onChange={e => toggleApp(a.name, e.target.checked)}
+                        disabled={!bm.enabled}
+                      />
+                      <span>{a.platformName || a.resourceGroup || a.name}</span>
+                      <span className="text-muted-foreground font-mono">{a.name}</span>
+                    </label>
+                  ))}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Atlassian Tab */}
         {tab === 'atlassian' && (

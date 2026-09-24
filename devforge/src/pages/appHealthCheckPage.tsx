@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Hint } from "@/components/ui/hint";
 import { TbActivity } from 'react-icons/tb';
 import { Loader2, Copy, RefreshCw } from 'lucide-react';
@@ -11,7 +11,7 @@ import { AzureAppCard } from '@/components/azure/azureAppCard';
 import { LazyMount } from '@/components/azure/lazyMount';
 import { ControlBar } from '@/components/app-health-check/controlBar';
 import { NotConfiguredBanner, StatusLegend } from '@/components/app-health-check/banners';
-import { C, nowDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
+import { C, granularityMs, nowDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -110,6 +110,7 @@ export default function AppHealthCheckPage() {
   const [startDt, setStartDt] = useState(() => toDatetimeLocal(todayMidnight()));
   const [endDt,   setEndDt]   = useState(() => nowDt());
   const [granularity, setGranularity] = useState('PT5M');
+  const [autoReload, setAutoReload] = useState(false);
   const [committedStart, setCommittedStart] = useState<string | null>(null);
   const [committedEnd,   setCommittedEnd]   = useState<string | null>(null);
 
@@ -170,16 +171,45 @@ export default function AppHealthCheckPage() {
     return out;
   }, [endpointDeps]);
 
-  const handleFetch = useCallback(() => {
+  const runFetch = useCallback((end: string) => {
     const isoStart = new Date(startDt).toISOString();
-    const isoEnd   = new Date(endDt).toISOString();
+    const isoEnd   = new Date(end).toISOString();
     setCommittedStart(isoStart);
     setCommittedEnd(isoEnd);
     fetchMetrics(effectiveSelected, 'custom', settings.azure, isoStart, isoEnd, granularity);
-  }, [fetchMetrics, effectiveSelected, startDt, endDt, settings.azure, granularity]);
+  }, [fetchMetrics, effectiveSelected, startDt, settings.azure, granularity]);
 
   const notConfigured = !settingsLoading && (!settings.azure.subscriptionId || allAppKeys.length === 0);
   const fetchDisabled = loading || credStatus !== 'ok' || effectiveSelected.length === 0 || notConfigured || !startDt || !endDt;
+
+  // With auto reload on, the end time is always "now" at the moment of the fetch.
+  const fetchToNow = useCallback(() => {
+    const end = nowDt();
+    setEndDt(end);
+    runFetch(end);
+  }, [runFetch]);
+  const handleFetch = useCallback(
+    () => (autoReload ? fetchToNow() : runFetch(endDt)),
+    [autoReload, fetchToNow, runFetch, endDt],
+  );
+
+  // Refs so the timer reads the latest apps / start / credentials without being
+  // restarted by them — only turning it on or changing the interval resets the clock.
+  const fetchToNowRef = useRef(fetchToNow);
+  fetchToNowRef.current = fetchToNow;
+  const fetchDisabledRef = useRef(fetchDisabled);
+  fetchDisabledRef.current = fetchDisabled;
+
+  // One fetch as soon as it is switched on, then one per interval. A tick that lands
+  // while a fetch is still running (or while fetching is otherwise blocked) is skipped
+  // rather than queued, so a slow Azure call cannot stack reloads behind itself.
+  useEffect(() => {
+    if (!autoReload) return;
+    const tick = () => { if (!fetchDisabledRef.current) fetchToNowRef.current(); };
+    tick();
+    const id = window.setInterval(tick, granularityMs(granularity));
+    return () => window.clearInterval(id);
+  }, [autoReload, granularity]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -205,6 +235,8 @@ export default function AppHealthCheckPage() {
         setEndDt={setEndDt}
         granularity={granularity}
         setGranularity={setGranularity}
+        autoReload={autoReload}
+        setAutoReload={setAutoReload}
         loading={loading}
         fetchDisabled={fetchDisabled}
         onFetch={handleFetch}

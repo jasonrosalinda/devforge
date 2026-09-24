@@ -53,8 +53,17 @@ export interface AtlassianSettings {
   apiToken: string;            // Confluence Cloud API token
 }
 
+/** The tray-resident health check. Main owns the tray and the hidden worker
+ *  window; this only says whether they should exist and which apps to watch. */
+export interface BackgroundMonitorSettings {
+  enabled: boolean;
+  /** App keys to watch. Empty = every configured app, so a new app is covered by default. */
+  apps: string[];
+}
+
 export interface AppSettings {
   azure: AzureSettings;
   apiKeys: ApiKeysSettings;
   atlassian: AtlassianSettings;
+  backgroundMonitor: BackgroundMonitorSettings;
 }

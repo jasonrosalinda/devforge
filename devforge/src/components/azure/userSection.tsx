@@ -268,12 +268,27 @@ export function UserRows({
       >
         <td
           className="text-muted-foreground font-bold"
-          title="Users: distinct client IPs per time bucket for this site, from App Insights request telemetry. Average / P99 / Max are across buckets, not within them. Expand for the traffic-source timeline and the busiest addresses and user agents."
+          title="Users: distinct client IPs per time bucket for this site, from App Insights request telemetry. Average / P95 / Max are across buckets, not within them. Expand for the traffic-source timeline and the busiest addresses and user agents."
         >
-          Users
-          {expanded
-            ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-            : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+          {/* Current sits in the label cell's spare width: the row shares its four
+              columns with every other row in the card, so a fifth cell would not line up. */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span>
+              Users
+              {expanded
+                ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+            </span>
+            {has && s.current && (
+              <span
+                className="tabular-nums font-normal"
+                style={{ color: USERS_COLOR }}
+                title={`Latest bucket, ${fmtSgt(s.current.t)} SGT. Telemetry lags a few minutes, so on a range ending now this bucket may still be filling in.`}
+              >
+                <span style={{ color: UI.textDim }}>Current - </span>{s.current.users.toLocaleString()}
+              </span>
+            )}
+          </div>
         </td>
         <td
           className="text-right tabular-nums"
@@ -287,10 +302,10 @@ export function UserRows({
         <td
           className="text-right tabular-nums"
           style={{ color: has ? USERS_COLOR : undefined }}
-          title="99th percentile bucket — sits just under the max unless one bucket is a genuine outlier"
+          title="95th percentile bucket — the busiest sustained stretch, where Peak is the single busiest bucket"
         >
           {has
-            ? <><span style={{ color: UI.textDim }}>P99 - </span>{s.p99.toLocaleString()}</>
+            ? <><span style={{ color: UI.textDim }}>P95 - </span>{s.p95.toLocaleString()}</>
             : loading ? <CellSkeleton w={34} /> : '—'}
         </td>
         <td

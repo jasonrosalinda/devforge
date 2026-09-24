@@ -16,6 +16,9 @@ type Props = {
   setEndDt: (v: string) => void;
   granularity: string;
   setGranularity: (v: string) => void;
+  /** Re-fetch up to now once per interval; the end time is then driven, not picked. */
+  autoReload: boolean;
+  setAutoReload: (v: boolean) => void;
   loading: boolean;
   fetchDisabled: boolean;
   onFetch: () => void;
@@ -28,6 +31,7 @@ export function ControlBar(props: Props) {
     notConfigured, effectiveSelected, allAppKeys, appLabels, onSelectedChange,
     startDt, setStartDt, endDt, setEndDt,
     granularity, setGranularity,
+    autoReload, setAutoReload,
     loading, fetchDisabled, onFetch,
     credStatus, credError,
   } = props;
@@ -65,11 +69,14 @@ export function ControlBar(props: Props) {
           type="datetime-local"
           value={endDt}
           onChange={e => setEndDt(e.target.value)}
-          style={inputStyle}
+          disabled={autoReload}
+          title={autoReload ? 'Auto reload is on — the end time follows the current time' : undefined}
+          style={{ ...inputStyle, ...(autoReload ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
         />
         <Hint label="Set the end time to now. Telemetry lags a few minutes, so the last bucket may be thin or empty.">
         <button
           onClick={() => setEndDt(nowDt())}
+          disabled={autoReload}
           style={{
             padding: '4px 8px',
             borderRadius: 6,
@@ -77,7 +84,8 @@ export function ControlBar(props: Props) {
             background: C.btnBg,
             color: C.textSub,
             fontSize: 11,
-            cursor: 'pointer',
+            cursor: autoReload ? 'not-allowed' : 'pointer',
+            opacity: autoReload ? 0.4 : 1,
           }}
         >
           Now
@@ -116,6 +124,26 @@ export function ControlBar(props: Props) {
             );
           })}
         </div>
+
+        <Hint label={autoReload
+          ? `Auto reload on — fetches up to now every ${GRANULARITIES.find(g => g.value === granularity)?.label ?? 'interval'}. Click to stop.`
+          : 'Fetch up to now once per interval, with the end time following the current time'}>
+        <button
+          onClick={() => setAutoReload(!autoReload)}
+          aria-pressed={autoReload}
+          style={{
+            padding: '3px 8px',
+            borderRadius: 5,
+            border: `1px solid ${autoReload ? C.btnActive : C.border}`,
+            background: autoReload ? `${C.btnActive}22` : 'none',
+            color: autoReload ? C.accent : C.textSub,
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          Auto reload
+        </button>
+        </Hint>
 
         <Hint label={loading ? 'Fetching metrics from Azure Monitor…' : 'Fetch metrics for the selected apps and time range'}>
         <button

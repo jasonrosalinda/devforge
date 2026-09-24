@@ -15,6 +15,47 @@ export interface UptimeRobotMonitor {
   logs: UptimeRobotLog[];
 }
 
+/** One getMonitors call, logs narrowed to [rangeStart, rangeEnd]. Rejects with the
+ *  API's own message on a non-ok reply. Shared by the card hook and the background
+ *  monitor, which has no React. */
+export async function fetchUptimeRobotMonitors(
+  apiKey: string,
+  monitorIds: string[],
+  rangeStart?: string,
+  rangeEnd?: string,
+): Promise<UptimeRobotMonitor[]> {
+  const startUnix = rangeStart ? Math.floor(new Date(rangeStart).getTime() / 1000) : undefined;
+  const endUnix   = rangeEnd   ? Math.floor(new Date(rangeEnd).getTime()   / 1000) : undefined;
+
+  const params: Record<string, string> = {
+    api_key: apiKey,
+    format: 'json',
+    logs: '1',
+    logs_limit: '50',
+    monitors: monitorIds.join('-'),
+  };
+  if (startUnix) params['logs_start_time'] = String(startUnix);
+  if (endUnix)   params['logs_end_time']   = String(endUnix);
+
+  const r = await fetch('https://api.uptimerobot.com/v2/getMonitors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params).toString(),
+  });
+  const data = await r.json();
+  if (data.stat !== 'ok') throw new Error(data.error?.message ?? 'Request failed');
+  const result = (data.monitors ?? []) as UptimeRobotMonitor[];
+  if (startUnix || endUnix) {
+    for (const mon of result) {
+      mon.logs = (mon.logs ?? []).filter(l =>
+        (!startUnix || l.datetime + l.duration >= startUnix) &&
+        (!endUnix   || l.datetime <= endUnix)
+      );
+    }
+  }
+  return result;
+}
+
 export function useUptimeRobotMonitor(
   apiKey: string | undefined,
   monitorIds: string[] | undefined,
@@ -33,42 +74,8 @@ export function useUptimeRobotMonitor(
     setLoading(true);
     setError(null);
 
-    const startUnix = rangeStart ? Math.floor(new Date(rangeStart).getTime() / 1000) : undefined;
-    const endUnix   = rangeEnd   ? Math.floor(new Date(rangeEnd).getTime()   / 1000) : undefined;
-
-    const params: Record<string, string> = {
-      api_key: apiKey,
-      format: 'json',
-      logs: '1',
-      logs_limit: '50',
-      monitors: monitorIds.join('-'),
-    };
-    if (startUnix) params['logs_start_time'] = String(startUnix);
-    if (endUnix)   params['logs_end_time']   = String(endUnix);
-
-    fetch('https://api.uptimerobot.com/v2/getMonitors', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(params).toString(),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (cancelled) return;
-        if (data.stat === 'ok') {
-          const result = (data.monitors ?? []) as UptimeRobotMonitor[];
-          if (startUnix || endUnix) {
-            for (const mon of result) {
-              mon.logs = (mon.logs ?? []).filter(l =>
-                (!startUnix || l.datetime + l.duration >= startUnix) &&
-                (!endUnix   || l.datetime <= endUnix)
-              );
-            }
-          }
-          setMonitors(result);
-        } else {
-          setError(data.error?.message ?? 'Request failed');
-        }
-      })
+    fetchUptimeRobotMonitors(apiKey, monitorIds, rangeStart, rangeEnd)
+      .then(result => { if (!cancelled) setMonitors(result); })
       .catch(e => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
 

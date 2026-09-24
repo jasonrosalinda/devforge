@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   linefit, robustAnomalyFlags, detectCorrelatedAnomalies, groupAnomalyEpisodes, buildAnomalyRemark,
+  applySpikeFloor, buildExtras, CPU_SPIKE_FLOOR,
 } from './anomalyDetection';
 import type { CorrelatedAnomalyRow, NamedMetricInput } from './anomalyDetection';
 import type { AppMetrics, MetricSeries } from '@shared/types/azureMetrics.types';
@@ -157,11 +158,51 @@ describe('detectCorrelatedAnomalies', () => {
     expect(rows[0]).toMatchObject({ severity: 'Warning' });
   });
 
+  it('ignores a statistically unusual CPU + DB CPU blip on a near-idle app', () => {
+    // CPU ~1.8% peaking at 2.3%, DB CPU ~1.4% peaking at 9.9% — both clear their
+    // z-score thresholds, neither is high enough to be pressure.
+    const wobble = (base: number) => Array.from({ length: 20 }, (_, i) => base + (i % 3) * 0.05);
+    const cpuVals = wobble(1.8); cpuVals[spikeIndex] = 2.3;
+    const dbVals = wobble(1.4); dbVals[spikeIndex] = 9.9;
+    const cpu = series(cpuVals);
+    const metrics = { cpu, memory: series(flat(20, 34)), dbCpu: series(dbVals), dbMemory: undefined } as unknown as AppMetrics;
+    expect(robustAnomalyFlags(cpuVals, 2.0).flags[spikeIndex]).toBe(1);
+    expect(detectCorrelatedAnomalies(cpu, buildExtras(metrics))).toHaveLength(0);
+  });
+
+  it('still flags a real CPU + DB CPU jump that clears the floor', () => {
+    const cpu = series(flatWithSpike(20, 20, spikeIndex, 85));
+    const extras = [extra('DB CPU', flatWithSpike(20, 10, spikeIndex, 45), 2.5)];
+    extras[0]!.floor = CPU_SPIKE_FLOOR;
+    const rows = detectCorrelatedAnomalies(cpu, extras);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ severity: 'Warning', signalsFiring: 2 });
+  });
+
   it('4xx never drives severity on its own, only the incident-type hint', () => {
     const cpu = series(flat(20, 50));
     const extras = [extra('FE 4xx', flatWithSpike(20, 2, spikeIndex, 40), 3.0)];
     const rows = detectCorrelatedAnomalies(cpu, extras);
     expect(rows).toHaveLength(0);
+  });
+});
+
+describe('applySpikeFloor', () => {
+  const det = (flags: number[]) => ({ flags, scores: flags, baseline: flags });
+
+  it('keeps a flag at or above the absolute floor even with a small rise', () => {
+    const values = [48, 48, 48, 50];
+    expect(applySpikeFloor(values, det([0, 0, 0, 1]), CPU_SPIKE_FLOOR).flags).toEqual([0, 0, 0, 1]);
+  });
+
+  it('keeps a flag below the floor when it rises far enough above the average', () => {
+    const values = [5, 5, 5, 35];
+    expect(applySpikeFloor(values, det([0, 0, 0, 1]), CPU_SPIKE_FLOOR).flags).toEqual([0, 0, 0, 1]);
+  });
+
+  it('clears a low, small-rise flag and leaves dips alone', () => {
+    const values = [2, 1, 2, 4];
+    expect(applySpikeFloor(values, det([0, -1, 0, 1]), CPU_SPIKE_FLOOR).flags).toEqual([0, -1, 0, 0]);
   });
 });
 

@@ -33,6 +33,18 @@ const DB_MEMORY_SENSITIVITY = 5.0;
 // the four request-error signals until there's a reason to split them further.
 const ERROR_RATE_SENSITIVITY = 3.0;
 const DEFAULT_MIN_SAMPLES = 10;
+
+/** A statistical flag only stands when the reading is also high enough to matter:
+ *  at or above `minPct` outright, or at least `minRise` points above the window
+ *  average. Without it a near-idle metric flags noise — CPU averaging 1.8% has so
+ *  little spread that 2.3% scores as a spike, and two such blips make a Warning. */
+export interface SpikeFloor { minPct: number; minRise: number }
+/** CPU and DB CPU only. Memory and DB Memory are left floor-free on purpose (see
+ *  ROBUST_STDEV_EPSILON): they sit flat, and their far higher sensitivities
+ *  already demand a large deviation. Error rates are not percent-of-capacity, so a
+ *  capacity floor has no meaning for them. */
+export const CPU_SPIKE_FLOOR: SpikeFloor = { minPct: 50, minRise: 20 };
+export const DB_CPU_SPIKE_FLOOR: SpikeFloor = CPU_SPIKE_FLOOR;
 // A relative floor here would risk suppressing exactly the case that matters most:
 // a metric that barely moves (memory flat at 34-39%) still deserves to fire on the
 // rare bucket that's genuinely different. An absolute floor near machine epsilon
@@ -82,6 +94,18 @@ export interface AnomalyDetectorResult {
  * single-point-driven flag — same-length all-zero arrays, so callers never have
  * to branch on "did detection even run."
  */
+/** Clears upward flags on readings below `floor` — see SpikeFloor. Dips are left
+ *  alone; nothing downstream counts them as firing. */
+export function applySpikeFloor(values: number[], det: AnomalyDetectorResult, floor: SpikeFloor | undefined): AnomalyDetectorResult {
+  if (!floor || !values.length) return det;
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const flags = det.flags.map((f, i) => {
+    const v = values[i]!;
+    return f > 0 && v < floor.minPct && v - mean < floor.minRise ? 0 : f;
+  });
+  return { ...det, flags };
+}
+
 export function robustAnomalyFlags(
   values: number[],
   sensitivity: number,
@@ -133,6 +157,8 @@ export interface NamedMetricInput {
   name: string;
   series: MetricSeries['series'] | null | undefined;
   sensitivity: number;
+  /** Absolute floor a flagged reading must also clear — see SpikeFloor. */
+  floor?: SpikeFloor | undefined;
 }
 
 /** Same keyed-by-timestamp alignment CombinedChart uses (azureMetricChart.tsx) for
@@ -216,12 +242,14 @@ export function detectCorrelatedAnomalies(
   const available = extras.filter(x => (x.series?.length ?? 0) > 0);
   const totalMetrics = 1 + available.length;
 
-  const cpuDet = robustAnomalyFlags(cpu.series.map(p => p.v), CPU_SENSITIVITY);
+  const cpuValues = cpu.series.map(p => p.v);
+  const cpuDet = applySpikeFloor(cpuValues, robustAnomalyFlags(cpuValues, CPU_SENSITIVITY), CPU_SPIKE_FLOOR);
   const cpuByTime = byTimeDetection(cpu.series, cpuDet);
 
   const extraByTime = available.map(x => {
     const series = x.series!;
-    const det = robustAnomalyFlags(series.map(p => p.v), x.sensitivity);
+    const values = series.map(p => p.v);
+    const det = applySpikeFloor(values, robustAnomalyFlags(values, x.sensitivity), x.floor);
     return { name: x.name, map: byTimeDetection(series, det) };
   });
 
@@ -461,7 +489,7 @@ export function buildExtras(m: AppMetrics): NamedMetricInput[] {
   const apiOverall = m.apiRequestInsights?.performance?.overallSeries;
   return [
     { name: 'Memory', series: m.memory.series, sensitivity: MEMORY_SENSITIVITY },
-    { name: 'DB CPU', series: m.dbCpu?.series, sensitivity: DB_CPU_SENSITIVITY },
+    { name: 'DB CPU', series: m.dbCpu?.series, sensitivity: DB_CPU_SENSITIVITY, floor: DB_CPU_SPIKE_FLOOR },
     { name: 'DB Memory', series: m.dbMemory?.series, sensitivity: DB_MEMORY_SENSITIVITY },
     { name: 'FE 4xx', series: errorRateSeries(feOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY },
     { name: 'FE 5xx', series: errorRateSeries(feOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY },

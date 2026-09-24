@@ -35,6 +35,13 @@ export const GRANULARITIES: { label: string; value: string; maxSpanHours: number
   { label: '6h',  value: 'PT6H',  maxSpanHours: Infinity },
 ];
 
+/** One bucket of an ISO-8601 granularity (PT5M, PT1H…) in ms — the auto-reload period. */
+export function granularityMs(value: string): number {
+  const m = /^PT(\d+)([MH])$/.exec(value);
+  if (!m) return 5 * 60_000;
+  return Number(m[1]) * (m[2] === 'H' ? 3_600_000 : 60_000);
+}
+
 export function todayMidnight(): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
