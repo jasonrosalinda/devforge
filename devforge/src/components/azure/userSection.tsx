@@ -234,10 +234,9 @@ export function UserPanel({
 }
 
 /**
- * The Users row as it sits inside a FE / API section table.
- *
- * Per site rather than per app: this replaced a row above the table fed by a
- * frontend-only query, so an app's API had no user figures on the card at all.
+ * The Users row in the card's top summary table, fed by the frontend's App Insights
+ * resource. The API has no Users row: its callers are the frontend and other
+ * services, so its client figures describe infrastructure rather than an audience.
  */
 export function UserRows({
   users, userAgents, ipReputations, expanded, onToggle, syncId, loading = false, error, unavailableMessage,
@@ -268,27 +267,21 @@ export function UserRows({
       >
         <td
           className="text-muted-foreground font-bold"
-          title="Users: distinct client IPs per time bucket for this site, from App Insights request telemetry. Average / P95 / Max are across buckets, not within them. Expand for the traffic-source timeline and the busiest addresses and user agents."
+          title="Users: distinct client IPs per time bucket for this site, from App Insights request telemetry. Avg and Peak are across buckets, not within them. Expand for the traffic-source timeline and the busiest addresses and user agents."
         >
-          {/* Current sits in the label cell's spare width: the row shares its four
-              columns with every other row in the card, so a fifth cell would not line up. */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <span>
-              Users
-              {expanded
-                ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
-            </span>
-            {has && s.current && (
-              <span
-                className="tabular-nums font-normal"
-                style={{ color: USERS_COLOR }}
-                title={`Latest bucket, ${fmtSgt(s.current.t)} SGT. Telemetry lags a few minutes, so on a range ending now this bucket may still be filling in.`}
-              >
-                <span style={{ color: UI.textDim }}>Current - </span>{s.current.users.toLocaleString()}
-              </span>
-            )}
-          </div>
+          Users
+          {expanded
+            ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+            : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+        </td>
+        <td
+          className="text-right tabular-nums"
+          style={{ color: has ? USERS_COLOR : undefined }}
+          title={has && s.current ? `Latest bucket, ${fmtSgt(s.current.t)} SGT. Telemetry lags a few minutes, so on a range ending now this bucket may still be filling in.` : undefined}
+        >
+          {has && s.current
+            ? <><span style={{ color: UI.textDim }}>Current - </span>{s.current.users.toLocaleString()}</>
+            : loading ? <CellSkeleton w={38} /> : '—'}
         </td>
         <td
           className="text-right tabular-nums"
@@ -298,15 +291,6 @@ export function UserRows({
           {has
             ? <><span style={{ color: UI.textDim }}>Avg - </span>{s.avg.toLocaleString()}</>
             : loading ? <CellSkeleton w={38} /> : '—'}
-        </td>
-        <td
-          className="text-right tabular-nums"
-          style={{ color: has ? USERS_COLOR : undefined }}
-          title="95th percentile bucket — the busiest sustained stretch, where Peak is the single busiest bucket"
-        >
-          {has
-            ? <><span style={{ color: UI.textDim }}>P95 - </span>{s.p95.toLocaleString()}</>
-            : loading ? <CellSkeleton w={34} /> : '—'}
         </td>
         <td
           className="text-right tabular-nums"

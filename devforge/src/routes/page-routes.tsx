@@ -1,8 +1,5 @@
-import type { Page } from "@/types/pages.types";
-import { Home, Rocket, ScanSearch, Wrench } from "lucide-react";
-import { SiPagespeedinsights } from "react-icons/si";
-import { AiOutlineTranslation } from "react-icons/ai";
-import { TbActivity } from "react-icons/tb";
+import type { Page, PageGroup } from "@/types/pages.types";
+import { Activity, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -10,57 +7,88 @@ import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
-import ToolboxPage from "@/pages/toolboxPage";
-import { TOOLBOX_KEYWORDS } from "@/components/toolbox/toolbox-registry";
+import { createToolboxToolPage } from "@/pages/toolboxToolPage";
+import { TOOLBOX_TOOLS } from "@/components/toolbox/toolbox-registry";
+
+export const HOME_PAGE = "Home";
+
+/** Sidebar section order. */
+export const PAGE_GROUPS: PageGroup[] = ["Monitoring", "Web quality", "Release", "Utilities"];
 
 export const pages: Page[] = [
     {
-        title: "Home",
+        title: HOME_PAGE,
         url: "#",
-        icon: Home,
+        icon: LayoutDashboard,
         component: HomePage
     },
     {
         title: "App Health Check",
         url: "#",
-        icon: TbActivity,
-        component: AppHealthCheckPage
+        icon: Activity,
+        component: AppHealthCheckPage,
+        description: "Azure App Service CPU, memory, requests and downtime",
+        group: "Monitoring"
     },
     {
         title: "PageSpeed",
         url: "#",
-        icon: SiPagespeedinsights,
-        component: PageSpeedResultPage
+        icon: Gauge,
+        component: PageSpeedResultPage,
+        description: "Lighthouse audits across desktop and mobile, with branch comparison",
+        group: "Web quality"
     },
     {
         title: "Unused Assets",
         url: "#",
         icon: ScanSearch,
-        component: UnusedAssetsPage
+        component: UnusedAssetsPage,
+        description: "Scan a project for unused CSS classes/ids and JS functions",
+        group: "Web quality"
     },
     {
         title: "Release Pilot",
         url: "#",
         icon: Rocket,
-        component: ReleasePilotPage
+        component: ReleasePilotPage,
+        description: "Load a Confluence deployment runbook with its screenshots",
+        group: "Release"
     },
     {
         title: "Translation",
         url: "#",
-        icon: AiOutlineTranslation,
-        component: LocalizationPage
+        icon: Languages,
+        component: LocalizationPage,
+        description: "Browse and edit localization keys across languages",
+        group: "Utilities"
     },
-    {
-        title: "Toolbox",
+    // Each Toolbox utility is its own page (own sidebar item and tab), listed under Utilities.
+    ...TOOLBOX_TOOLS.map((tool): Page => ({
+        title: tool.title,
         url: "#",
-        icon: Wrench,
-        component: ToolboxPage,
-        keywords: TOOLBOX_KEYWORDS
-    }
+        icon: tool.icon,
+        component: createToolboxToolPage(tool),
+        description: tool.description,
+        group: "Utilities",
+        keywords: tool.keywords
+    }))
 ]
 
+export function findPage(pageTitle: string): Page | undefined {
+    return pages.find((page) => page.title === pageTitle);
+}
+
+/** Title/keyword match used by the sidebar search and the home cards. */
+export function matchesPageSearch(page: Page, query: string): boolean {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return page.title.toLowerCase().includes(q)
+        || (page.description?.toLowerCase().includes(q) ?? false)
+        || (page.keywords?.some((keyword) => keyword.includes(q)) ?? false);
+}
+
 export function renderPage(pageTitle: string) {
-    const page = pages.find((page) => page.title === pageTitle);
+    const page = findPage(pageTitle);
     if (!page) return null;
 
     const Component = page.component;

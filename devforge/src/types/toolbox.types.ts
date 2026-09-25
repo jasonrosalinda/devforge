@@ -1,14 +1,17 @@
-import type { ElementType } from "react";
+import type { LucideIcon } from "lucide-react";
 
 /**
- * One tab in the Toolbox. Mirrors the Page registry in @/routes/page-routes so
- * adding a utility is an import plus one array entry.
+ * One Toolbox utility. Each becomes its own page (sidebar item + tab), so adding
+ * a utility is an import plus one array entry in toolbox-registry.
  */
 export type ToolboxTool = {
-    /** Stable key; also what is remembered as the last open tab. */
+    /** Stable key. */
     id: string;
-    label: string;
-    icon: ElementType;
+    /** Page title: shown in the sidebar, the tab and the page header. */
+    title: string;
+    icon: LucideIcon;
     description: string;
     component: React.FC;
+    /** Extra search terms for the sidebar search. */
+    keywords: string[];
 };

@@ -102,6 +102,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         saveSummary: (opts) => ipcRenderer.invoke('confluence:saveSummary', opts),
     },
 
+    windowChrome: {
+        setTitlebarTheme: (theme) => ipcRenderer.invoke('window:set-titlebar-theme', theme),
+    },
+
     update: {
         onAvailable:  (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:available',  fn); return () => ipcRenderer.removeListener('update:available',  fn); },
         onProgress:   (cb) => { const fn = (_e, d) => cb(d); ipcRenderer.on('update:progress',   fn); return () => ipcRenderer.removeListener('update:progress',   fn); },

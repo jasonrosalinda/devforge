@@ -23,8 +23,7 @@ import { useSettingsUi } from "@/context/settings-ui-context";
 import { Button, Toast } from "@/components/ui";
 import { Hint } from "@/components/ui/hint";
 import { isNullOrEmpty } from "@shared/utils/stringHelper";
-import { AlertTriangle, ChevronDown, Download, Loader2, RotateCw, Save, Sparkles, Table as TableIcon, Upload, Wrench } from "lucide-react";
-import { SiPagespeedinsights } from "react-icons/si";
+import { AlertTriangle, ChevronDown, Download, Gauge, Loader2, RotateCw, Save, Sparkles, Table as TableIcon, Upload, Wrench } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { marked } from "marked";
@@ -623,7 +622,7 @@ export default function PageSpeedResultPage() {
     return (
         <>
             <PageHeader
-                icon={SiPagespeedinsights}
+                icon={Gauge}
                 title="PageSpeed"
                 subtitle="Run Lighthouse / PageSpeed Insights audits across desktop and mobile — 1-10 runs per URL, averaged or median, with optional branch comparison."
             />

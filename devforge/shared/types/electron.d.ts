@@ -128,6 +128,12 @@ export interface IElectronAPI {
         onAttributionProgress: (cb: (data: AttributionProgress) => void) => () => void;
     };
 
+    // Native window buttons drawn over the app header (Windows titleBarOverlay)
+    windowChrome: {
+        /** Retint the min/max/close overlay to the resolved app theme. */
+        setTitlebarTheme(theme: "dark" | "light"): Promise<void>;
+    };
+
     // Auto-updater
     update: {
         onAvailable:  (cb: (data: { version: string }) => void) => () => void;
