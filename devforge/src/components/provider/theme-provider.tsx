@@ -32,20 +32,22 @@ export function ThemeProvider({
 
     useEffect(() => {
         const root = window.document.documentElement
+        const media = window.matchMedia("(prefers-color-scheme: dark)")
 
-        root.classList.remove("light", "dark")
-
-        if (theme === "system") {
-            const systemTheme = window.matchMedia("(prefers-color-scheme: dark)")
-                .matches
-                ? "dark"
-                : "light"
-
-            root.classList.add(systemTheme)
-            return
+        const apply = () => {
+            const resolved = theme === "system" ? (media.matches ? "dark" : "light") : theme
+            root.classList.remove("light", "dark")
+            root.classList.add(resolved)
+            // Desktop: tint the native min/max/close buttons drawn over the header.
+            // Optional-chained because the web build has no electronAPI.
+            void window.electronAPI?.windowChrome?.setTitlebarTheme(resolved).catch(() => {})
         }
 
-        root.classList.add(theme)
+        apply()
+        if (theme !== "system") return
+        // Follow the OS switching light/dark while "System" is selected.
+        media.addEventListener("change", apply)
+        return () => media.removeEventListener("change", apply)
     }, [theme])
 
     const value = {

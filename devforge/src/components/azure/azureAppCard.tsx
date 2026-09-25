@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch } from 'lucide-react';
+import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch, Loader2 } from 'lucide-react';
 import { marked } from 'marked';
 import { Hint } from '@/components/ui/hint';
 import { toast } from 'sonner';
@@ -24,6 +24,8 @@ import { PerformanceRows } from './performanceSection';
 import { perfSummary, hasPerfData } from './performance';
 import { cardStatus, type Status } from './status';
 import { UserRows } from './userSection';
+import { PageLoadRows } from './pageLoadSection';
+import { summarizeInstances } from './instanceStatus';
 import { ExceptionLocationChart } from './exceptionLocationChart';
 import { ExceptionSiteTable } from './exceptionSiteTable';
 import { SkeletonBlock, ListSkeletonRow } from './loadingSkeleton';
@@ -904,20 +906,20 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   });
 
   const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd);
-  // High-frequency bursts plus the Users section's top clients. The Users rows show the
-  // same reputation badges, and the hook only resolves addresses it is given — seeding it
-  // from bursts alone left every top-client row permanently unbadged.
+  // High-frequency bursts plus the (frontend) Users row's top clients. The Users row shows
+  // the same reputation badges, and the hook only resolves addresses it is given — seeding
+  // it from bursts alone left every top-client row permanently unbadged. API top clients
+  // aren't shown any more, so they aren't looked up.
   const lookupIps = [
     ...(metrics.requestInsights?.highFreq ?? []),
     ...(metrics.apiRequestInsights?.highFreq ?? []),
   ].map(u => u.ip).concat(
     (metrics.requestInsights?.userInsights?.topIps ?? []).map(c => c.ip),
-    (metrics.apiRequestInsights?.userInsights?.topIps ?? []).map(c => c.ip),
   );
   const ipReputations = useIpReputation(lookupIps);
   const [urExpanded, setUrExpanded] = useState(false);
   const [usersExpanded, setUsersExpanded] = useState(false);
-  const [usersAPIExpanded, setUsersAPIExpanded] = useState(false);
+  const [pageLoadExpanded, setPageLoadExpanded] = useState(false);
   // Every chart on this card used to share one hover group, so a spike found in the
   // Response or Instances chart lined up against CPU/memory without eyeballing the
   // x-axis. Turned off: Recharts' synced-tooltip broadcast re-renders every chart in
@@ -968,7 +970,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [rcaSectionOpen, setRcaSectionOpen] = useState(false);
   const [rcaDraft, setRcaDraft] = useState('');
   const [visibleBlocks, setVisibleBlocks] = useState({
-    remarks: true, cpu: true, memory: true, database: true, users: true,
+    remarks: true, cpu: true, memory: true, database: true, users: true, pageload: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
     restarts: true, crashes: true, performance: true, anomaly: true,
     frontend: true, api: true,
@@ -994,7 +996,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     setPerfExpanded(false);
     setPerfAPIExpanded(false);
     setUsersExpanded(false);
-    setUsersAPIExpanded(false);
+    setPageLoadExpanded(false);
     setSnatPortsExpanded(false);
     setSnatApiPortsExpanded(false);
     setSelectedErrType(null);
@@ -1052,6 +1054,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     try {
       const result = await window.electronAPI.incidentReport.generate(buildIncidentPayload() as any);
       if (!result.success) setIncidentReportError(result.error ?? 'Unknown error');
+      else toast.success('Incident report saved', result.path ? { description: result.path } : undefined);
     } catch (e: any) {
       setIncidentReportError(e?.message ?? 'Unknown error');
     } finally {
@@ -1333,16 +1336,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       name: 'DB Memory',
       avg: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, p99: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, max: `${(+metrics.dbMemory!.max).toFixed(2)}%`,
     });
-    // The same set the Instances block lists. Active = anything not marked Stopped,
-    // so a Degraded or Unhealthy worker still counts as running.
+    // The same set and the same split the Instances row shows (summarizeInstances).
     const instanceRows = visibleBlocks.instances ? deriveInstanceRows(metrics, rangeEnd) : [];
     if (instanceRows.length) {
-      const stopped = instanceRows.filter(r => r.healthStatus.toLowerCase() === 'stopped').length;
+      const s = summarizeInstances(instanceRows);
       statusRows.push({
         name: 'Instances',
-        avg: `${(instanceRows.length - stopped).toLocaleString()} active`,
-        p99: `${stopped.toLocaleString()} stopped`,
-        max: `${instanceRows.length.toLocaleString()} total`,
+        avg: `${s.running.length.toLocaleString()} running`,
+        p99: `${s.stopped.length.toLocaleString()} stopped`,
+        max: `${s.total.toLocaleString()} total`,
       });
     }
     // Mirrors the gating on the SnatPortsRows usages below: one combined row when
@@ -1813,8 +1815,10 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           <DropdownMenu>
             <Hint label="Choose which blocks this card shows — remarks, CPU, memory and the rest">
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" data-html2canvas-ignore="true">
+                <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2.5 text-xs" data-html2canvas-ignore="true">
                   <SlidersHorizontal className="w-3.5 h-3.5" />
+                  Blocks
+                  <ChevronDown className="!size-3 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
             </Hint>
@@ -1827,6 +1831,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 { key: 'memory',       label: 'Memory' },
                 { key: 'database',     label: 'Database' },
                 { key: 'users',        label: 'Users' },
+                { key: 'pageload',     label: 'Page Load' },
                 { key: 'performance',  label: 'Performance' },
                 { key: 'exceptions',   label: 'Exceptions' },
                 { key: 'instances',    label: 'Instances' },
@@ -1847,54 +1852,53 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+          {/* Blocks changes what the card shows; the three buttons after it act on it. */}
+          <span className="h-5 w-px bg-border" aria-hidden data-html2canvas-ignore="true" />
           <Hint label={incidentReportLoading ? 'Generating the incident report…' : 'Download a Markdown incident report — written to be fed straight to an AI agent'}>
           <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-2.5 text-xs"
             onClick={() => handleIncidentReport()}
             disabled={incidentReportLoading}
             data-html2canvas-ignore="true"
             style={undefined}
           >
-            <Sparkles
-              className="w-3.5 h-3.5"
-              style={incidentReportLoading ? {
-                color: UI.warning,
-                filter: `drop-shadow(0 0 6px ${UI.warning})`,
-                animation: 'sparkle-glow 1.2s ease-in-out infinite',
-              } : undefined}
-            />
+            {incidentReportLoading
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Sparkles className="w-3.5 h-3.5" />}
+            {incidentReportLoading ? 'Generating…' : 'AI report'}
           </Button>
           </Hint>
           <Hint label={rcaStatus === 'running' ? 'Downtime RCA analysis running…' : 'Open the downtime RCA — add investigation notes, then have Claude draft the report'}>
           <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-2.5 text-xs"
             onClick={openRcaDialog}
             data-html2canvas-ignore="true"
           >
-            <ScanSearch
-              className="w-3.5 h-3.5"
-              style={rcaStatus === 'running' ? {
-                color: UI.info,
-                filter: `drop-shadow(0 0 6px ${UI.info})`,
-                animation: 'sparkle-glow 1.2s ease-in-out infinite',
-              } : undefined}
-            />
+            {rcaStatus === 'running'
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <ScanSearch className="w-3.5 h-3.5" />}
+            {rcaStatus === 'running' ? 'RCA running…' : 'RCA'}
           </Button>
           </Hint>
           <Hint label="Copy for Teams — status header, chart image and metrics table in one paste">
             <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
               onClick={copyForTeams}
-              style={{ visibility: (isCopying || isTeamsCopying) ? 'hidden' : 'visible' }}
+              disabled={isCopying || isTeamsCopying}
               data-html2canvas-ignore="true"
             >
-              <Share2 className="w-3.5 h-3.5" />
+              {/* Stays visible while copying: data-html2canvas-ignore already keeps it
+                  out of the image, and a button that vanishes on click reads as broken. */}
+              {(isCopying || isTeamsCopying)
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Share2 className="w-3.5 h-3.5" />}
+              {(isCopying || isTeamsCopying) ? 'Copying…' : 'Copy for Teams'}
             </Button>
           </Hint>
         </div>
@@ -2015,12 +2019,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 incidents and uptime — so Average / P99 / Max labelled none of them. The
                 colgroup widths still line up with the FE / API blocks below. */}
             <tbody>
-            {/* The app-level Users row lived here. It came from a frontend-only query, so
-                an app's API had no user figures anywhere on the card — it is now a Users
-                row inside each of the FE and API sections below, per App Insights
-                resource, carrying the busiest addresses and agents alongside the line. */}
             {visibleBlocks.instances && (metrics.availability != null || (metrics.instances?.length ?? 0) > 0 || (metrics.apiInstances?.length ?? 0) > 0) && (() => {
               const rows = deriveInstanceRows(metrics, rangeEnd);
+              const instSummary = summarizeInstances(rows);
               const hasInstances = (metrics.instances?.length ?? 0) + (metrics.apiInstances?.length ?? 0) > 0;
               const hc = (v: number | null) => v == null ? UI.textMuted : v >= 99 ? UI.success : v >= 90 ? UI.warning : 'hsl(var(--destructive))';
 
@@ -2032,34 +2033,52 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                     onMouseEnter={e => hasInstances && (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
-                    {/* The instances are dealt into the three figure columns rather than
-                        wrapped as one long line: on a plan with eight workers that line
-                        ran past the table and lined up with nothing. Filled row-major, so
-                        they still read left to right. */}
+                    {/* A status split rather than every instance by name: on a plan with
+                        eight workers the names filled three columns and still said less
+                        than the counts. The per-instance figures are in the expanded
+                        legend. Total sits in the label cell's spare width, like Users'
+                        Current, so the three figure columns stay aligned with the card. */}
                     <td className="text-muted-foreground font-bold">
                       <span title="Instances: individual App Service instances (scale-out units). Each instance has its own SNAT port allocation — more instances means more total SNAT ports available. Health % is request-derived per instance: (requests − 5xx) / requests.">Instances</span>
                       {hasInstances && (availExpanded
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
-                    {[0, 1, 2].map(col => (
-                      <td key={col} style={{ verticalAlign: 'top' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
-                          {rows.filter((_, i) => i % 3 === col).map(r => (
-                            <span key={r.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, maxWidth: '100%' }} title={`${r.name} — latest health`}>
-                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: r.color, flexShrink: 0 }} />
-                              <span style={{ color: r.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.shortName}</span>
-                              <span className="tabular-nums" style={{ color: hc(r.latest), flexShrink: 0 }}>
-                                {r.latest != null ? `${r.latest.toFixed(2)}%` : '—'}
-                              </span>
-                              {!r.stillActive && r.lifecycle && (
-                                <span style={{ color: UI.warning, fontSize: 9, flexShrink: 0 }} title="Stopped reporting before the window ended.">stopped</span>
-                              )}
+                    {([
+                      {
+                        key: 'running', label: 'Running', list: instSummary.running,
+                        color: UI.success,
+                        hint: 'Still serving traffic at the end of the window — hover shows each one\'s latest health',
+                      },
+                      {
+                        key: 'stopped', label: 'Stopped', list: instSummary.stopped,
+                        color: UI.textMuted,
+                        hint: 'Marked Stopped, or stopped reporting before the window ended',
+                      },
+                    ] as const).map(({ key, label, list, color, hint }) => {
+                      const count = list.length;
+                      const names = list.map(r => `${r.shortName}${r.latest != null ? ` — ${r.latest.toFixed(2)}%` : ''}`).join('\n');
+                      return (
+                        <td
+                          key={key}
+                          className="text-right tabular-nums"
+                          title={`${hint}${names ? `\n\n${names}` : ''}`}
+                        >
+                          {rows.length === 0 ? '—' : (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: count > 0 ? color : UI.textDim }}>
+                              {/* Dot plus label, so the state isn't read from colour alone. */}
+                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: count > 0 ? color : 'transparent', border: count > 0 ? 'none' : `1px solid ${UI.textDim}`, flexShrink: 0 }} />
+                              <span style={{ color: UI.textDim }}>{label} - </span>{count}
                             </span>
-                          ))}
-                        </div>
-                      </td>
-                    ))}
+                          )}
+                        </td>
+                      );
+                    })}
+                    <td className="text-right tabular-nums" title="Instances seen in this window, frontend and API merged by name">
+                      {rows.length === 0 ? '—' : (
+                        <><span style={{ color: UI.textDim }}>Total - </span><span style={{ color: 'hsl(var(--foreground))' }}>{instSummary.total}</span></>
+                      )}
+                    </td>
                   </tr>
                   {availExpanded && rows.length > 0 && (
                     <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
@@ -2160,12 +2179,16 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                       <span title="UptimeRobot: external uptime monitoring data. Reports incidents (periods where the endpoint was unreachable from outside Azure) and overall uptime percentage within the selected time range.">UptimeRobot</span>{totalIncidents > 0 && (urExpanded ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} /> : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />)}
                     </td>
                     <td className="text-right tabular-nums" colSpan={2} style={{ whiteSpace: 'nowrap' }}>
-                      <span style={{ color: incidentColor }}>{totalIncidents} incident{totalIncidents !== 1 ? 's' : ''}</span>
+                      <span style={{ color: UI.textDim }}>Incidents - </span>
+                      <span style={{ color: incidentColor }}>{totalIncidents}</span>
                       {totalDownSec > 0 && <span style={{ color: UI.textDim }}> · </span>}
                       {totalDownSec > 0 && <span style={{ color: incidentColor }}>{fmtDur(totalDownSec)} down</span>}
                     </td>
-                    <td className="text-right tabular-nums" style={{ color: uptimeColor, whiteSpace: 'nowrap' }}>
-                      {uptimePct != null ? `${uptimePct.toFixed(2)}% uptime` : '—'}
+                    <td className="text-right tabular-nums" style={{ whiteSpace: 'nowrap' }}>
+                      {uptimePct != null
+                        // Trailing zeros dropped: 100%, 99.9%, 99.87%.
+                        ? <><span style={{ color: UI.textDim }}>Uptime - </span><span style={{ color: uptimeColor }}>{Number(uptimePct.toFixed(2))}%</span></>
+                        : '—'}
                     </td>
                   </tr>
                   {totalIncidents > 0 && urExpanded && (
@@ -2355,6 +2378,33 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 onToggle={() => setSnatPortsExpanded(v => { if (!v) onRequestSnat?.(); return !v; })}
               />
             )}
+            {/* Frontend users only: the API's callers are the frontend and other services,
+                so its client figures described infrastructure, not an audience. */}
+            {visibleBlocks.users && (
+              <UserRows
+                users={metrics.requestInsights?.userInsights}
+                userAgents={metrics.requestInsights?.userAgents}
+                ipReputations={ipReputations}
+                expanded={usersExpanded}
+                onToggle={() => setUsersExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                syncId={hoverSyncId}
+                loading={detailsLoading && !detailsLoaded}
+                error={metrics.requestInsights?.error}
+                unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
+              />
+            )}
+            {/* Browser page-load time, from the frontend's App Insights pageViews. Lazy,
+                with the same details fetch as Users. */}
+            {visibleBlocks.pageload && (
+              <PageLoadRows
+                pageViews={metrics.pageViews}
+                expanded={pageLoadExpanded}
+                onToggle={() => setPageLoadExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
+                syncId={hoverSyncId}
+                loading={detailsLoading && !detailsLoaded}
+                unavailableMessage={detailsLoaded && metrics.pageViews === null ? 'Requires App Insights Application ID in settings' : undefined}
+              />
+            )}
             {visibleBlocks.anomaly && (
               <AnomalyDetectionRow
                 metrics={metrics}
@@ -2410,19 +2460,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 error={metrics.requestInsights?.error}
                 unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
                 captureTag="fe"
-              />
-            )}
-            {visibleBlocks.users && (
-              <UserRows
-                users={metrics.requestInsights?.userInsights}
-                userAgents={metrics.requestInsights?.userAgents}
-                ipReputations={ipReputations}
-                expanded={usersExpanded}
-                onToggle={() => setUsersExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                syncId={hoverSyncId}
-                loading={detailsLoading && !detailsLoaded}
-                error={metrics.requestInsights?.error}
-                unavailableMessage={detailsLoaded && !metrics.requestInsights ? 'Requires App Insights Application ID in settings' : undefined}
               />
             )}
             {visibleBlocks.exceptions && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
@@ -2586,18 +2623,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   loading={detailsLoading && !detailsLoaded}
                   error={metrics.apiRequestInsights?.error}
                   captureTag="api"
-                />
-              )}
-              {visibleBlocks.users && apiHasInsights && (
-                <UserRows
-                  users={metrics.apiRequestInsights?.userInsights}
-                  userAgents={metrics.apiRequestInsights?.userAgents}
-                  ipReputations={ipReputations}
-                  expanded={usersAPIExpanded}
-                  onToggle={() => setUsersAPIExpanded(v => { if (!v && !detailsLoaded && !detailsLoading) onRequestDetails?.(); return !v; })}
-                  syncId={hoverSyncId}
-                  loading={detailsLoading && !detailsLoaded}
-                  error={metrics.apiRequestInsights?.error}
                 />
               )}
               {visibleBlocks.exceptions && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {

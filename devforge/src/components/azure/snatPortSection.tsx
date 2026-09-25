@@ -272,31 +272,35 @@ export function SnatPortsRows({
             ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
             : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
         </td>
-        {/* Fixed colours, not thresholds: amber is what "pending" means and red is
-            what "failed" means, so the row is scannable by category even at zero —
-            and a zero in red reads as "none of the bad thing", not as an alarm. */}
+        {/* "Label - value", like the Instances row. The value carries its category
+            colour (amber = pending, red = failed) only when non-zero; a zero is
+            greyed so "none of the bad thing" doesn't read as an alarm. */}
         <td
           className="text-right tabular-nums"
-          style={{ whiteSpace: 'nowrap', color: UI.warning }}
+          style={{ whiteSpace: 'nowrap' }}
           title={'Pending SNAT connections: outbound connections queued waiting for a free SNAT port. '
             + 'Totalled across time buckets and worker instances. A queue that keeps growing is what precedes outright failures.'
             + (pendingPeak != null ? ` Peak ${pendingPeak.toLocaleString()} waiting at once.` : '')}
         >
-          {loading && !snat ? <CellSkeleton w={64} /> : pendingTotal != null ? `${pendingTotal.toLocaleString()} pending` : '—'}
+          {loading && !snat ? <CellSkeleton w={64} /> : pendingTotal != null
+            ? <><span style={{ color: UI.textDim }}>Pending - </span><span style={{ color: pendingTotal > 0 ? UI.warning : UI.textDim }}>{pendingTotal.toLocaleString()}</span></>
+            : '—'}
         </td>
         <td
           className="text-right tabular-nums"
-          style={{ whiteSpace: 'nowrap', color: 'hsl(var(--destructive))' }}
+          style={{ whiteSpace: 'nowrap' }}
           title={'Failed SNAT connections: outbound connections that could not get a SNAT port at all — the direct evidence of port exhaustion. '
             + 'Totalled across time buckets and worker instances. Anything above zero here means requests were dropped, not just delayed.'}
         >
-          {loading && !snat ? <CellSkeleton w={56} /> : failedTotal != null ? `${failedTotal.toLocaleString()} failed` : '—'}
+          {loading && !snat ? <CellSkeleton w={56} /> : failedTotal != null
+            ? <><span style={{ color: UI.textDim }}>Failed - </span><span style={{ color: failedTotal > 0 ? 'hsl(var(--destructive))' : UI.textDim }}>{failedTotal.toLocaleString()}</span></>
+            : '—'}
         </td>
         {/* Ports sit in the Max column: both figures are peaks over the window, which
             is what that column means on every other row. */}
         <td
           className="text-right tabular-nums"
-          style={{ whiteSpace: 'nowrap', color: UI.textMuted }}
+          style={{ whiteSpace: 'nowrap' }}
           title={peakAllocated != null
             ? `Peak ${peakUsed?.toLocaleString() ?? '—'} ports in use out of ${peakAllocated.toLocaleString()} allocated, on the busiest worker`
             : undefined}
@@ -304,8 +308,8 @@ export function SnatPortsRows({
           {loading && !snat
             ? <CellSkeleton w={76} />
             : peakAllocated != null
-              ? `${peakUsed != null ? peakUsed.toLocaleString() : '—'} / ${peakAllocated.toLocaleString()}`
-              : snat ? 'no port data' : '—'}
+              ? <><span style={{ color: UI.textDim }}>Allocated - </span><span style={{ color: 'hsl(var(--foreground))' }}>{peakUsed != null ? peakUsed.toLocaleString() : '—'}/{peakAllocated.toLocaleString()}</span></>
+              : snat ? <span style={{ color: UI.textMuted }}>no port data</span> : '—'}
         </td>
       </tr>
       {expanded && (

@@ -7,6 +7,10 @@ export default {
   ],
   theme: {
   	extend: {
+  		fontFamily: {
+  			sans: ['"Inter Variable"', 'ui-sans-serif', 'system-ui', '"Segoe UI"', 'sans-serif'],
+  			mono: ['ui-monospace', '"Cascadia Code"', 'Consolas', 'monospace']
+  		},
   		borderRadius: {
   			lg: 'var(--radius)',
   			md: 'calc(var(--radius) - 2px)',
@@ -15,6 +19,11 @@ export default {
   		colors: {
   			background: 'hsl(var(--background))',
   			foreground: 'hsl(var(--foreground))',
+  			brand: {
+  				DEFAULT: 'hsl(var(--brand))',
+  				foreground: 'hsl(var(--brand-foreground))'
+  			},
+  			tabbar: 'hsl(var(--tabbar))',
   			card: {
   				DEFAULT: 'hsl(var(--card))',
   				foreground: 'hsl(var(--card-foreground))'

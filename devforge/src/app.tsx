@@ -1,104 +1,70 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
+import { usePageTabs } from "@/hooks/usePageTabs";
 import { ThemeProvider } from "@/components/provider/theme-provider";
-import { SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
-import { Home } from "lucide-react";
 import { SettingsProvider } from "@/context/settings-context";
 import { SettingsUiProvider } from "@/context/settings-ui-context";
 import { ReleaseNotesModal } from "@/components/release-notes/release-notes-modal";
 import { UpdateIndicator } from "@/components/updater/update-indicator";
+import { cn } from "@/lib/utils";
 
-import { pages, renderPage } from "./routes/page-routes";
-import { BuildLabel } from "./components/ui/buildLabel";
-import { AccessMode } from "./components/ui/accessMode";
+import { HOME_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
 import { AppHeader } from "./components/layout/app-header";
+import { AppSidebar } from "./components/layout/app-sidebar";
+import { PageTabs, panelId, tabId } from "./components/layout/page-tabs";
+import { TabErrorBoundary } from "./components/layout/tab-error-boundary";
 import HomePage from "@/pages/homePage";
+import type { Page } from "@/types/pages.types";
 
-type Phase = "idle" | "launching" | "open" | "closing";
-
-const LAUNCH_STYLES = `
-  .content-wrap {
-    transition: filter 0.35s ease, transform 0.35s ease;
-    will-change: transform, filter;
-    transform-origin: center top;
-  }
-  .content-wrap.blurred {
-    filter: brightness(0.5) blur(6px) saturate(0.7);
-    transform: scale(0.97);
-    pointer-events: none;
-    user-select: none;
-  }
-  .app-sheet {
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    z-index: 50;
-    background: white;
-    will-change: transform, opacity, border-radius;
-  }
-  .dark .app-sheet {
-    background: hsl(var(--background));
-  }
-  .app-sheet.phase-launching {
-    animation: sheetIn 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
-  }
-  .app-sheet.phase-open {
-    transform: scale(1);
-    opacity: 1;
-    border-radius: 0;
-  }
-  .app-sheet.phase-closing {
-    animation: sheetOut 0.36s cubic-bezier(0.55, 0, 1, 0.45) forwards;
-  }
-  @keyframes sheetIn {
-    0%   { transform: scale(0.05); opacity: 0;  border-radius: 28px; }
-    55%  { opacity: 1;                          border-radius: 14px; }
-    100% { transform: scale(1);   opacity: 1;  border-radius: 0;    }
-  }
-  @keyframes sheetOut {
-    0%   { transform: scale(1);    opacity: 1; border-radius: 0;    }
-    45%  { opacity: 1;                         border-radius: 18px; }
-    100% { transform: scale(0.05); opacity: 0; border-radius: 28px; }
-  }
-`;
+const PAGE_TITLES = pages.map((p) => p.title);
 
 export default function App() {
   const { info: updateInfo, install: installUpdate } = useAppUpdater();
-  const [activePage, setActivePage] = useState<string>("Home");
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [originStyle, setOriginStyle] = useState<string>("50% 50%");
+  const { openTabs, activeTab, open, close, cycle, activateAt, move } = usePageTabs(PAGE_TITLES, HOME_PAGE);
   const [search, setSearch] = useState<string>("");
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
-  const pendingPage = useRef<string>("Home");
+  // Set when a page is opened from the sidebar or a home card, so focus moves to
+  // the page for keyboard/screen-reader users. Tab-strip navigation keeps focus
+  // on the strip instead.
+  const focusPanelRef = useRef(false);
 
-  const isAppVisible = phase === "launching" || phase === "open" || phase === "closing";
-  const contentBlurred = isAppVisible;
+  const openPage = useCallback((title: string) => {
+    focusPanelRef.current = true;
+    open(title);
+  }, [open]);
 
-  const activePageDef = pages.find((p) => p.title === activePage);
-  const activeIcon = isAppVisible ? activePageDef?.icon : Home;
+  useEffect(() => {
+    if (!focusPanelRef.current) return;
+    focusPanelRef.current = false;
+    document.getElementById(panelId(activeTab))?.focus({ preventScroll: true });
+  }, [activeTab]);
 
-  const handleNavigate = useCallback((pageTitle: string, rect: DOMRect) => {
-    const vw = window.innerWidth;
-    const contentEl = document.getElementById("home-content");
-    const offsetTop = contentEl?.getBoundingClientRect().top ?? 0;
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2 - offsetTop;
-    const ch = contentEl?.clientHeight ?? window.innerHeight;
-    setOriginStyle(`${(cx / vw) * 100}% ${(cy / ch) * 100}%`);
-    pendingPage.current = pageTitle;
-    setActivePage(pageTitle);
-    setPhase("launching");
-    setTimeout(() => setPhase("open"), 420);
-  }, []);
+  // Browser-style tab shortcuts. The Electron app has no application menu
+  // (Menu.setApplicationMenu(null)), so Ctrl+W isn't bound to closing the window.
+  // In the web build the browser reserves these, so they simply don't fire there.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.key === "Tab") {
+        e.preventDefault();
+        cycle(e.shiftKey ? -1 : 1);
+      } else if (e.key.toLowerCase() === "w" && !e.shiftKey) {
+        e.preventDefault();
+        close(activeTab);
+      } else if (/^[1-9]$/.test(e.key) && !e.shiftKey) {
+        e.preventDefault();
+        // Ctrl+9 is "last tab", as in browsers.
+        activateAt(e.key === "9" ? openTabs.length - 1 : Number(e.key) - 1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeTab, openTabs.length, close, cycle, activateAt]);
 
-  const handleClose = useCallback(() => {
-    setPhase("closing");
-    setTimeout(() => {
-      setPhase("idle");
-      setActivePage("Home");
-    }, 380);
-  }, []);
+  const openPages = openTabs.map(findPage).filter((p): p is Page => p !== undefined);
 
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
@@ -107,60 +73,74 @@ export default function App() {
           200ms skips the second delay, so scanning a toolbar doesn't stutter. */}
       <TooltipProvider delayDuration={300} skipDelayDuration={200}>
       <SettingsUiProvider>
-      <SidebarProvider>
-        <style>{LAUNCH_STYLES}</style>
+      <SidebarProvider className="h-svh overflow-hidden">
+        <AppSidebar
+          pages={pages}
+          activeTab={activeTab}
+          openTabs={openTabs}
+          onOpen={openPage}
+          search={search}
+          onSearchChange={setSearch}
+          onOpenReleaseNotes={() => setReleaseNotesOpen(true)}
+        />
 
-        <div className="w-screen min-h-screen flex flex-col">
-
+        <SidebarInset className="min-w-0 overflow-hidden">
           <AppHeader
-            pageName={isAppVisible ? activePage : "Home"}
-            pageIcon={activeIcon}
-            search={!isAppVisible ? search : undefined}
-            onSearchChange={!isAppVisible ? setSearch : undefined}
-            onBack={isAppVisible ? handleClose : undefined}
-            onOpenReleaseNotes={() => setReleaseNotesOpen(true)}
+            tabs={
+              <PageTabs
+                tabs={openPages}
+                activeTab={activeTab}
+                pinned={HOME_PAGE}
+                onActivate={open}
+                onClose={close}
+                onMove={move}
+              />
+            }
           />
 
-          <div
-            id="home-content"
-            className="relative flex flex-1 overflow-hidden"
-          >
-            <div className={`content-wrap w-full flex flex-col overflow-hidden ${contentBlurred ? "blurred" : ""}`}>
-              <div className="w-full h-full flex flex-1 flex-col px-6 py-5">
-                <HomePage onNavigate={handleNavigate} search={search} />
-              </div>
-            </div>
-
-            {isAppVisible && (
-              <div
-                className={`app-sheet phase-${phase} flex flex-col`}
-                style={{ transformOrigin: originStyle }}
-              >
-                <div className="flex flex-1 flex-col overflow-auto scrollable-content">
+          {/* Every open tab stays mounted so switching back keeps its input,
+              results and scroll position; inactive panels are just hidden. */}
+          <div className="relative min-h-0 flex-1">
+            {openPages.map((page) => {
+              const isActive = page.title === activeTab;
+              return (
+                <section
+                  key={page.title}
+                  id={panelId(page.title)}
+                  role="tabpanel"
+                  aria-labelledby={tabId(page.title)}
+                  tabIndex={-1}
+                  hidden={!isActive}
+                  className={cn(
+                    "absolute inset-0 flex-col overflow-auto scrollable-content outline-none",
+                    // Re-shown panels replay this (display none → flex restarts the animation).
+                    "animate-in fade-in-0 duration-150",
+                    isActive ? "flex" : "hidden",
+                  )}
+                >
                   <div className="w-full flex flex-1 flex-col gap-2 px-5 container-fluid mx-auto py-5">
-                    {renderPage(activePage)}
+                    {page.title === HOME_PAGE
+                      ? <HomePage onNavigate={openPage} search={search} openTabs={openTabs} />
+                      : (
+                        <TabErrorBoundary title={page.title} onClose={() => close(page.title)}>
+                          {renderPage(page.title)}
+                        </TabErrorBoundary>
+                      )}
                   </div>
-                </div>
-              </div>
-            )}
+                </section>
+              );
+            })}
           </div>
 
-          <div className="p-2 text-center text-xs text-muted-foreground border-t">
-            <div className="flex items-center justify-center gap-2">
-              <AccessMode />
-              <BuildLabel />
-            </div>
-          </div>
+        </SidebarInset>
 
-          <Toaster />
-          <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
+        <Toaster />
+        <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
 
-          <UpdateIndicator
-            info={updateInfo}
-            onRestart={installUpdate}
-          />
-
-        </div>
+        <UpdateIndicator
+          info={updateInfo}
+          onRestart={installUpdate}
+        />
       </SidebarProvider>
       </SettingsUiProvider>
       </TooltipProvider>

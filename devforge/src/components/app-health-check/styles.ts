@@ -72,7 +72,7 @@ export const inputStyle: React.CSSProperties = {
   background: C.btnBg,
   color: C.text,
   fontSize: 12,
-  // 'light dark' lets the native date picker follow the active theme; it was
-  // pinned to 'dark', which rendered a dark picker on the light background.
-  colorScheme: 'light dark',
+  // Inherit the app theme's color-scheme (set on :root / .dark in index.css) so
+  // the native date picker matches the chosen theme, not the OS setting.
+  colorScheme: 'inherit',
 };

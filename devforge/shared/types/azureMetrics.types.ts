@@ -339,6 +339,9 @@ export interface AppMetrics {
   socketMetrics?: SocketCounters | null
   /** Socket/TCP counters for the plan hosting the API site. */
   apiSocketMetrics?: SocketCounters | null
+  /** Browser page-load time from the frontend's App Insights `pageViews`. Arrives with
+   *  the lazy details fetch, so `undefined` means "not requested yet". */
+  pageViews?: PageViewInsights | { error: string } | null
   /** SNAT port charts from App Service Diagnostics for the frontend site. Loaded
    *  on demand, so `undefined` means "not requested yet" and `null` means
    *  "no detector". */
@@ -523,6 +526,32 @@ export interface EntitySeries {
   series: Array<{ t: string; count: number }>
 }
 
+/**
+ * Page load time as the browser saw it, from App Insights `pageViews` (written by the
+ * JavaScript SDK — a site without it has `views: 0`). Durations are milliseconds.
+ */
+export interface PageViewInsights {
+  /** KQL bin width behind `series` (e.g. '15m'). */
+  bin: string
+  views: number
+  avgMs: number | null
+  p50Ms: number | null
+  p95Ms: number | null
+  maxMs: number | null
+  series: Array<{ t: string; avgMs: number | null; p95Ms: number | null; views: number }>
+  /** Busiest operations (operation_Name, else page title) by views, each with its own load time. */
+  pages: Array<{ name: string; views: number; avgMs: number | null; p95Ms: number | null }>
+  /** Where the load time goes, from `browserTimings`; null when not collected. */
+  timings: {
+    samples: number
+    networkMs: number | null
+    sendMs: number | null
+    receiveMs: number | null
+    processingMs: number | null
+    totalMs: number | null
+  } | null
+}
+
 /** One outcome's latency distribution. Durations are milliseconds. */
 export interface LatencyDist {
   count: number
@@ -677,7 +706,7 @@ export interface EndpointPerfPoint {
 export interface IAzureMetricsAPI {
   checkCredential: () => Promise<{ ok: boolean; error?: string }>
   fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Record<string, AppMetrics>>
-  fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights'>>
+  fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'pageViews'>>
   fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
   fetchSnat: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<SnatFetchResult>
   fetchRestarts: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<RestartFetchResult>

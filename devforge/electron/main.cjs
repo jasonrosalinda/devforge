@@ -11,6 +11,16 @@ if (process.platform === 'win32') app.setAppUserModelId('com.devforge.app');
 
 const backgroundMonitor = require('./ipc/background-monitor.cjs');
 
+// The app header doubles as the title bar (tabs sit in it, like a browser).
+// Windows still draws the real min/max/close buttons as an overlay; these match
+// the header's --tabbar / --muted-foreground tokens in src/index.css.
+const TITLEBAR_HEIGHT = 52; // --header-height: 3.25rem
+const TITLEBAR_THEMES = {
+    dark: { color: '#080c14', symbolColor: '#9dabbe' },
+    light: { color: '#edeff2', symbolColor: '#5a687c' },
+};
+const useCustomTitlebar = process.platform === 'win32';
+
 function createWindow() {
     const mainWindow = new BrowserWindow({
         width: 1400,
@@ -24,13 +34,23 @@ function createWindow() {
             contextIsolation: true,
             nodeIntegration: false,
         },
-        titleBarStyle: 'default',
+        ...(useCustomTitlebar
+            ? { titleBarStyle: 'hidden', titleBarOverlay: { ...TITLEBAR_THEMES.dark, height: TITLEBAR_HEIGHT } }
+            : { titleBarStyle: 'default' }),
         backgroundColor: '#09090b',
         autoHideMenuBar: true,
         show: false,
     });
 
     mainWindow.once('ready-to-show', () => mainWindow.show());
+
+    // Renderer reports the resolved theme so the native window buttons follow it.
+    ipcMain.removeHandler('window:set-titlebar-theme');
+    ipcMain.handle('window:set-titlebar-theme', (_e, theme) => {
+        const colors = TITLEBAR_THEMES[theme];
+        if (!useCustomTitlebar || !colors || mainWindow.isDestroyed()) return;
+        mainWindow.setTitleBarOverlay({ ...colors, height: TITLEBAR_HEIGHT });
+    });
 
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
         shell.openExternal(url);

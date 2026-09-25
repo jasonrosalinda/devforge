@@ -164,13 +164,19 @@ function formatTick(isoStr: string, spanMs: number): string {
 /** One metric on its own auto-scaled axis. CombinedChart is pinned to 0–100 for
  *  percentages, so counts (users, requests) need this instead. */
 export function SeriesChart({
-  series, color, name, height = 120, valueFormatter, syncId,
+  series, color, name, height = 120, valueFormatter, syncId, lineLabels, axisFormatter, yAxisWidth,
 }: {
   series: Array<{ t: string; v: number; m: number }>;
   color: string;
   name: string;
   height?: number;
   valueFormatter?: ((v: number) => string) | undefined;
+  /** Tooltip names for the dashed `v` and solid `m` lines. Default "<name> Avg" / "<name> Max". */
+  lineLabels?: { v: string; m: string } | undefined;
+  /** Y-axis tick format, when it should be terser than `valueFormatter` (tooltip). */
+  axisFormatter?: ((v: number) => string) | undefined;
+  /** Y-axis width in px. The default fits short figures ("80%", "1.2k"). */
+  yAxisWidth?: number | undefined;
   /** Shared with the card's other charts so hovering one moves the crosshair on
    *  all of them. Synced by axis VALUE, not index: these series come from
    *  different queries and rarely have the same bucket count. */
@@ -191,7 +197,7 @@ export function SeriesChart({
 
   return (
     <ResponsiveContainer width="100%" height={height} debounce={100}>
-      <AreaChart data={series} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: -20 }}>
+      <AreaChart data={series} {...syncProps(syncId)} margin={{ top: 4, right: 12, bottom: 0, left: yAxisWidth ? 0 : -20 }}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%"  stopColor={color} stopOpacity={0.3} />
@@ -199,7 +205,7 @@ export function SeriesChart({
           </linearGradient>
         </defs>
         <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: UI.textMuted, fontSize: 10 }} minTickGap={40} />
-        <YAxis tick={{ fill: UI.textMuted, fontSize: 10 }} tickFormatter={(v: number) => fmt(v)} width={48} />
+        <YAxis tick={{ fill: UI.textMuted, fontSize: 10 }} tickFormatter={(v: number) => (axisFormatter ?? fmt)(v)} width={yAxisWidth ?? 48} />
         <Tooltip
           contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
           labelStyle={{ color: UI.textMuted }}
@@ -207,9 +213,9 @@ export function SeriesChart({
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         />
         {!singleValued && (
-          <Area type="monotone" dataKey="v" name={`${name} Avg`} stroke={color} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} />
+          <Area type="monotone" dataKey="v" name={lineLabels?.v ?? `${name} Avg`} stroke={color} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} />
         )}
-        <Area type="monotone" dataKey="m" name={singleValued ? name : `${name} Max`} stroke={color} fill={`url(#${gid})`} strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Area type="monotone" dataKey="m" name={singleValued ? name : (lineLabels?.m ?? `${name} Max`)} stroke={color} fill={`url(#${gid})`} strokeWidth={2} dot={false} isAnimationActive={false} />
       </AreaChart>
     </ResponsiveContainer>
   );

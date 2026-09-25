@@ -124,6 +124,7 @@ const { fetchSnatCharts } = require('./azure-snat.cjs');
 const { fetchRestartCharts } = require('./azure-restarts.cjs');
 // Application Crashes detector — a crash-count timeline plus captured stack traces.
 const { fetchCrashData } = require('./azure-crashmonitoring.cjs');
+const { getPageViewInsights } = require('./azure-pageviews.cjs');
 
 // ─── Pure Helpers (exported for testing) ─────────────────────────────────────
 
@@ -1846,6 +1847,39 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
 
 // ─── On-demand detail fetch ───────────────────────────────────────────────────
 
+/**
+ * A batch runner for one App Insights app over the card's window: one HTTP call,
+ * one rows array (or { error }) per statement. Same timespan rules as getRequestInsights.
+ */
+async function aiBatchRunner(appId, credential, range, customStart, customEnd) {
+  const msMap = { '30m': 30*60e3, '1h': 3600e3, '6h': 6*3600e3, '12h': 12*3600e3, '1d': 24*3600e3, '3d': 72*3600e3, '7d': 168*3600e3, '30d': 720*3600e3 };
+  const spanMs = customStart && customEnd ? new Date(customEnd) - new Date(customStart) : (msMap[range] || msMap['1d']);
+  const timespanMap = { '30m':'PT30M','1h':'PT1H','6h':'PT6H','12h':'PT12H','1d':'P1D','3d':'P3D','7d':'P7D','30d':'P30D' };
+  const timespan = customStart && customEnd
+    ? `${new Date(customStart).toISOString()}/${new Date(customEnd).toISOString()}`
+    : (timespanMap[range] || 'P1D');
+  const token = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  const endpoint = `https://api.applicationinsights.io/v1/apps/${appId}/query`;
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  async function runBatch(queries) {
+    try {
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: queries.join(';\n'), timespan }) });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        return queries.map(() => ({ error: `${res.status}: ${txt}` }));
+      }
+      const data = await res.json();
+      if (data.error) return queries.map(() => ({ error: data.error.message || JSON.stringify(data.error) }));
+      return (data.tables || []).map(t => t?.rows || []);
+    } catch (e) {
+      return queries.map(() => ({ error: e.message }));
+    }
+  }
+
+  return { runBatch, spanMins: spanMs / 60000 };
+}
+
 async function fetchAppDetailsData(app, subscriptionId, credential, range, customStart, customEnd) {
   const isAppService = app.type === 'appservice';
   const token = await getToken(credential);
@@ -1877,14 +1911,18 @@ async function fetchAppDetailsData(app, subscriptionId, credential, range, custo
 
 
 
-  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, socketMetrics, apiSocketMetrics };
+  if (!aiAppId) return { requestInsights: null, apiRequestInsights: null, pageViews: null, socketMetrics, apiSocketMetrics };
 
-  const [requestInsights, apiRequestInsights] = await Promise.all([
+  // Page views are browser telemetry, so only the frontend's App Insights has them.
+  const [requestInsights, apiRequestInsights, pageViews] = await Promise.all([
     getRequestInsights(aiAppId, credential, range, customStart, customEnd, false, app.sloMs || DEFAULT_SLO_MS).catch(() => null),
     apiAiAppId ? getRequestInsights(apiAiAppId, credential, range, customStart, customEnd, false, app.sloMs || DEFAULT_SLO_MS).catch(() => null) : Promise.resolve(null),
+    aiBatchRunner(aiAppId, credential, range, customStart, customEnd)
+      .then(({ runBatch, spanMins }) => getPageViewInsights(runBatch, spanMins))
+      .catch((e) => ({ error: e.message || String(e) })),
   ]);
 
-  return { requestInsights, apiRequestInsights, socketMetrics, apiSocketMetrics };
+  return { requestInsights, apiRequestInsights, pageViews, socketMetrics, apiSocketMetrics };
 
 
 }

@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Hint } from "@/components/ui/hint";
-import { TbActivity } from 'react-icons/tb';
-import { Loader2, Copy, RefreshCw } from 'lucide-react';
+import { Activity, Loader2, Copy, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAzureMetrics, type EndpointDepsState } from '@/hooks/useAzureMetrics';
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
@@ -215,7 +214,7 @@ export default function AppHealthCheckPage() {
     <div className="flex flex-col gap-4">
 
       <PageHeader
-        icon={TbActivity}
+        icon={Activity}
         title="App Health Check"
         subtitle="Pull Azure App Service metrics for selected apps and time range — CPU, memory, requests, and downtime detection."
         actions={<AzureStatusPill credStatus={credStatus} credError={credError} onRecheck={() => void recheckCredential()} />}
