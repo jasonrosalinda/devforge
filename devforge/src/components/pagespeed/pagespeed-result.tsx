@@ -10,7 +10,7 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, compareRunToBaseline, improvementPercent, findUnwinnableMetrics, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, compareRunToBaseline, improvementPercent, findUnwinnableMetrics, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -775,7 +775,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             config.comparisonMode ? `${config.beforeLabel} vs ${config.afterLabel}` : '',
         ].filter(Boolean);
         const title = `${config.strategy.toUpperCase()} — PageSpeed${titleParts.length ? ` (${titleParts.join(' · ')})` : ''}`;
-        const html = `<h3>${title}</h3>${tableHtml}${analysisHtml}`;
+        // Throttling/emulation PSI used, so a reader knows what the numbers were measured on.
+        const envSummary = describePageSpeedTestEnvironment(config.strategy, [...results1, ...results2]).summary;
+        const envHtml = `<p style="margin:4px 0 0;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#666">${envSummary}</p>`;
+        const html = `<h3>${title}</h3>${tableHtml}${envHtml}${analysisHtml}`;
 
         const plain = `${title}\n` + config.urls.map((url, i) => {
             const r1 = getSlot1(i) || undefined;
@@ -805,7 +808,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 }
             }
             return `${url}: ${parts.join(', ')}` + runLines;
-        }).join('\n') + (analysisMd ? `\n\n${analysisMd}` : '');
+        }).join('\n') + `\n\n${envSummary}` + (analysisMd ? `\n\n${analysisMd}` : '');
 
         const copy = navigator.clipboard.write([
             new ClipboardItem({
@@ -1643,12 +1646,19 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         </>
     );
 
+    const testEnvironment = describePageSpeedTestEnvironment(config.strategy, [...results1, ...results2]);
+
     return (
         <Card className={grouped ? 'my-4 mx-6 first:mt-6 last:mb-6 shadow-none' : 'my-4'} ref={elementRef}>
             <CardHeader>
                 <CardTitle className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
                         {config.strategy.toUpperCase()}
+                        <Hint label={testEnvironment.detail}>
+                            <span className="text-xs font-normal text-muted-foreground">
+                                {testEnvironment.summary}
+                            </span>
+                        </Hint>
                     </div>
                     {!copying && showAnalyzeButton && (
                         <div className="flex items-center gap-2">

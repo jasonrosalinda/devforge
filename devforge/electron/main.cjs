@@ -14,7 +14,8 @@ const backgroundMonitor = require('./ipc/background-monitor.cjs');
 // The app header doubles as the title bar (tabs sit in it, like a browser).
 // Windows still draws the real min/max/close buttons as an overlay; these match
 // the header's --tabbar / --muted-foreground tokens in src/index.css.
-const TITLEBAR_HEIGHT = 52; // --header-height: 3.25rem
+// --header-height (3.25rem = 52px) minus 1px so the header's border-b stays visible under the buttons.
+const TITLEBAR_HEIGHT = 51;
 const TITLEBAR_THEMES = {
     dark: { color: '#080c14', symbolColor: '#9dabbe' },
     light: { color: '#edeff2', symbolColor: '#5a687c' },

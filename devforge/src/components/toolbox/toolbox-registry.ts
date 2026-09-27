@@ -40,11 +40,11 @@ export const TOOLBOX_TOOLS: ToolboxTool[] = [
     },
     {
         id: "cron",
-        title: "Cron Explainer",
+        title: "Cron Explainer & Creator",
         icon: CalendarClock,
-        description: "Explain a cron or NCRONTAB expression and preview its next runs.",
+        description: "Explain or build a cron / NCRONTAB expression and preview its next runs.",
         component: CronExplainer,
-        keywords: ["cron", "ncrontab", "schedule"],
+        keywords: ["cron", "ncrontab", "schedule", "builder", "creator", "generator"],
     },
     {
         id: "data",
