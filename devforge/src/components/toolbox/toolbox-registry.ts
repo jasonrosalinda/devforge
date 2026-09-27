@@ -1,4 +1,4 @@
-import { Binary, Braces, CalendarClock, Clock, GitCompareArrows, KeyRound, Regex } from "lucide-react";
+import { Binary, Braces, CalendarClock, Clock, GitCompareArrows, Image as ImageIcon, KeyRound, Regex } from "lucide-react";
 import type { ToolboxTool } from "@/types/toolbox.types";
 
 import JwtDecoder from "./jwt-decoder";
@@ -8,6 +8,7 @@ import DataFormatTool from "./data-format";
 import EncodersTool from "./encoders-tool";
 import TextDiff from "./text-diff";
 import DateTimeConverter from "./datetime-converter";
+import ImageConverter from "./image-converter";
 
 /**
  * Every Toolbox utility. Each entry becomes its own page under the sidebar's
@@ -69,5 +70,13 @@ export const TOOLBOX_TOOLS: ToolboxTool[] = [
         description: "Compare two blocks of text line by line.",
         component: TextDiff,
         keywords: ["diff", "compare"],
+    },
+    {
+        id: "image",
+        title: "Image Converter",
+        icon: ImageIcon,
+        description: "Convert images between PNG, JPEG, WebP, ICO and SVG — traced or embedded — offline.",
+        component: ImageConverter,
+        keywords: ["image", "convert", "png", "jpg", "jpeg", "webp", "ico", "favicon", "svg", "vector", "trace", "resize"],
     },
 ];
