@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { parseCron, describeCron, nextRuns } from "@/lib/toolbox/cron";
-import { ErrorNote, ToolPanel, WarningNote } from "./toolbox-shared";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CronCreator, defaultCronCreatorState, type CronCreatorState } from "./cron-creator";
+import { CronPreview } from "./cron-preview";
 
 const PRESETS = [
     { label: "Every 5 min", expression: "*/5 * * * *" },
@@ -12,37 +12,14 @@ const PRESETS = [
     { label: "Every 30s (NCRONTAB)", expression: "*/30 * * * * *" },
 ];
 
-const RUN_COUNT = 10;
+type CronTab = "explain" | "create";
 
-const UTC_FORMAT: Intl.DateTimeFormatOptions = {
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-};
-
-export default function CronExplainer() {
-    const [expression, setExpression] = useState("*/5 * * * *");
-
-    const parsed = useMemo(() => parseCron(expression), [expression]);
-    const runs = useMemo(
-        () => (parsed.cron ? nextRuns(parsed.cron, new Date(), RUN_COUNT) : []),
-        [parsed.cron],
-    );
-
-    const fieldHint = parsed.cron?.fieldCount === 6
-        ? "6 fields — NCRONTAB (seconds minutes hours day month weekday)"
-        : "5 fields — standard cron (minutes hours day month weekday)";
-
+function ExplainPanel({ expression, onChange }: { expression: string; onChange: (expression: string) => void }) {
     return (
         <div className="flex flex-col gap-3 h-full min-h-0">
             <Input
                 value={expression}
-                onChange={(event) => setExpression(event.target.value)}
+                onChange={(event) => onChange(event.target.value)}
                 placeholder="*/5 * * * *"
                 spellCheck={false}
                 className="font-mono text-sm"
@@ -55,61 +32,41 @@ export default function CronExplainer() {
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs"
-                        onClick={() => setExpression(preset.expression)}
+                        onClick={() => onChange(preset.expression)}
                     >
                         {preset.label}
                     </Button>
                 ))}
             </div>
 
-            {parsed.error ? (
-                <ErrorNote>
-                    {parsed.error.field ? `${parsed.error.field}: ` : ""}
-                    {parsed.error.message}
-                </ErrorNote>
-            ) : (
-                <div className="rounded-md border bg-muted/40 px-3 py-2">
-                    <p className="text-sm font-semibold">{describeCron(parsed.cron!)}</p>
-                    <p className="text-[11px] text-muted-foreground">{fieldHint}</p>
-                </div>
-            )}
-
-            {parsed.cron && runs.length === 0 && (
-                <WarningNote>
-                    This expression has no upcoming run in the next five years — check the day and month fields.
-                </WarningNote>
-            )}
-
-            {runs.length > 0 && (
-                <ToolPanel
-                    title={`Next ${runs.length} runs`}
-                    actions={<Badge variant="secondary" className="font-normal">Schedules run in UTC</Badge>}
-                    className="flex-1"
-                >
-                    <div className="flex-1 min-h-0 overflow-auto rounded-md border">
-                        <table className="w-full text-xs">
-                            <thead className="sticky top-0 bg-muted/80 backdrop-blur">
-                                <tr className="text-left text-muted-foreground">
-                                    <th className="px-3 py-1.5 font-medium">#</th>
-                                    <th className="px-3 py-1.5 font-medium">UTC</th>
-                                    <th className="px-3 py-1.5 font-medium">Local</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y">
-                                {runs.map((run, index) => (
-                                    <tr key={run.toISOString()}>
-                                        <td className="px-3 py-1.5 tabular-nums text-muted-foreground">{index + 1}</td>
-                                        <td className="px-3 py-1.5 tabular-nums">
-                                            {run.toLocaleString("en-GB", { ...UTC_FORMAT, timeZone: "UTC" })}
-                                        </td>
-                                        <td className="px-3 py-1.5 tabular-nums">{run.toLocaleString([], UTC_FORMAT)}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </ToolPanel>
-            )}
+            <CronPreview expression={expression} />
         </div>
+    );
+}
+
+export default function CronExplainer() {
+    // Both tabs' state lives here: Radix unmounts the inactive tab, which would reset its form.
+    const [tab, setTab] = useState<CronTab>("explain");
+    const [expression, setExpression] = useState("*/5 * * * *");
+    const [creator, setCreator] = useState<CronCreatorState>(defaultCronCreatorState);
+
+    const openInExplain = (built: string) => {
+        setExpression(built);
+        setTab("explain");
+    };
+
+    return (
+        <Tabs value={tab} onValueChange={(value) => setTab(value as CronTab)} className="flex flex-col h-full min-h-0">
+            <TabsList className="self-start">
+                <TabsTrigger value="explain">Explain</TabsTrigger>
+                <TabsTrigger value="create">Create</TabsTrigger>
+            </TabsList>
+            <TabsContent value="explain" className="flex-1 min-h-0">
+                <ExplainPanel expression={expression} onChange={setExpression} />
+            </TabsContent>
+            <TabsContent value="create" className="flex-1 min-h-0">
+                <CronCreator state={creator} onChange={setCreator} onOpenInExplain={openInExplain} />
+            </TabsContent>
+        </Tabs>
     );
 }

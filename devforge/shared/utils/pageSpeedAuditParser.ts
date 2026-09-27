@@ -75,7 +75,7 @@ export function parseToPageSpeedInsightResult(
     url: string,
     audits: RawAudits,
     runWarnings?: string,
-    meta?: { performanceScore?: number | undefined; lighthouseVersion?: string | undefined; fetchTime?: string | undefined }
+    meta?: Pick<PageSpeedInsightResult, 'performanceScore' | 'lighthouseVersion' | 'fetchTime' | 'testEnvironment'>
 ): PageSpeedInsightResult {
     const opps: PageSpeedOpportunity[] = Object.entries(audits)
         .filter(([key, a]) =>
@@ -185,6 +185,7 @@ export function parseObjectToMetrics(raw: any): PageSpeedInsightResult {
         performanceScore: raw.performanceScore ?? undefined,
         lighthouseVersion: raw.lighthouseVersion ?? undefined,
         fetchTime: raw.fetchTime ?? undefined,
+        testEnvironment: raw.testEnvironment ?? undefined,
     };
 }
 

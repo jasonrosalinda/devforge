@@ -2,9 +2,9 @@ import { PageSpeedResults, type PageSpeedResultsHandle } from "@/components/page
 import { useCallback, useEffect, useRef, useState } from "react";
 import PageSpeedConfig from "@/components/pagespeed/pagespeed-config";
 import PageSpeedHistoryDropdown from "@/components/pagespeed/pagespeed-history-dropdown";
-import { type PageSpeedConfiguration } from "@shared/types/pageSpeedInsight.types";
+import { type PageSpeedConfiguration, type PageSpeedStrategy } from "@shared/types/pageSpeedInsight.types";
 import type { AttributionResult, GitRefResolution } from "@shared/types/electron";
-import { defaultPageSpeedConfiguration } from "@/lib/pageSpeedUtils";
+import { defaultPageSpeedConfiguration, describePageSpeedTestEnvironment } from "@/lib/pageSpeedUtils";
 import {
     loadHistory,
     saveSnapshot,
@@ -454,9 +454,9 @@ export default function PageSpeedResultPage() {
             { show: desktopConfig.showFCP, label: 'FCP', key: 'firstContentfulPaint' as MetricKey },
         ]).filter(m => m.show);
 
-        const strategies: { label: string; bundle: ResultsBundle }[] = [
-            { label: 'DESKTOP', bundle: desktop },
-            { label: 'MOBILE', bundle: mobile },
+        const strategies: { label: string; strategy: PageSpeedStrategy; bundle: ResultsBundle }[] = [
+            { label: 'DESKTOP', strategy: 'desktop', bundle: desktop },
+            { label: 'MOBILE', strategy: 'mobile', bundle: mobile },
         ];
         // A comparison run can be presented as one side only. `bothColumns` is what the
         // two-column layout and the % row hang off; `soloAfter` says which run the single
@@ -585,7 +585,15 @@ export default function PageSpeedResultPage() {
             deepDiveMd ? `## ${deepDiveTitle}\n\n${deepDiveMd}` : '',
         ].filter(Boolean).join('\n\n');
         const reportsHtml = reportsMd ? `<br/>${marked.parse(reportsMd, { async: false }) as string}` : '';
-        const html = `<table style="border-collapse:collapse;table-layout:fixed;width:${tableWidth}px;font-family:Segoe UI,Arial,sans-serif">${colgroup}${headerRows}${bodyRows.join('')}</table>${reportsHtml}`;
+        // Throttling/emulation PSI used, so a reader knows what the numbers were measured on.
+        // Only strategies that actually ran - an empty one would just repeat the presets.
+        const envLines = strategies
+            .filter(s => [...s.bundle.results1, ...s.bundle.results2].some(Boolean))
+            .map(s => `${s.label === 'DESKTOP' ? 'Desktop' : 'Mobile'}: ${describePageSpeedTestEnvironment(s.strategy, [...s.bundle.results1, ...s.bundle.results2]).summary}`);
+        const envHtml = envLines.length
+            ? `<p style="margin:4px 0 0;font-family:Segoe UI,Arial,sans-serif;font-size:10px;color:#666">${envLines.join('<br/>')}</p>`
+            : '';
+        const html = `<table style="border-collapse:collapse;table-layout:fixed;width:${tableWidth}px;font-family:Segoe UI,Arial,sans-serif">${colgroup}${headerRows}${bodyRows.join('')}</table>${envHtml}${reportsHtml}`;
 
         const plain = desktopConfig.urls.map((url, i) => {
             const parts = strategies.map(s => {
@@ -597,7 +605,7 @@ export default function PageSpeedResultPage() {
                 return `${s.label}: ${metrics}`;
             }).join(' | ');
             return `${url}: ${parts}`;
-        }).join('\n') + (reportsMd ? `\n\n${reportsMd}` : '');
+        }).join('\n') + (envLines.length ? `\n\n${envLines.join('\n')}` : '') + (reportsMd ? `\n\n${reportsMd}` : '');
 
         const copy = navigator.clipboard.write([
             new ClipboardItem({
@@ -624,7 +632,7 @@ export default function PageSpeedResultPage() {
             <PageHeader
                 icon={Gauge}
                 title="PageSpeed"
-                subtitle="Run Lighthouse / PageSpeed Insights audits across desktop and mobile — 1-10 runs per URL, averaged or median, with optional branch comparison."
+                subtitle="Run PageSpeed Insights API audits across desktop and mobile — 1-10 runs per URL, averaged or median, with optional branch comparison. Each run is a cold load with cache and storage cleared."
             />
             {!settingsLoading && isNullOrEmpty(apiKey) && (
                 <div className="mb-4 flex items-start gap-2 rounded-md border border-warning/35 bg-warning/10 px-4 py-3 text-sm text-foreground">

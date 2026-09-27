@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PageSpeedConfiguration, PageSpeedInsightResult, PageSpeedMetrics } from '@shared/types/pageSpeedInsight.types';
-import { allRunsFailed, compareRunToBaseline, defaultPageSpeedConfiguration, displayPageSpeedAudit, improvementPercent, findUnwinnableMetrics, resultHasError, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
+import { allRunsFailed, compareRunToBaseline, defaultPageSpeedConfiguration, describePageSpeedTestEnvironment, displayPageSpeedAudit, improvementPercent, findUnwinnableMetrics, resultHasError, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
 
 const ALL: ComparableMetricKey[] = [
     'speedIndex', 'largestContentfulPaint', 'cumulativeLayoutShift', 'totalBlockingTime', 'firstContentfulPaint',
@@ -312,5 +312,50 @@ describe('displayPageSpeedAudit', () => {
 
     it('still honours showImprovement being off', () => {
         expect(displayPageSpeedAudit(cfg({ showImprovement: false })).improvement).toBe(false);
+    });
+});
+
+// PSI calibrates the mobile CPU slowdown to each host, so the header must read it
+// from finished runs rather than assume Lighthouse's 4x default.
+describe('describePageSpeedTestEnvironment', () => {
+    const mobileEnv = (cpuSlowdownMultiplier: number, benchmarkIndex: number) => ({
+        rttMs: 150, throughputKbps: 1638.4, cpuSlowdownMultiplier, benchmarkIndex,
+        screenWidth: 412, screenHeight: 823, deviceScaleFactor: 1.75,
+    });
+
+    it('falls back to the presets before any run, without guessing the mobile CPU slowdown', () => {
+        const { summary } = describePageSpeedTestEnvironment('mobile', []);
+        expect(summary).toBe('Emulated Moto G Power · Slow 4G (150 ms RTT, 1.6 Mbps) · CPU slowdown set per host');
+        expect(describePageSpeedTestEnvironment('desktop', [null]).summary)
+            .toBe('Emulated Desktop · Custom throttling (40 ms RTT, 10 Mbps) · no CPU slowdown');
+    });
+
+    it('reports the CPU slowdown and host benchmark a run actually used', () => {
+        const r = { ...run(), testEnvironment: mobileEnv(1.2, 157) };
+        const { summary, detail } = describePageSpeedTestEnvironment('mobile', [r]);
+        expect(summary).toContain('1.2x CPU slowdown');
+        expect(detail).toContain('Host CPU/memory power (unthrottled): 157');
+    });
+
+    it('keeps the presets for fields the v5 API leaves out of configSettings', () => {
+        const r = { ...run(), testEnvironment: { benchmarkIndex: 157 } };
+        const { summary, detail } = describePageSpeedTestEnvironment('mobile', [r]);
+        expect(summary).toBe('Emulated Moto G Power · Slow 4G (150 ms RTT, 1.6 Mbps) · CPU slowdown set per host');
+        expect(detail).toContain('Screen 412×823 at 1.75x DPR');
+        expect(detail).toContain('Host CPU/memory power (unthrottled): 157');
+        expect(detail).not.toContain('?');
+    });
+
+    it('shows a range when runs landed on different hosts', () => {
+        const agg = {
+            ...run(),
+            runHistory: [
+                { ...run(), testEnvironment: mobileEnv(1.1, 170) },
+                { ...run(), testEnvironment: mobileEnv(1.3, 140) },
+            ],
+        };
+        const { summary, detail } = describePageSpeedTestEnvironment('mobile', [agg, false]);
+        expect(summary).toContain('1.1–1.3x CPU slowdown');
+        expect(detail).toContain('140–170');
     });
 });

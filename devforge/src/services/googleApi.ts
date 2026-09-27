@@ -53,6 +53,15 @@ class GoogleApiService {
             performanceScore: Math.round((data.lighthouseResult?.categories?.performance?.score ?? 0) * 100),
             lighthouseVersion: data.lighthouseResult?.lighthouseVersion,
             fetchTime: data.lighthouseResult?.fetchTime,
+            testEnvironment: {
+              rttMs: data.lighthouseResult?.configSettings?.throttling?.rttMs,
+              throughputKbps: data.lighthouseResult?.configSettings?.throttling?.throughputKbps,
+              cpuSlowdownMultiplier: data.lighthouseResult?.configSettings?.throttling?.cpuSlowdownMultiplier,
+              benchmarkIndex: data.lighthouseResult?.environment?.benchmarkIndex,
+              screenWidth: data.lighthouseResult?.configSettings?.screenEmulation?.width,
+              screenHeight: data.lighthouseResult?.configSettings?.screenEmulation?.height,
+              deviceScaleFactor: data.lighthouseResult?.configSettings?.screenEmulation?.deviceScaleFactor,
+            },
           }
         );
         results.push(result);

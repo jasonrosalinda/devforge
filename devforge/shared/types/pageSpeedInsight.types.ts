@@ -67,6 +67,20 @@ export interface PageSpeedInsightResult {
     performanceScore?: number | undefined;
     lighthouseVersion?: string | undefined;
     fetchTime?: string | undefined;
+    testEnvironment?: PageSpeedTestEnvironment | undefined;
+}
+
+/** Throttling and emulation Lighthouse actually applied on the PSI host for one run. */
+export interface PageSpeedTestEnvironment {
+    rttMs?: number | undefined;
+    throughputKbps?: number | undefined;
+    /** Scaled by PSI to the host's benchmark, so it varies between runs. */
+    cpuSlowdownMultiplier?: number | undefined;
+    /** "Unthrottled CPU/Memory Power" in the PSI report. */
+    benchmarkIndex?: number | undefined;
+    screenWidth?: number | undefined;
+    screenHeight?: number | undefined;
+    deviceScaleFactor?: number | undefined;
 }
 
 export type PageSpeedStrategy = "mobile" | "desktop";
@@ -118,6 +132,15 @@ export interface PageSpeedApiResponse {
         fetchTime?: string;
         categories?: {
             performance?: { score?: number };
+        };
+        // The v5 API currently trims configSettings to form factor/locale; throttling and
+        // screenEmulation are read in case it returns them, with presets filling the gap.
+        configSettings?: {
+            throttling?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number };
+            screenEmulation?: { width?: number; height?: number; deviceScaleFactor?: number };
+        };
+        environment?: {
+            benchmarkIndex?: number;
         };
     };
 }

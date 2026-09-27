@@ -35,7 +35,7 @@ export const pages: Page[] = [
         url: "#",
         icon: Gauge,
         component: PageSpeedResultPage,
-        description: "Lighthouse audits across desktop and mobile, with branch comparison",
+        description: "PageSpeed Insights API audits across desktop and mobile, with branch comparison",
         group: "Web quality"
     },
     {

@@ -1,4 +1,4 @@
-import type { PageSpeedAuditDisplay, PageSpeedConfiguration, PageSpeedInsightResult, PageSpeedInsightResultMessage, PageSpeedMetrics, PageSpeedStrategy } from "@shared/types/pageSpeedInsight.types";
+import type { PageSpeedAuditDisplay, PageSpeedConfiguration, PageSpeedInsightResult, PageSpeedInsightResultMessage, PageSpeedMetrics, PageSpeedStrategy, PageSpeedTestEnvironment } from "@shared/types/pageSpeedInsight.types";
 import { emptyPageSpeedErrorResponse, emptyPageSpeedMetrics } from "@shared/utils/pageSpeedAuditParser";
 
 export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): PageSpeedConfiguration {
@@ -23,6 +23,66 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         showFCP: true,
         showWarnings: false,
     };
+}
+
+/**
+ * PSI's fixed per-strategy presets. The v5 API trims `configSettings` down to form
+ * factor and locale, so these fill any field a run did not report. The CPU slowdown
+ * is left out for mobile: PSI calibrates it to each host, and the API does not say
+ * what it picked.
+ */
+const PAGESPEED_TEST_PRESETS: Record<PageSpeedStrategy, { device: string; network: string } & PageSpeedTestEnvironment> = {
+    mobile: { device: 'Emulated Moto G Power', network: 'Slow 4G', rttMs: 150, throughputKbps: 1638.4, screenWidth: 412, screenHeight: 823, deviceScaleFactor: 1.75 },
+    desktop: { device: 'Emulated Desktop', network: 'Custom throttling', rttMs: 40, throughputKbps: 10240, cpuSlowdownMultiplier: 1, screenWidth: 1350, screenHeight: 940, deviceScaleFactor: 1 },
+};
+
+/** "1.2" for one value, "1.1–1.3" when runs differ; undefined when none reported. */
+function formatRange(values: (number | undefined)[], digits: number): string | undefined {
+    const nums = values.filter((v): v is number => typeof v === 'number');
+    if (!nums.length) return undefined;
+    const fmt = (n: number) => String(Number(n.toFixed(digits)));
+    const lo = fmt(Math.min(...nums)), hi = fmt(Math.max(...nums));
+    return lo === hi ? lo : `${lo}–${hi}`;
+}
+
+/**
+ * Header label for the throttling and emulation PSI used. Reads every finished run
+ * (including each URL's `runHistory`), falling back to the preset per field.
+ */
+export function describePageSpeedTestEnvironment(
+    strategy: PageSpeedStrategy,
+    results: (PageSpeedInsightResult | null | false | undefined)[],
+): { summary: string; detail: string } {
+    const preset = PAGESPEED_TEST_PRESETS[strategy];
+    const envs = results
+        .flatMap(r => (r ? (r.runHistory?.length ? r.runHistory : [r]) : []))
+        .map(r => r.testEnvironment)
+        .filter((e): e is PageSpeedTestEnvironment => !!e);
+    const pick = <K extends keyof PageSpeedTestEnvironment>(key: K) => {
+        const reported = envs.map(e => e[key]).filter(v => v !== undefined);
+        return reported.length ? reported : [preset[key]];
+    };
+
+    const rtt = formatRange(pick('rttMs'), 0);
+    const mbps = formatRange(pick('throughputKbps').map(k => (k === undefined ? k : k / 1024)), 1);
+    const cpu = formatRange(pick('cpuSlowdownMultiplier'), 1);
+    const benchmark = formatRange(envs.map(e => e.benchmarkIndex), 0);
+    const width = formatRange(pick('screenWidth'), 0), height = formatRange(pick('screenHeight'), 0);
+    const dpr = formatRange(pick('deviceScaleFactor'), 2);
+
+    const network = `${preset.network} (${rtt ?? '?'} ms RTT, ${mbps ?? '?'} Mbps)`;
+    const cpuText = cpu === undefined ? 'CPU slowdown set per host' : cpu === '1' ? 'no CPU slowdown' : `${cpu}x CPU slowdown`;
+
+    const detail = [
+        `Simulated throttling on Google's servers: ${rtt ?? '?'} ms round trip, ${mbps ?? '?'} Mbps throughput, ${cpuText}.`,
+        width && height ? `Screen ${width}×${height} at ${dpr ?? '?'}x DPR.` : '',
+        benchmark
+            ? `Host CPU/memory power (unthrottled): ${benchmark}. PSI scales the CPU slowdown to this, so it can differ between runs.`
+            : cpu === undefined ? 'PSI scales the CPU slowdown to each host and the API does not report it; the PageSpeed Insights site shows it per report.' : '',
+        'Cold load with cache and storage cleared.',
+    ].filter(Boolean).join(' ');
+
+    return { summary: `${preset.device} · ${network} · ${cpuText}`, detail };
 }
 
 export function defaultPageSpeedResult(url: string): PageSpeedInsightResult {
@@ -267,6 +327,7 @@ export function aggregatePageSpeedInsightResults(
         result.performanceScore = lastGood.performanceScore;
         result.lighthouseVersion = lastGood.lighthouseVersion;
         result.fetchTime = lastGood.fetchTime;
+        result.testEnvironment = lastGood.testEnvironment;
     }
 
     return result;
