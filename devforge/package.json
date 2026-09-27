@@ -42,6 +42,7 @@
     "clsx": "^2.1.1",
     "electron-updater": "^6.8.3",
     "html2canvas": "^1.4.1",
+    "imagetracerjs": "^1.2.6",
     "lucide-react": "^0.562.0",
     "marked": "^18.0.4",
     "next-themes": "^0.4.6",
