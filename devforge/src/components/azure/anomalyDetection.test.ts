@@ -179,6 +179,29 @@ describe('detectCorrelatedAnomalies', () => {
     expect(rows[0]).toMatchObject({ severity: 'Warning', signalsFiring: 2 });
   });
 
+  it('ignores a one-point DB Memory step riding along a real DB CPU spike', () => {
+    // prdmedudb, 29 Sept 01:37Z: DB CPU jumped to 62% for one bucket while DB Memory
+    // stepped 57.6% -> 58.7%. That step scores z≈17 against a flat series, but a
+    // one-point move is not memory pressure — and DB CPU alone is not an episode.
+    // The step sits at the trailing edge, where the background monitor sees it.
+    const at = 57;
+    const wobble = (base: number) => Array.from({ length: 60 }, (_, i) => base + (i % 3) * 0.02);
+    const dbCpuVals = wobble(1.2); dbCpuVals[at] = 62;
+    const dbMemVals = wobble(57.6).map((v, i) => (i >= at ? v + 1.1 : v));
+    const cpu = series(wobble(10));
+    const metrics = { cpu, memory: series(wobble(36)), dbCpu: series(dbCpuVals), dbMemory: series(dbMemVals) } as unknown as AppMetrics;
+    expect(robustAnomalyFlags(dbMemVals, 5.0).flags[at]).toBe(1);
+    expect(detectCorrelatedAnomalies(cpu, buildExtras(metrics))).toHaveLength(0);
+  });
+
+  it('still flags a real memory jump alongside CPU', () => {
+    const cpu = series(flatWithSpike(20, 20, spikeIndex, 85));
+    const metrics = { cpu, memory: series(flatWithSpike(20, 36, spikeIndex, 60)) } as unknown as AppMetrics;
+    const rows = detectCorrelatedAnomalies(cpu, buildExtras(metrics));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ severity: 'Warning', signalsFiring: 2 });
+  });
+
   it('4xx never drives severity on its own, only the incident-type hint', () => {
     const cpu = series(flat(20, 50));
     const extras = [extra('FE 4xx', flatWithSpike(20, 2, spikeIndex, 40), 3.0)];

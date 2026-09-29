@@ -39,16 +39,18 @@ const DEFAULT_MIN_SAMPLES = 10;
  *  average. Without it a near-idle metric flags noise — CPU averaging 1.8% has so
  *  little spread that 2.3% scores as a spike, and two such blips make a Warning. */
 export interface SpikeFloor { minPct: number; minRise: number }
-/** CPU and DB CPU only. Memory and DB Memory are left floor-free on purpose (see
- *  ROBUST_STDEV_EPSILON): they sit flat, and their far higher sensitivities
- *  already demand a large deviation. Error rates are not percent-of-capacity, so a
- *  capacity floor has no meaning for them. */
+/** Error rates get none: they are not percent-of-capacity, so a capacity floor has
+ *  no meaning for them. */
 export const CPU_SPIKE_FLOOR: SpikeFloor = { minPct: 50, minRise: 20 };
 export const DB_CPU_SPIKE_FLOOR: SpikeFloor = CPU_SPIKE_FLOOR;
-// A relative floor here would risk suppressing exactly the case that matters most:
-// a metric that barely moves (memory flat at 34-39%) still deserves to fire on the
-// rare bucket that's genuinely different. An absolute floor near machine epsilon
-// only guards against literal divide-by-zero on a perfectly flat/linear series.
+/** Memory and DB Memory sit so flat that their high sensitivities are no guard on
+ *  their own: SQL memory holding ~57.6% scored a one-point step to 58.7% at z≈17.
+ *  That step came with the query behind a DB CPU spike, and the pair made a
+ *  Warning no one could see on the chart. 80% is the card's own memory warning
+ *  line (status.ts). Memory reported in MB always clears `minPct`, so for those
+ *  apps the floor does nothing. */
+export const MEMORY_SPIKE_FLOOR: SpikeFloor = { minPct: 80, minRise: 10 };
+// Guards only against literal divide-by-zero on a perfectly flat/linear series.
 const ROBUST_STDEV_EPSILON = 1e-9;
 const MAD_TO_STDEV = 1.4826;
 
@@ -488,9 +490,9 @@ export function buildExtras(m: AppMetrics): NamedMetricInput[] {
   const feOverall = m.requestInsights?.performance?.overallSeries;
   const apiOverall = m.apiRequestInsights?.performance?.overallSeries;
   return [
-    { name: 'Memory', series: m.memory.series, sensitivity: MEMORY_SENSITIVITY },
+    { name: 'Memory', series: m.memory.series, sensitivity: MEMORY_SENSITIVITY, floor: MEMORY_SPIKE_FLOOR },
     { name: 'DB CPU', series: m.dbCpu?.series, sensitivity: DB_CPU_SENSITIVITY, floor: DB_CPU_SPIKE_FLOOR },
-    { name: 'DB Memory', series: m.dbMemory?.series, sensitivity: DB_MEMORY_SENSITIVITY },
+    { name: 'DB Memory', series: m.dbMemory?.series, sensitivity: DB_MEMORY_SENSITIVITY, floor: MEMORY_SPIKE_FLOOR },
     { name: 'FE 4xx', series: errorRateSeries(feOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY },
     { name: 'FE 5xx', series: errorRateSeries(feOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY },
     { name: 'API 4xx', series: errorRateSeries(apiOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY },
