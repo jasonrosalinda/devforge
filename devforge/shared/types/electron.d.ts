@@ -153,10 +153,13 @@ export interface IElectronAPI {
     backgroundMonitor: {
         /** Create (true) or tear down (false) the tray and worker. Idempotent. */
         setEnabled(enabled: boolean): Promise<void>;
-        /** Raise a tray balloon. Called by the worker. */
+        /** Raise a desktop notification. Called by the worker. */
         alert(opts: { title: string; body: string }): Promise<void>;
         /** Tray menu → Check now. Returns an unsubscribe. */
         onCheckNow(cb: () => void): () => void;
+        /** An alert was clicked: open App Health Check reloaded to now. Main window only.
+         *  Returns an unsubscribe. */
+        onOpenHealthCheck(cb: () => void): () => void;
     };
 
     // ipapi.is — bot/crawler/datacenter reputation lookup (proxied through main)

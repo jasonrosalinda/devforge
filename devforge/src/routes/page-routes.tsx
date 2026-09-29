@@ -11,6 +11,7 @@ import { createToolboxToolPage } from "@/pages/toolboxToolPage";
 import { TOOLBOX_TOOLS } from "@/components/toolbox/toolbox-registry";
 
 export const HOME_PAGE = "Home";
+export const HEALTH_CHECK_PAGE = "App Health Check";
 
 /** Sidebar section order. */
 export const PAGE_GROUPS: PageGroup[] = ["Monitoring", "Web quality", "Release", "Utilities"];
@@ -23,7 +24,7 @@ export const pages: Page[] = [
         component: HomePage
     },
     {
-        title: "App Health Check",
+        title: HEALTH_CHECK_PAGE,
         url: "#",
         icon: Activity,
         component: AppHealthCheckPage,

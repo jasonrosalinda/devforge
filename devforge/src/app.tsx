@@ -11,7 +11,9 @@ import { ReleaseNotesModal } from "@/components/release-notes/release-notes-moda
 import { UpdateIndicator } from "@/components/updater/update-indicator";
 import { cn } from "@/lib/utils";
 
-import { HOME_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
+import { requestHealthCheckReload } from "@/lib/health-check-reload";
+
+import { HEALTH_CHECK_PAGE, HOME_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
 import { AppHeader } from "./components/layout/app-header";
 import { AppSidebar } from "./components/layout/app-sidebar";
 import { PageTabs, panelId, tabId } from "./components/layout/page-tabs";
@@ -35,6 +37,13 @@ export default function App() {
     focusPanelRef.current = true;
     open(title);
   }, [open]);
+
+  // A clicked tray alert: show App Health Check reloaded to now. The request goes
+  // first so a tab that mounts from this open still picks it up.
+  useEffect(() => window.electronAPI?.backgroundMonitor?.onOpenHealthCheck(() => {
+    requestHealthCheckReload();
+    openPage(HEALTH_CHECK_PAGE);
+  }), [openPage]);
 
   useEffect(() => {
     if (!focusPanelRef.current) return;

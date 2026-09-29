@@ -11,6 +11,7 @@ import { LazyMount } from '@/components/azure/lazyMount';
 import { ControlBar } from '@/components/app-health-check/controlBar';
 import { NotConfiguredBanner, StatusLegend } from '@/components/app-health-check/banners';
 import { C, granularityMs, nowDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
+import { onHealthCheckReload } from '@/lib/health-check-reload';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -170,13 +171,13 @@ export default function AppHealthCheckPage() {
     return out;
   }, [endpointDeps]);
 
-  const runFetch = useCallback((end: string) => {
-    const isoStart = new Date(startDt).toISOString();
+  const runFetch = useCallback((start: string, end: string) => {
+    const isoStart = new Date(start).toISOString();
     const isoEnd   = new Date(end).toISOString();
     setCommittedStart(isoStart);
     setCommittedEnd(isoEnd);
     fetchMetrics(effectiveSelected, 'custom', settings.azure, isoStart, isoEnd, granularity);
-  }, [fetchMetrics, effectiveSelected, startDt, settings.azure, granularity]);
+  }, [fetchMetrics, effectiveSelected, settings.azure, granularity]);
 
   const notConfigured = !settingsLoading && (!settings.azure.subscriptionId || allAppKeys.length === 0);
   const fetchDisabled = loading || credStatus !== 'ok' || effectiveSelected.length === 0 || notConfigured || !startDt || !endDt;
@@ -185,12 +186,26 @@ export default function AppHealthCheckPage() {
   const fetchToNow = useCallback(() => {
     const end = nowDt();
     setEndDt(end);
-    runFetch(end);
-  }, [runFetch]);
+    runFetch(startDt, end);
+  }, [runFetch, startDt]);
   const handleFetch = useCallback(
-    () => (autoReload ? fetchToNow() : runFetch(endDt)),
-    [autoReload, fetchToNow, runFetch, endDt],
+    () => (autoReload ? fetchToNow() : runFetch(startDt, endDt)),
+    [autoReload, fetchToNow, runFetch, startDt, endDt],
   );
+
+  // A clicked tray alert asks for today up to now. On a freshly opened tab the request
+  // waits here until the credential check and settings let a fetch through.
+  const [reloadRequested, setReloadRequested] = useState(false);
+  useEffect(() => onHealthCheckReload(() => setReloadRequested(true)), []);
+  useEffect(() => {
+    if (!reloadRequested || fetchDisabled) return;
+    setReloadRequested(false);
+    const start = toDatetimeLocal(todayMidnight());
+    const end = nowDt();
+    setStartDt(start);
+    setEndDt(end);
+    runFetch(start, end);
+  }, [reloadRequested, fetchDisabled, runFetch]);
 
   // Refs so the timer reads the latest apps / start / credentials without being
   // restarted by them — only turning it on or changing the interval resets the clock.

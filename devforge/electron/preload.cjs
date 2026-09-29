@@ -90,6 +90,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.on('monitor:check-now', fn);
             return () => ipcRenderer.removeListener('monitor:check-now', fn);
         },
+        onOpenHealthCheck: (cb) => {
+            const fn = () => cb();
+            ipcRenderer.on('monitor:open-health-check', fn);
+            return () => ipcRenderer.removeListener('monitor:open-health-check', fn);
+        },
     },
 
     confluence: {
