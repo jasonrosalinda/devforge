@@ -15,7 +15,11 @@ function getCached(cacheKey) {
 }
 
 function setCached(cacheKey, data) {
-  _fetchCache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL });
+  // Keys carry the exact range, so an entry is rarely read twice; without this sweep
+  // every fetch left its full payload behind for as long as the app ran.
+  const now = Date.now();
+  for (const [k, h] of _fetchCache) if (now >= h.expiresAt) _fetchCache.delete(k);
+  _fetchCache.set(cacheKey, { data, expiresAt: now + CACHE_TTL });
 }
 
 // ─── Granularity / Duration maps ─────────────────────────────────────────────
@@ -171,6 +175,37 @@ function sqlDbResourceId(subscriptionId, app) {
 async function getToken(credential) {
   const tokenResp = await credential.getToken('https://management.azure.com/.default');
   return tokenResp.token;
+}
+
+// Refetch this long before expiry, so a token never lapses mid-fetch.
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * A TokenCredential that keeps each scope's token until close to expiry. Every
+ * handler used to build a fresh DefaultAzureCredential, and the Azure CLI credential
+ * underneath starts an `az` process (~1s) per getToken — several per app per fetch,
+ * every minute with the background monitor on. Concurrent callers share one request;
+ * a failure is not kept, so the next call tries again.
+ */
+function createCachingCredential(inner) {
+  const tokens = new Map();
+  return {
+    getToken(scopes, options) {
+      // MetricsQueryClient asks for "https://management.azure.com//.default" — the same
+      // resource as the single-slash form the handlers use.
+      const key = [].concat(scopes).map(s => s.replace(/\/+\.default$/, '/.default')).join(' ');
+      const hit = tokens.get(key);
+      if (hit && (hit.pending || hit.expiresOn - Date.now() > TOKEN_REFRESH_MARGIN_MS)) return hit.promise;
+      const promise = Promise.resolve(inner.getToken(scopes, options));
+      const entry = { promise, pending: true, expiresOn: 0 };
+      tokens.set(key, entry);
+      promise.then(
+        (t) => { entry.pending = false; entry.expiresOn = t?.expiresOnTimestamp ?? 0; },
+        () => { if (tokens.get(key) === entry) tokens.delete(key); },
+      );
+      return promise;
+    },
+  };
 }
 
 function buildTimespan(range, customStart, customEnd) {
@@ -412,16 +447,32 @@ async function getInstanceProbeSeries(client, resId, range, granularity, customS
 }
 
 
+function toCountSeries(data) {
+  return data.map(d => ({
+    t: d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp),
+    count: Math.round(d.total ?? 0),
+  }));
+}
+
 async function queryCountSeries(client, resId, metricName, range, granularity, customStart, customEnd) {
   try {
     const ts = buildTimespan(range, customStart, customEnd);
     const result = await client.queryResource(resId, [metricName], { timespan: ts, granularity, aggregations: ['Total'] });
-    const data = result.metrics[0]?.timeseries?.[0]?.data || [];
-    return data.map(d => ({
-      t: d.timeStamp instanceof Date ? d.timeStamp.toISOString() : String(d.timeStamp),
-      count: Math.round(d.total ?? 0),
-    }));
+    return toCountSeries(result.metrics[0]?.timeseries?.[0]?.data || []);
   } catch { return null; }
+}
+
+/** App Insights per-instance failures summed per minute, preferred over Azure
+ *  Monitor's Http5xx series (`fallback`) when there are any. */
+function sumFailedByMinute(aiFailedByInstance, fallback) {
+  if (!aiFailedByInstance || !aiFailedByInstance.length) return fallback;
+  const byMinute = new Map();
+  for (const row of aiFailedByInstance) {
+    byMinute.set(row.t, (byMinute.get(row.t) ?? 0) + row.count);
+  }
+  return Array.from(byMinute.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([t, count]) => ({ t, count }));
 }
 
 async function queryFailedRequestsSeries(client, resId, range, granularity, customStart, customEnd) {
@@ -1648,19 +1699,7 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
     hasDb ? queryMetric(client, dbResId, 'sql_instance_memory_percent', range, gran, customStart, customEnd).catch(() => null) : Promise.resolve(null),
   ]);
 
-  // Collapse aiFailedByInstance into {t, count}[] — sum across instances per minute bucket
-  // Prefer App Insights (1-min resolution, per-instance) over Azure Monitor Http5xx when available
-  const effectiveFailedSeries = (() => {
-    if (!aiFailedByInstance || !aiFailedByInstance.length) return failedRequestsSeries;
-    const byMinute = new Map();
-    for (const row of aiFailedByInstance) {
-      const existing = byMinute.get(row.t) ?? 0;
-      byMinute.set(row.t, existing + row.count);
-    }
-    return Array.from(byMinute.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([t, count]) => ({ t, count }));
-  })();
+  const effectiveFailedSeries = sumFailedByMinute(aiFailedByInstance, failedRequestsSeries);
 
   // Azure Monitor Requests/Http5xx per-instance gives real request health %.
   // Falls back to App Insights KQL if Azure Monitor returns nothing, then null.
@@ -1845,6 +1884,91 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
   };
 }
 
+// ─── Background monitor fetch ─────────────────────────────────────────────────
+
+// The plan and the App Insights component don't change minute to minute, so the
+// monitor looks them up once an hour instead of on every check. A null is kept only
+// with `keepNull`: "this app has no App Insights" is an answer worth keeping, a plan
+// lookup that failed is not.
+const LOOKUP_TTL = 60 * 60 * 1000;
+const _lookupCache = new Map();
+
+async function cachedLookup(key, fn, { keepNull = false } = {}) {
+  const hit = _lookupCache.get(key);
+  if (hit && Date.now() < hit.expiresAt) return hit.value;
+  const value = await fn();
+  if (value != null || keepNull) _lookupCache.set(key, { value, expiresAt: Date.now() + LOOKUP_TTL });
+  return value;
+}
+
+/** One query for several metrics of one resource → each metric's data points by name. */
+async function queryMetricsByName(client, resId, names, timespan, granularity, aggregations) {
+  const result = await client.queryResource(resId, names, { timespan, granularity, aggregations });
+  const out = {};
+  for (const name of names) {
+    const metric = result.metrics.find(m => m.name === name);
+    out[name] = metric?.timeseries?.[0]?.data || [];
+  }
+  return out;
+}
+
+/**
+ * Only what the background monitor's alerts read (src/monitor/healthAlerts.ts):
+ * CPU and memory for status and anomalies, DB CPU and memory, and requests + 5xx for
+ * the 5xx rule. Each resource's metrics come back from one batched query, so an App
+ * Service costs 3-4 calls a check instead of the 20-35 `fetchAppMetrics` makes for
+ * the page. The series are built with the same helpers the page uses, so an alert
+ * and the page agree on the numbers. Container Apps take the full fetch.
+ */
+async function fetchMonitorMetrics(client, token, credential, app, subscriptionId, customStart, customEnd) {
+  const gran = 'PT1M';
+  if (app.type !== 'appservice') {
+    return fetchAppMetrics(client, token, credential, app, subscriptionId, 'custom', customStart, customEnd, gran);
+  }
+  const resId = resourceId(subscriptionId, app);
+  const hasDb = !!(app.dbName && app.dbServerName);
+  const timespan = buildTimespan('custom', customStart, customEnd);
+
+  const [plan, aiAppId] = await Promise.all([
+    cachedLookup(`plan:${resId}`, () => getPlanInfo(token, resId).catch(() => null)),
+    app.appInsightsAppId
+      || cachedLookup(`ai:${resId}`, () => findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name), { keepNull: true }),
+  ]);
+  const metricsResId = plan?.farmId || resId;
+
+  const [planData, siteData, dbData, aiFailedByInstance] = await Promise.all([
+    // No catch: without CPU there is nothing to check, so this fails the check.
+    queryMetricsByName(client, metricsResId, ['CpuPercentage', 'MemoryPercentage'], timespan, gran, ['Average', 'Maximum']),
+    queryMetricsByName(client, resId, ['Requests', 'Http5xx'], timespan, gran, ['Total']).catch(() => null),
+    hasDb
+      ? queryMetricsByName(client, sqlDbResourceId(subscriptionId, app), ['cpu_percent', 'sql_instance_memory_percent'], timespan, gran, ['Average', 'Maximum']).catch(() => null)
+      : Promise.resolve(null),
+    aiAppId ? getFailedRequestsByInstance(aiAppId, credential, 'custom', customStart, customEnd).catch(() => null) : Promise.resolve(null),
+  ]);
+
+  let memory = summarize(planData.MemoryPercentage);
+  let memUnit = '%';
+  if (!memory.series.length) {
+    memory = await queryMetric(client, resId, 'MemoryWorkingSet', 'custom', gran, customStart, customEnd, 1024 * 1024);
+    memUnit = 'MB';
+  }
+
+  return {
+    label: app.name,
+    type: app.type,
+    cpu: summarize(planData.CpuPercentage),
+    memory,
+    cpuUnit: '%',
+    memUnit,
+    dbCpu: dbData ? summarize(dbData.cpu_percent) : null,
+    dbMemory: dbData ? summarize(dbData.sql_instance_memory_percent) : null,
+    plan,
+    requestsSeries: siteData ? toCountSeries(siteData.Requests) : null,
+    failedRequestsSeries: sumFailedByMinute(aiFailedByInstance, siteData ? toCountSeries(siteData.Http5xx) : null),
+    appInsightsConfigured: !!aiAppId,
+  };
+}
+
 // ─── On-demand detail fetch ───────────────────────────────────────────────────
 
 /**
@@ -1996,7 +2120,20 @@ const handler = (_mainWindow) => {
   const { DefaultAzureCredential } = require('@azure/identity');
   const { MetricsQueryClient } = require('@azure/monitor-query');
 
+  // One credential and metrics client for every handler below, so tokens are reused
+  // across fetches (see createCachingCredential). Re-check drops them, so a new
+  // `az login` takes effect straight away rather than when the old token expires.
+  let shared = null;
+  const sharedAzure = () => {
+    if (!shared) {
+      const cred = createCachingCredential(new DefaultAzureCredential());
+      shared = { cred, client: new MetricsQueryClient(cred) };
+    }
+    return shared;
+  };
+
   ipcMain.handle('azure-metrics:check-credential', async () => {
+    shared = null;
     const { AzureCliCredential } = require('@azure/identity');
     const scope = 'https://management.azure.com/.default';
     const withTimeout = (promise, ms, label) =>
@@ -2028,8 +2165,7 @@ const handler = (_mainWindow) => {
       return { _error: 'No Azure configuration. Open Settings and configure your subscription and apps.' };
     }
 
-    const cred = new DefaultAzureCredential();
-    const client = new MetricsQueryClient(cred);
+    const { cred, client } = sharedAzure();
     const token = await getToken(cred);
 
     const appsMap = Object.fromEntries(config.apps.map(a => [a.name, a]));
@@ -2083,6 +2219,26 @@ const handler = (_mainWindow) => {
     return results;
   });
 
+  // The background monitor's check: fetchMonitorMetrics per app, no partial events
+  // and no result cache (the window moves every minute, so nothing would be reused).
+  // An app that fails comes back as { error }, like azure-metrics:fetch.
+  ipcMain.handle('azure-metrics:fetch-monitor', async (_event, { appKeys, config, customStart, customEnd }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { _error: 'No Azure configuration.' };
+    const { cred, client } = sharedAzure();
+    const token = await getToken(cred);
+    const results = {};
+    await Promise.all(appKeys.map(async (key) => {
+      const app = config.apps.find(a => a.name === key);
+      if (!app) { results[key] = { error: `App "${key}" not found in configuration.` }; return; }
+      try {
+        results[key] = await fetchMonitorMetrics(client, token, cred, app, config.subscriptionId, customStart, customEnd);
+      } catch (err) {
+        results[key] = { error: err.message || String(err) };
+      }
+    }));
+    return results;
+  });
+
   ipcMain.handle('azure-metrics:fetch-app-details', async (_event, { appKey, range, config, customStart, customEnd }) => {
     if (!config?.subscriptionId || !config?.apps?.length) return { error: 'No config' };
     const cacheKey = `${appKey}:details:${customStart ?? range}:${customEnd ?? ''}`;
@@ -2091,7 +2247,7 @@ const handler = (_mainWindow) => {
     const app = config.apps.find(a => a.name === appKey);
     if (!app) return { error: `App "${appKey}" not found` };
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       const result = await fetchAppDetailsData(app, config.subscriptionId, cred, range, customStart, customEnd);
       setCached(cacheKey, result);
       return result;
@@ -2130,7 +2286,7 @@ const handler = (_mainWindow) => {
     if (cached) return cached;
 
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       const token = await getToken(cred);
       const isAppService = app.type === 'appservice';
       const appId = site === 'api'
@@ -2170,7 +2326,7 @@ const handler = (_mainWindow) => {
     if (cached) return cached;
 
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       const token = await getToken(cred);
       const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
       const startIso = startTime.toISOString();
@@ -2233,7 +2389,7 @@ const handler = (_mainWindow) => {
     if (cached) return cached;
 
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       const token = await getToken(cred);
       const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
       const startIso = startTime.toISOString();
@@ -2279,7 +2435,7 @@ const handler = (_mainWindow) => {
     if (cached) return cached;
 
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       const token = await getToken(cred);
       const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
       const startIso = startTime.toISOString();
@@ -2316,7 +2472,7 @@ const handler = (_mainWindow) => {
     if (!appInsightsAppId) return { categories: [], error: 'No App Insights App ID' };
     let token;
     try {
-      const cred = new DefaultAzureCredential();
+      const { cred } = sharedAzure();
       token = (await cred.getToken('https://api.applicationinsights.io/.default')).token;
     } catch (e) { return { categories: [], error: `Token error: ${e.message}` }; }
 
@@ -2344,5 +2500,11 @@ const handler = (_mainWindow) => {
 handler._getGranularity = getGranularity;
 handler._summarize = summarize;
 handler._groupUrlSeries = groupUrlSeries;
+handler._createCachingCredential = createCachingCredential;
+handler._setCached = setCached;
+handler._cacheSize = () => _fetchCache.size;
+handler._fetchMonitorMetrics = fetchMonitorMetrics;
+handler._fetchAppMetrics = fetchAppMetrics;
+handler._clearLookups = () => _lookupCache.clear();
 
 module.exports = handler;

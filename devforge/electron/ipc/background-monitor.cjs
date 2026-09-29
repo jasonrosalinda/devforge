@@ -1,5 +1,5 @@
 const path = require('path');
-const { app, BrowserWindow, Tray, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain } = require('electron');
 
 // Background health monitor: a tray icon plus a hidden worker window.
 //
@@ -20,11 +20,38 @@ let quitting = false;
 let tray = null;
 let worker = null;
 
+// A garbage-collected Notification loses its click handler, and one sitting in
+// Action Center can be clicked long after it left the screen, so recent ones are
+// held. Capped so a monitor left running for days doesn't keep every alert alive.
+const MAX_HELD_NOTIFICATIONS = 20;
+const heldNotifications = [];
+
 function showMain(mainWindow) {
   if (mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+/** A clicked alert: bring the window up on App Health Check, reloaded to now. */
+function openHealthCheck(mainWindow) {
+  showMain(mainWindow);
+  if (!mainWindow.isDestroyed()) mainWindow.webContents.send('monitor:open-health-check');
+}
+
+function notify(mainWindow, title, body) {
+  // A tray balloon is the legacy notify-icon path, which Windows 10+ turns into a
+  // toast whose click is easily lost; a Notification is a toast with its own click
+  // event. The balloon stays as the fallback.
+  if (!Notification.isSupported()) {
+    tray.displayBalloon({ title, content: body, iconType: 'warning', respectQuietTime: true });
+    return;
+  }
+  const n = new Notification({ title, body, icon: ICON });
+  n.on('click', () => openHealthCheck(mainWindow));
+  heldNotifications.push(n);
+  if (heldNotifications.length > MAX_HELD_NOTIFICATIONS) heldNotifications.shift();
+  n.show();
 }
 
 /** monitor.html sits next to index.html in both the dev server and dist/, so it is
@@ -61,7 +88,7 @@ function createTray(mainWindow) {
     { label: 'Quit', click: () => { quitting = true; app.quit(); } },
   ]));
   tray.on('click', () => showMain(mainWindow));
-  tray.on('balloon-click', () => showMain(mainWindow));
+  tray.on('balloon-click', () => openHealthCheck(mainWindow));
 }
 
 function start(mainWindow) {
@@ -85,7 +112,7 @@ module.exports = function registerBackgroundMonitor(mainWindow) {
 
   ipcMain.handle('monitor:alert', (_event, { title, body }) => {
     if (!tray) return;
-    tray.displayBalloon({ title, content: body, iconType: 'warning', respectQuietTime: true });
+    notify(mainWindow, title, body);
     // Tooltips are capped at 127 characters on Windows.
     tray.setToolTip(`devForge — ${title}`.slice(0, 127));
     if (!mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isFocused()) mainWindow.flashFrame(true);

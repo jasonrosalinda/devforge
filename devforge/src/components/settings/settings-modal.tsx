@@ -581,9 +581,8 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 <div className="flex flex-col gap-1">
                   <Label className="text-xs" htmlFor="bm-enabled">Run in the system tray</Label>
                   <p className="text-xs text-muted-foreground">
-                    Checks every minute in the background, over the last 6h at 1m buckets, and pops a tray alert on a new
-                    anomaly, a status getting worse, downtime or 5xx. The App Health Check page is not reloaded.
-                    Closing the window keeps devForge in the tray — quit from the tray menu.
+                    Checks the watched apps every minute over the last 6h at 1m buckets. Clicking an alert opens App
+                    Health Check reloaded to today. Closing the window keeps devForge in the tray — quit from the tray menu.
                   </p>
                   {!isElectron() && (
                     <p className="text-xs text-destructive">Desktop app only — has no effect in the browser.</p>
@@ -595,6 +594,38 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   onCheckedChange={v => setBm({ enabled: v })}
                   disabled={!isElectron()}
                 />
+              </div>
+
+              {/* Mirrors src/monitor/healthAlerts.ts, status.ts, anomalyDetection.ts and appRemarks.tsx — update together. */}
+              <div className="grid gap-3 sm:grid-cols-[auto_1fr]">
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs">Watches</Label>
+                  <ul className="list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
+                    <li>App Service CPU and memory</li>
+                    <li>Database CPU and memory, when a database is set</li>
+                    <li>Requests and 5xx errors</li>
+                    <li>UptimeRobot downtime, when monitors are set</li>
+                  </ul>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs">Alerts when</Label>
+                  <ul className="list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
+                    <li>
+                      Status gets worse. Warning: 6h CPU avg &gt; 70%, memory avg &gt; 80%, CPU p99 &gt; 85% or memory
+                      p99 &gt; 90%. Critical: CPU avg &gt; 90%, memory avg &gt; 95%, or a p99 at 100%.
+                    </li>
+                    <li>
+                      2 or more of CPU, memory, DB CPU and DB memory spike in the same minute (Critical if all 4). A CPU
+                      spike must reach 50% or 20 pts above the 6h average; memory 80% or 10 pts above.
+                    </li>
+                    <li>5xx errors go above 5% of requests in the latest minute.</li>
+                    <li>UptimeRobot reports downtime.</li>
+                    <li>Azure is unreachable for 3 checks in a row, and again when it recovers.</li>
+                  </ul>
+                  <p className="text-xs text-muted-foreground">
+                    Each alert fires once. An anomaly alerts again only if it gets worse.
+                  </p>
+                </div>
               </div>
 
               <Separator />

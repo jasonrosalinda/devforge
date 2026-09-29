@@ -5,7 +5,7 @@ const isDev = !app.isPackaged;
 
 Menu.setApplicationMenu(null);
 
-// Windows attributes tray balloons (shown as toasts on 10/11) to this id. Matches
+// Windows attributes the monitor's toasts to this id. Matches
 // appId in electron-builder.json5.
 if (process.platform === 'win32') app.setAppUserModelId('com.devforge.app');
 

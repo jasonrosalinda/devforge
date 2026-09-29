@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
         fetchAppDetails: (opts) => ipcRenderer.invoke('azure-metrics:fetch-app-details', opts),
+        fetchMonitor: (opts) => ipcRenderer.invoke('azure-metrics:fetch-monitor', opts),
         fetchDetectors: (opts) => ipcRenderer.invoke('azure-metrics:fetch-detectors', opts),
         fetchSnat: (opts) => ipcRenderer.invoke('azure-metrics:fetch-snat', opts),
         fetchRestarts: (opts) => ipcRenderer.invoke('azure-metrics:fetch-restarts', opts),
@@ -89,6 +90,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
             const fn = () => cb();
             ipcRenderer.on('monitor:check-now', fn);
             return () => ipcRenderer.removeListener('monitor:check-now', fn);
+        },
+        onOpenHealthCheck: (cb) => {
+            const fn = () => cb();
+            ipcRenderer.on('monitor:open-health-check', fn);
+            return () => ipcRenderer.removeListener('monitor:open-health-check', fn);
         },
     },
 
