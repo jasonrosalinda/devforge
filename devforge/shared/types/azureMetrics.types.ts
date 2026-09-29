@@ -707,6 +707,9 @@ export interface IAzureMetricsAPI {
   checkCredential: () => Promise<{ ok: boolean; error?: string }>
   fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Record<string, AppMetrics>>
   fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'pageViews'>>
+  /** The background monitor's check: only the fields its alerts read (CPU, memory, DB,
+   *  requests + 5xx series), in a few batched queries. A failed app is `{ error }`. */
+  fetchMonitor: (opts: { appKeys: string[]; config?: unknown; customStart: string; customEnd: string }) => Promise<Record<string, AppMetrics & { error?: string }>>
   fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
   fetchSnat: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<SnatFetchResult>
   fetchRestarts: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<RestartFetchResult>

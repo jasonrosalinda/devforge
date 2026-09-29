@@ -1,20 +1,28 @@
 // Entry for the hidden worker window behind the tray monitor
 // (electron/ipc/background-monitor.cjs). No React, no UI: once a minute it fetches
-// the last 6h at 1m buckets for the watched apps, diffs each against the previous
-// check and raises a tray balloon for anything new.
+// the last 6h at 1m buckets for the watched apps (azure-metrics:fetch-monitor — only
+// what the alerts read), diffs each against the previous check and raises a desktop
+// notification for anything new, or for an app it has failed to fetch 3 times running.
 //
 // It runs in its own window, so its fetches never touch the App Health Check page.
 
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import { loadSettings } from '@/lib/settings-store';
 import { fetchUptimeRobotMonitors, type UptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
-import { snapshotApp, diffApp, type AppSnapshot } from './healthAlerts';
+import { snapshotApp, diffApp, trackFetch, type AppSnapshot, type FetchHealth } from './healthAlerts';
 
 const WINDOW_MS = 6 * 3_600_000;
 const TICK_MS = 60_000;
 
 const previous: Record<string, AppSnapshot> = {};
+const fetchHealth: Record<string, FetchHealth> = {};
 let running = false;
+
+/** An IPC rejection arrives as "Error invoking remote method '…': Error: <message>". */
+function ipcErrorMessage(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+}
 
 async function tick() {
   if (running) return; // a slow Azure call must not stack checks behind itself
@@ -34,19 +42,33 @@ async function tick() {
     const customStart = start.toISOString();
     const customEnd = end.toISOString();
 
-    const metrics = await window.electronAPI.azureMetrics.fetch({
-      appKeys: keys, range: 'custom', config: azure, customStart, customEnd, granularity: 'PT1M',
-    }) as Record<string, AppMetrics & { error?: string }>;
+    // A rejected call (sign-in expired, network down) fails every app's check alike.
+    let metrics: Record<string, AppMetrics & { error?: string }> | null = null;
+    let callError: string | null = null;
+    try {
+      metrics = await window.electronAPI.azureMetrics.fetchMonitor({ appKeys: keys, config: azure, customStart, customEnd });
+    } catch (e) {
+      callError = ipcErrorMessage(e);
+    }
 
     await Promise.all(keys.map(async key => {
       const m = metrics?.[key];
+      const appDef = azure.apps.find(a => a.name === key);
+      const label = appDef?.platformName || appDef?.resourceGroup || key;
+
+      const error = callError ?? m?.error ?? (m?.cpu?.series?.length ? null : 'Azure returned no CPU data');
+      const health = trackFetch(fetchHealth[key], error);
+      fetchHealth[key] = health.next;
+      if (health.line) {
+        await window.electronAPI.backgroundMonitor.alert({ title: `${label} — monitor`, body: health.line });
+      }
       // A failed fetch keeps the last snapshot, so the next good one is diffed
       // against real data instead of alerting on everything as if new.
-      if (!m || m.error || !m.cpu?.series?.length) {
-        if (m?.error) console.warn(`[monitor] ${key}: ${m.error}`);
+      if (error || !m) {
+        console.warn(`[monitor] ${key}: ${error}`);
         return;
       }
-      const appDef = azure.apps.find(a => a.name === key);
+
       let urMonitors: UptimeRobotMonitor[] = [];
       if (apiKeys.uptimeRobotApiKey && appDef?.uptimeRobotMonitorIds?.length) {
         try {
@@ -60,7 +82,6 @@ async function tick() {
       const lines = diffApp(previous[key], next);
       previous[key] = next;
       if (lines.length) {
-        const label = appDef?.platformName || appDef?.resourceGroup || key;
         await window.electronAPI.backgroundMonitor.alert({ title: `${label} — health alert`, body: lines.join('\n') });
       }
     }));

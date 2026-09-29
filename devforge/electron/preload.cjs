@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
         fetchAppDetails: (opts) => ipcRenderer.invoke('azure-metrics:fetch-app-details', opts),
+        fetchMonitor: (opts) => ipcRenderer.invoke('azure-metrics:fetch-monitor', opts),
         fetchDetectors: (opts) => ipcRenderer.invoke('azure-metrics:fetch-detectors', opts),
         fetchSnat: (opts) => ipcRenderer.invoke('azure-metrics:fetch-snat', opts),
         fetchRestarts: (opts) => ipcRenderer.invoke('azure-metrics:fetch-restarts', opts),
