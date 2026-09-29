@@ -1,21 +1,120 @@
 # devForge
 
-Developer toolkit built with Electron, React, and TypeScript. Bundles utilities for performance auditing, Azure App Service monitoring, asset conversion, and quick-reference cheatsheets into a single cross-platform desktop app.
+Developer toolkit built with Electron, React, and TypeScript. Bundles Azure App Service / Container Apps monitoring, PageSpeed auditing, unused-asset scanning, release runbook prep and everyday developer utilities into a single cross-platform desktop app.
 
 ---
 
-## Features
+## Pages
 
-| Tool | Description |
-|------|-------------|
-| **PageSpeed Insights** | Run Google PageSpeed and local Lighthouse audits. Single, branch-comparison, and 3-run-average modes. Parallel URL processing. Export detailed AI-ready Markdown reports with LCP phase breakdowns, opportunities, diagnostics, and prioritized recommendations. |
-| **App Health Check** | Azure App Service health dashboard. CPU/memory charts (p99), incident report generation, downtime detection via Azure Monitor. |
-| **Translation** | Localization key viewer/editor with searchable table. |
-| **CSS Audit** | Upload stylesheets, analyze selectors, detect unused/duplicate rules. |
-| **Image to SVG** | Convert raster images to optimized SVG. |
-| **Time Converter** | Multi-timezone conversion with live clocks. |
-| **React Cheatsheet** | Quick reference for React hooks, patterns, and APIs. |
-| **Blazor Cheatsheet** | Quick reference for Blazor components and lifecycle. |
+Every page opens as its own tab from the sidebar or the Home cards. The sidebar groups them as below. The page list lives in [src/routes/page-routes.tsx](src/routes/page-routes.tsx) and the Toolbox tools in [src/components/toolbox/toolbox-registry.ts](src/components/toolbox/toolbox-registry.ts). **When you add, remove or change a page, update this section in the same PR.**
+
+### Home
+
+**Use it to** find and open a tool. It shows a card for every page, in sidebar order, and the sidebar search filters them by title, description and keywords.
+
+### Monitoring
+
+#### App Health Check
+
+**Use it to** see how Azure apps behaved over a time window, and to explain an outage or a spike: during an incident, for a daily check, or when a tray alert fires.
+
+- Pick one or more apps and a From / To range (defaults to today 00:00 → now) at 1m–6h granularity. You can turn on **Auto reload** to keep the end at "now".
+- Each app gets a card with a status (healthy / warning / critical). **Blocks** choose what the card shows: Remarks, CPU, Memory, Database, Users, Page Load, Performance, Exceptions, Instances, UptimeRobot, SNAT Ports, Restarts, Crash Monitoring, Anomaly Detection, and Frontend / API.
+- **Anomaly Detection** flags correlated spikes across CPU, memory, DB CPU and DB memory (plus FE/API error rates when App Insights is available).
+- **Copy for Teams** puts the status header, chart image and metrics table on the clipboard in one paste.
+- **AI report** writes an AI-ready Markdown incident report for the range to `~/.claude/agents/incident-reports/` and opens it.
+- **RCA** opens a downtime root-cause analysis: add your investigation notes and Claude drafts the report. You can copy it for Teams or save it as Markdown, PDF or Word.
+- **Needs:** `az login`, and apps configured in **Settings → Azure**. Optional: an App Insights ID, a database, and the API app per entry. UptimeRobot needs a key in **Settings → API Keys**. RCA needs the [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH. Desktop app only.
+
+### Web quality
+
+#### PageSpeed
+
+**Use it to** measure a site's Lighthouse performance, or to prove a release made it faster or slower.
+
+- Add https URLs; each is audited on **Desktop** and **Mobile** through the PageSpeed Insights API: SI, LCP, CLS, TBT and FCP, plus opportunities and diagnostics.
+- There are three modes. **Single** takes one snapshot. **Comparison** shows before → after with % change. **Accuracy** does 1–10 runs per URL, averaged or median.
+- **Copy for Teams** (Excel-style table), **Copy as Image** and **Claude Analysis** (a short findings / assessment summary).
+- A **Fix brief** writes a Markdown task file into a repo folder for an AI coding agent. **History** keeps up to 25 saved runs.
+- **Needs:** a Google PageSpeed API key in **Settings → API Keys**. Claude Analysis needs the Claude CLI. Full guide: [docs/pagespeed-insights.md](docs/pagespeed-insights.md).
+
+#### Unused Assets
+
+**Use it to** clean up a front-end codebase by finding CSS classes / ids and JS functions nothing references.
+
+- Pick a project folder and scan. The results come as two searchable lists, unused CSS and unused JS, with a code view per item.
+- An AI **review** checks each item and gives a verdict. If you stop it, the items already checked keep their verdict.
+- Download a Markdown report of a scan. Past scans are kept in history.
+- **Needs:** the desktop app. The AI review also needs the Claude CLI.
+
+### Release
+
+#### Release Pilot
+
+**Use it to** prepare and run a deployment from its Confluence runbook without switching between pages.
+
+- Paste the **Deployment Runbook** URL, and optionally the **Release Plan** URL (the release goals are taken from it). It loads the activity table and every screenshot, including ones inside expand drawers.
+- Copy a Teams-ready summary, either as text only (always fits) or with full-resolution screenshots. You can also copy any single screenshot.
+- **Export** every section as one full-quality HTML file.
+- **Needs:** a Confluence base URL, account email and API token in **Settings → Atlassian**.
+
+### Utilities
+
+#### Translation
+
+**Use it to** look up, add or edit localization keys across EN, ID and VN.
+
+- A searchable, sortable table of keys and their values. You can add, edit and delete entries.
+- Import and export as `.sql`, and copy the table as an image.
+
+#### Toolbox
+
+Offline utilities, each on its own page. Nothing you paste leaves the machine.
+
+| Tool | Use it to |
+|------|-----------|
+| **DateTime Converter** | Convert a time between local, UTC, other time zones, ISO 8601 and Unix timestamps — e.g. to read a log timestamp in SGT. |
+| **JWT Decoder** | Decode a token and read its claims, with expiry and issue times shown in local time and UTC. |
+| **Regex Tester** | Try a pattern against sample text, with warnings where .NET's regex engine behaves differently. |
+| **Cron Explainer & Creator** | Explain an existing cron / NCRONTAB expression, or build one, and preview its next runs. |
+| **JSON / YAML / XML** | Format, validate and convert config between the three formats. |
+| **Encoders** | Base64, URL and HTML encode / decode, hashes (SHA) and UUIDs. |
+| **Text Diff** | Compare two blocks of text line by line. |
+| **Image Converter** | Convert images between PNG, JPEG, WebP, ICO and SVG (traced or embedded), e.g. to make a favicon. |
+
+---
+
+## Background monitor (system tray)
+
+**Use it to** get a desktop alert when a watched Azure app degrades, without keeping the App Health Check page open. Turn it on in **Settings → Background monitor**.
+
+- It checks the watched apps every minute over the last 6h at 1m buckets. It fetches only what the alerts need, in a few batched Azure calls.
+- It alerts when:
+  - the status gets worse;
+  - 2 or more of CPU, memory, DB CPU and DB memory spike together;
+  - 5xx errors go above 5% of requests;
+  - UptimeRobot reports downtime;
+  - Azure is unreachable for 3 checks in a row (and again when it recovers).
+- Each alert carries its numbers (peak values, time, averages). The Settings tab lists the exact thresholds.
+- Clicking an alert opens App Health Check reloaded to today. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu.
+
+Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-monitor.cjs), [src/monitor/](src/monitor/)
+
+---
+
+## App shell
+
+- **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search.
+- **Browser-style tabs.** Open tabs are restored on the next launch and stay mounted, so switching back keeps your inputs and results. Shortcuts: **Ctrl+Tab** / **Ctrl+Shift+Tab** to cycle, **Ctrl+W** to close, **Ctrl+1–8** to jump to a tab and **Ctrl+9** for the last one.
+- **Settings**, **Release notes** and **auto-update** are covered in their sections below.
+
+---
+
+## Documentation
+
+| Guide | Contents |
+|-------|----------|
+| [PageSpeed Insights](docs/pagespeed-insights.md) | Work instruction: API key setup, single / comparison / accuracy runs, reading results, Copy for Teams, Claude Analysis, fix briefs, history, troubleshooting. |
 
 ---
 
@@ -23,11 +122,14 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 - **Runtime** — Electron 35, Node 20+
 - **Frontend** — React 19, TypeScript, Vite (rolldown-vite), Tailwind CSS
-- **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts
-- **Performance** — Lighthouse 13, chrome-launcher (warm-cache + LCP capture via CDP)
-- **Azure** — `@azure/identity`, `@azure/monitor-query`
+- **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts, `@tanstack/react-table`
+- **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
+- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST
+- **Markdown / capture** — `marked`, `html2canvas`
+- **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis and the Unused Assets review
+- **Testing** — Vitest + happy-dom
 - **Auto-update** — `electron-updater` via GitHub Releases
-- **Release automation** — `release-please` (conventional commits → version bumps + CHANGELOG)
+- **Release automation** — GitHub Actions (`deploy.yml`): conventional commits → version tag → release build
 - **Packaging** — `electron-builder` (NSIS / DMG / AppImage / deb)
 
 ---
@@ -38,7 +140,8 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles utilities 
 
 - Node.js 20 or newer
 - npm 10+
-- (Windows only, for Lighthouse audits) Chrome installed
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login` — for App Health Check and the background monitor
+- Optional: [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH — for RCA, PageSpeed Claude Analysis and the Unused Assets review
 
 ### Install
 
@@ -80,27 +183,26 @@ Targets configured in [electron-builder.json5](electron-builder.json5):
 
 ## Release Workflow
 
-Releases are fully automated via **conventional commits** + **release-please**.
+Releases are automated from **conventional commits** by the repo-root workflow [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It runs on every push to `main`.
 
 ### Commit convention
 
+The bump is decided by scanning every commit since the last tag. The highest bump wins.
+
 | Prefix | Version bump |
 |--------|--------------|
-| `fix:` | patch (1.2.0 → 1.2.1) |
+| `fix:`, `perf:` | patch (1.2.0 → 1.2.1) |
 | `feat:` | minor (1.2.0 → 1.3.0) |
-| `feat!:` or `BREAKING CHANGE:` in body | major (1.2.0 → 2.0.0) |
-| `chore:`, `docs:`, `refactor:`, `test:`, `style:`, `perf:`, `build:`, `ci:` | no bump |
+| `feat!:` (any `type!:`) or `BREAKING CHANGE` in a message | major (1.2.0 → 2.0.0) |
+| `chore:`, `docs:`, `refactor:`, `test:`, `style:`, `build:`, `ci:` | no release |
 
 ### Flow
 
-1. Push commits to `main` with conventional prefixes.
-2. The `Release` GitHub Action opens (or updates) a **Release PR** titled `chore(main): release X.Y.Z` containing the version bump + auto-generated `CHANGELOG.md`.
-3. Merge the Release PR when ready to ship.
-4. release-please creates the `vX.Y.Z` tag + GitHub Release.
-5. The build matrix runs on Windows / macOS / Linux runners, compiles installers, and uploads them as release assets (plus `latest.yml` for auto-updater).
-6. Installed apps detect the new version on next launch and prompt to restart.
-
-Configuration: [release-please-config.json](release-please-config.json), [.release-please-manifest.json](.release-please-manifest.json), [.github/workflows/release-please.yml](.github/workflows/release-please.yml)
+1. Merge to `main`.
+2. **deploy** builds the web version (`npm run build`) and publishes it to GitHub Pages.
+3. **auto-tag** works out the bump. It then runs `npm version`, commits `chore: release vX.Y.Z [skip ci]`, and pushes the commit and the `vX.Y.Z` tag.
+4. **release**, on a Windows runner, generates release notes with [`.github/scripts/release-notes.mjs`](../.github/scripts/release-notes.mjs), then runs `npm run electron:build`. It uploads the installers and `latest*.yml` (for the auto-updater) to a GitHub Release.
+5. Installed apps pick up the new version on their next launch (see Auto-Update).
 
 ---
 
@@ -113,7 +215,7 @@ On launch, installed (non-dev) builds query GitHub Releases for newer versions. 
 - Download complete → persistent toast with **Restart Now** action
 - Restart → `quitAndInstall()` applies the update
 
-Implementation: [electron/main.js](electron/main.js), [src/hooks/useAppUpdater.ts](src/hooks/useAppUpdater.ts)
+Implementation: [electron/main.cjs](electron/main.cjs), [src/hooks/useAppUpdater.ts](src/hooks/useAppUpdater.ts)
 
 ---
 
@@ -129,26 +231,34 @@ Implementation: [src/components/release-notes/release-notes-modal.tsx](src/compo
 
 ```
 devforge/
-├── electron/                 # Main process + IPC handlers
-│   ├── main.js              # App entry, BrowserWindow, auto-updater wiring
-│   ├── preload.cjs          # contextBridge exposing electronAPI
-│   ├── ipc/                 # Per-feature IPC modules
-│   │   ├── pagespeed.cjs           # Lighthouse runner
-│   │   ├── pagespeed-insight.cjs   # AI Markdown report generator
-│   │   ├── azure-metrics.cjs       # Azure Monitor queries
-│   │   └── incident-report.cjs     # Downtime report builder
-│   └── utils/               # CDP / browser / Lighthouse helpers
+├── index.html               # Main window entry
+├── monitor.html             # Hidden background-monitor worker entry
+├── electron/                # Main process + IPC handlers
+│   ├── main.cjs             # App entry, BrowserWindow, auto-updater wiring
+│   ├── preload.cjs          # contextBridge exposing electronAPI (main window + worker)
+│   └── ipc/                 # Per-feature IPC modules
+│       ├── azure-metrics.cjs         # Azure Monitor / App Insights queries (page + monitor fetch)
+│       ├── azure-*.cjs               # SNAT, restarts, crash monitoring, page views, detectors, signals
+│       ├── background-monitor.cjs    # Tray icon, hidden worker window, desktop notifications
+│       ├── incident-report.cjs       # AI report + Claude RCA
+│       ├── pagespeed-insight.cjs     # Google PageSpeed API + Markdown report / fix brief
+│       ├── unused-assets.cjs         # Unused CSS/JS scan + Claude review
+│       ├── confluence.cjs            # Release runbook fetch (session + REST)
+│       ├── claude-cli.cjs            # Shared Claude CLI spawning
+│       └── commands.cjs, ipapi.cjs, …
 ├── src/
-│   ├── app.tsx              # App shell, providers, modals
-│   ├── pages/               # Top-level feature pages
-│   ├── components/          # Feature + UI components
-│   ├── hooks/               # Custom hooks (useAppUpdater, useAzureMetrics, etc.)
+│   ├── app.tsx              # App shell: sidebar, tabs, providers, modals
+│   ├── pages/               # Top-level pages
+│   ├── components/          # Feature + UI components (azure, pagespeed, toolbox, release-pilot, …)
+│   ├── monitor/             # Background monitor worker: fetch loop + alert rules
+│   ├── hooks/               # Custom hooks (useAppUpdater, useAzureMetrics, usePageTabs, …)
 │   ├── services/            # External API clients (googleApi)
-│   ├── lib/                 # Utilities, environment detection
-│   ├── context/             # Settings provider
+│   ├── lib/                 # Utilities (settings-store, page-tabs, parse-runbook, …)
+│   ├── context/             # Settings providers
 │   └── routes/              # Page registry
-├── shared/                  # Types + utils shared by main + renderer
-└── .github/workflows/       # CI / release automation
+└── shared/                  # Types shared by main + renderer
+
+.github/ (repo root)         # deploy.yml (Pages + tag + release), scripts/release-notes.mjs
 ```
 
 ---
@@ -157,10 +267,12 @@ devforge/
 
 Open the in-app **Settings** modal to configure:
 
-- **Azure apps** — resource group + name for each App Service to monitor
-- **API keys** — Google PageSpeed, Anthropic, UptimeRobot
+- **Azure** — subscription ID + per-app entries (App Service or Container App, optional API + DB, optional network/edge diagnostics: Log Analytics workspace, App Gateway, Front Door, Load Balancer)
+- **API Keys** — Google PageSpeed, UptimeRobot
+- **Atlassian** — Confluence base URL, account email, API token (for Release Pilot)
+- **Background monitor** — turn the tray monitor on and pick the apps to watch; lists what it watches and when it alerts
 
-Settings are stored locally in the OS user-data directory (no cloud sync).
+Settings are stored encrypted in the app's local storage, on this machine only (no cloud sync). Azure access comes from your `az login`, not from Settings.
 
 ---
 
@@ -174,6 +286,7 @@ Settings are stored locally in the OS user-data directory (no cloud sync).
 | `npm run electron:pack` | Unpacked build (no installer) |
 | `npm run electron:release` | Build + publish to GitHub Releases |
 | `npm run lint` | ESLint over the codebase |
+| `npm run typecheck` | `tsc --noEmit` type check |
 | `npm run test` | Vitest unit tests |
 | `npm run test:watch` | Vitest in watch mode |
 
