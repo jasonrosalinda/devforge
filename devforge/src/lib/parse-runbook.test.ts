@@ -18,6 +18,16 @@ function firstTable(html: string) {
   return sections[0]!.table;
 }
 
+describe('parseRunbookSections — section titles', () => {
+  it('leaves out the inline <style> Confluence puts inside a coloured heading', () => {
+    const html =
+      '<h2><style>[data-colorid=g8p7]{color:#b38600}</style><span data-colorid="g8p7">Pre-Prod To Do List</span></h2>' +
+      `<table>${HEADER}<tr><td>26 Oct</td><td>5:30 PM</td><td>GA</td><td>5m</td><td>TODO</td><td>Jubilee</td></tr></table>`;
+
+    expect(parseRunbookSections(html, []).map(s => s.title)).toEqual(['Pre-Prod To Do List']);
+  });
+});
+
 describe('parseTable — merged cells (colspan / rowspan)', () => {
   it('keeps columns aligned when a cell has rowspan', () => {
     // Date cell on row 1 spans 2 rows; row 2 has no Date cell of its own.
