@@ -124,7 +124,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - **Frontend** — React 19, TypeScript, Vite (rolldown-vite), Tailwind CSS
 - **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts, `@tanstack/react-table`
 - **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
-- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST
+- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST; Release Runbook reads and writes the storage format (REST v1) and edits only the runbook tables
 - **Markdown / capture** — `marked`, `html2canvas`
 - **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis and the Unused Assets review
 - **Testing** — Vitest + happy-dom

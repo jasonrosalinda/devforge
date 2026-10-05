@@ -1,5 +1,5 @@
 import type { Page, PageGroup } from "@/types/pages.types";
-import { Activity, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch } from "lucide-react";
+import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -7,6 +7,7 @@ import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
+import ReleaseRunbookPage from "@/pages/releaseRunbookPage";
 import { createToolboxToolPage } from "@/pages/toolboxToolPage";
 import { TOOLBOX_TOOLS } from "@/components/toolbox/toolbox-registry";
 
@@ -54,6 +55,15 @@ export const pages: Page[] = [
         component: ReleasePilotPage,
         description: "Load a Confluence deployment runbook with its screenshots",
         group: "Release"
+    },
+    {
+        title: "Release Runbook",
+        url: "#",
+        icon: BookOpen,
+        component: ReleaseRunbookPage,
+        description: "Create, template and edit Confluence deployment runbooks; reschedule from one start time",
+        group: "Release",
+        keywords: ["confluence", "deployment", "template", "schedule", "reschedule"]
     },
     {
         title: "Translation",

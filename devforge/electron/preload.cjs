@@ -106,6 +106,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         tokenStatus: (opts) => ipcRenderer.invoke('confluence:tokenStatus', opts),
         logout: () => ipcRenderer.invoke('confluence:logout'),
         saveSummary: (opts) => ipcRenderer.invoke('confluence:saveSummary', opts),
+        getPage: (opts) => ipcRenderer.invoke('confluence:getPage', opts),
+        updatePage: (opts) => ipcRenderer.invoke('confluence:updatePage', opts),
+        createPage: (opts) => ipcRenderer.invoke('confluence:createPage', opts),
+        searchUsers: (opts) => ipcRenderer.invoke('confluence:searchUsers', opts),
+        lookupUsers: (opts) => ipcRenderer.invoke('confluence:lookupUsers', opts),
+        uploadAttachment: (opts) => ipcRenderer.invoke('confluence:uploadAttachment', opts),
+        fetchAttachment: (opts) => ipcRenderer.invoke('confluence:fetchAttachment', opts),
     },
 
     windowChrome: {

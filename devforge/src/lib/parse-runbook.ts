@@ -65,15 +65,16 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-// Extract heading text, stripping Confluence icon/emoji/status spans that
-// render as stray letters ("e", "i", etc.) in export_view textContent.
+// Extract heading text, stripping inline <style> (coloured headings) and
+// Confluence icon/emoji/status spans that render as stray letters ("e", "i").
 function headingText(el: Element): string {
   const clone = el.cloneNode(true) as HTMLElement;
   clone.querySelectorAll(
-    '.confluence-icon, .emoticon, .status-macro, .aui-lozenge, ' +
-    'img, [class*="icon"], [class*="emoji"], [class*="emoticon"], ' +
-    'ac\\:emoticon, ac\\:image',
+    'style, script, .confluence-icon, .emoticon, .status-macro, .aui-lozenge, ' +
+    'img, [class*="icon"], [class*="emoji"], [class*="emoticon"]',
   ).forEach(n => n.remove());
+  // Storage-format tags; Chromium parses the escaped selector, happy-dom (tests) throws.
+  try { clone.querySelectorAll('ac\\:emoticon, ac\\:image').forEach(n => n.remove()); } catch { /* unsupported selector */ }
   const text = collapse(clone.textContent || '');
   // Strip a leading single lowercase letter immediately before an uppercase
   // letter — icon-font glyphs render as a stray char ("ePre-Prod To Do List").
@@ -192,18 +193,17 @@ function detectStatus(el: Element): { text: string; color: StatusColor } | undef
   return { text, color: lozengeColor(loz) };
 }
 
-// Produce the cell's Confluence HTML as-is (preserving bold, lists, nesting,
-// expand macros) with <img> rewritten to downloaded data URIs and unsafe
-// markup stripped. Unresolved images are removed (avoids broken glyphs).
-function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell {
-  const status = detectStatus(cell);
-  const clone = cell.cloneNode(true) as HTMLElement;
-
+// Rewrites Confluence HTML in place so it is safe and self-contained to render:
+// unsafe markup stripped, <img> rewritten to downloaded data URIs (unresolved
+// ones removed — avoids broken glyphs), expand macros turned into native
+// <details>, links opened in the browser. Shared by the table cells and the
+// whole-page document view.
+function sanitizeConfluence(root: HTMLElement, map: Map<string, string>): { images: RunbookImage[]; droppedKeys: string[] } {
   // Strip dangerous / non-content nodes.
-  clone.querySelectorAll('script, style, link, meta, iframe, object, embed, noscript').forEach(n => n.remove());
+  root.querySelectorAll('script, style, link, meta, iframe, object, embed, noscript').forEach(n => n.remove());
 
   // Strip event handlers and javascript: URLs.
-  clone.querySelectorAll('*').forEach(el => {
+  root.querySelectorAll('*').forEach(el => {
     Array.from(el.attributes).forEach(attr => {
       const name = attr.name.toLowerCase();
       if (name.startsWith('on')) el.removeAttribute(attr.name);
@@ -216,7 +216,7 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
   // Rewrite images → data URIs; collect for gallery/lightbox.
   const images: RunbookImage[] = [];
   const droppedKeys: string[] = [];
-  clone.querySelectorAll('img').forEach(img => {
+  root.querySelectorAll('img').forEach(img => {
     const orig = img.getAttribute('src') || '';
     const resolved = resolveImg(img as HTMLImageElement, map);
     if (resolved) {
@@ -240,28 +240,10 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
       img.remove();
     }
   });
-  if (droppedKeys.length) {
-    console.warn(`[release-pilot] ${droppedKeys.length} image(s) had no matching attachment, dropped:`, droppedKeys);
-  }
 
   // Convert Confluence expand macros → native <details>/<summary>.
-  const doc = clone.ownerDocument;
-  // Pattern 1: .expand-container (.expand-control + .expand-content)
-  clone.querySelectorAll('.expand-container').forEach(exp => {
-    const ctrl = exp.querySelector('.expand-control-text, .expand-control');
-    const body = exp.querySelector('.expand-content');
-    if (!body) return;
-    const details = doc.createElement('details');
-    const summary = doc.createElement('summary');
-    summary.textContent = ctrl ? collapse(ctrl.textContent || 'Details') : 'Details';
-    details.appendChild(summary);
-    details.appendChild(body.cloneNode(true));
-    exp.replaceWith(details);
-  });
-  // Pattern 2: data-macro-name="expand" (Cloud storage / newer export)
-  clone.querySelectorAll('[data-macro-name="expand"]').forEach(exp => {
-    const title = exp.querySelector('[data-macro-parameter="title"], .title');
-    const body = exp.querySelector('.conf-macro-body, .wysiwyg-macro-body, .expand-content');
+  const doc = root.ownerDocument;
+  const toDetails = (exp: Element, title: Element | null, body: Element | null) => {
     if (!body) return;
     const details = doc.createElement('details');
     const summary = doc.createElement('summary');
@@ -269,13 +251,38 @@ function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell
     details.appendChild(summary);
     details.appendChild(body.cloneNode(true));
     exp.replaceWith(details);
+  };
+  // Pattern 1: .expand-container (.expand-control + .expand-content)
+  root.querySelectorAll('.expand-container').forEach(exp => {
+    toDetails(exp, exp.querySelector('.expand-control-text, .expand-control'), exp.querySelector('.expand-content'));
+  });
+  // Pattern 2: data-macro-name="expand" (Cloud storage / newer export)
+  root.querySelectorAll('[data-macro-name="expand"]').forEach(exp => {
+    toDetails(
+      exp,
+      exp.querySelector('[data-macro-parameter="title"], .title'),
+      exp.querySelector('.conf-macro-body, .wysiwyg-macro-body, .expand-content'),
+    );
   });
 
   // External links open in the browser.
-  clone.querySelectorAll('a[href]').forEach(a => {
+  root.querySelectorAll('a[href]').forEach(a => {
     a.setAttribute('target', '_blank');
     a.setAttribute('rel', 'noopener noreferrer');
   });
+
+  return { images, droppedKeys };
+}
+
+// Produce the cell's Confluence HTML as-is (preserving bold, lists, nesting,
+// expand macros), sanitized and with screenshots resolved.
+function cellToRunbookCell(cell: Element, map: Map<string, string>): RunbookCell {
+  const status = detectStatus(cell);
+  const clone = cell.cloneNode(true) as HTMLElement;
+  const { images, droppedKeys } = sanitizeConfluence(clone, map);
+  if (droppedKeys.length) {
+    console.warn(`[release-pilot] ${droppedKeys.length} image(s) had no matching attachment, dropped:`, droppedKeys);
+  }
 
   return {
     html: clone.innerHTML,
@@ -361,9 +368,9 @@ function parseTable(table: HTMLTableElement, map: Map<string, string>): ParsedRu
 
 // ── Column key mapping ────────────────────────────────────────────────────────
 
-type ColKey = 'date' | 'time' | 'activity' | 'duration' | 'startTime' | 'endTime' | 'status' | 'pics' | 'logbook' | 'extra';
+export type ColKey = 'date' | 'time' | 'activity' | 'duration' | 'startTime' | 'endTime' | 'status' | 'pics' | 'logbook' | 'extra';
 
-function colKey(header: string): ColKey {
+export function colKey(header: string): ColKey {
   const h = header.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   if (/^date/.test(h)) return 'date';
   // "start time" before plain "time"

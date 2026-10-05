@@ -95,6 +95,12 @@ export interface AttributionResult {
     };
 }
 
+export interface ConfluenceCreds {
+    baseUrl: string;
+    email: string;
+    apiToken: string;
+}
+
 export interface IElectronAPI {
     // Azure Chart Capture  (existing — Puppeteer)
     azure: IAzureAPI;
@@ -214,6 +220,53 @@ export interface IElectronAPI {
         }>;
         logout(): Promise<{ ok: boolean; error?: string }>;
         saveSummary(opts: { html: string; title?: string | undefined }): Promise<{ ok: boolean; path?: string; error?: string }>;
+        // Runbook Editor — storage-format read / save / create, and people search for PICs.
+        getPage(opts: ConfluenceCreds & { pageUrl: string }): Promise<{
+            ok: boolean;
+            error?: string;
+            status?: number;
+            pageId?: string;
+            title?: string;
+            version?: number;
+            by?: string;
+            when?: string;
+            spaceKey?: string;
+            parentId?: string;
+            storage?: string;
+            url?: string;
+        }>;
+        /** Saves as version baseVersion + 1; `conflict` when someone saved in between (never overwritten). */
+        updatePage(opts: ConfluenceCreds & { pageId: string; title: string; storage: string; baseVersion: number }): Promise<{
+            ok: boolean;
+            version?: number;
+            error?: string;
+            status?: number;
+            conflict?: boolean;
+            latestVersion?: number;
+            by?: string;
+            when?: string;
+        }>;
+        createPage(opts: ConfluenceCreds & { spaceKey: string; parentId?: string; title: string; storage: string }): Promise<{
+            ok: boolean;
+            pageId?: string;
+            version?: number;
+            url?: string;
+            error?: string;
+            status?: number;
+            duplicateTitle?: boolean;
+        }>;
+        searchUsers(opts: ConfluenceCreds & { query: string }): Promise<{
+            ok: boolean;
+            users?: { accountId: string; displayName: string }[];
+            error?: string;
+        }>;
+        lookupUsers(opts: ConfluenceCreds & { accountIds: string[] }): Promise<{
+            ok: boolean;
+            users?: { accountId: string; displayName: string }[];
+            error?: string;
+        }>;
+        uploadAttachment(opts: ConfluenceCreds & { pageId: string; filename: string; mediaType: string; bytes: Uint8Array }): Promise<{ ok: boolean; error?: string; status?: number }>;
+        fetchAttachment(opts: ConfluenceCreds & { pageId: string; filename: string }): Promise<{ ok: boolean; dataUri?: string; error?: string; status?: number }>;
     };
 
     // Incident Report
