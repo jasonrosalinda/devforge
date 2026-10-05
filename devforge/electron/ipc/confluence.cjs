@@ -10,39 +10,13 @@ const AUTH_COOKIE = /session\.token|cloud\.session|tenant\.session/i;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function pageIdFromUrl(url) {
-  if (!url) return null;
-  const m = url.match(/\/pages\/(\d+)/) || url.match(/[?&]pageId=(\d+)/);
-  return m ? m[1] : null;
-}
-
-function authHeader(email, token) {
-  return 'Basic ' + Buffer.from(`${email}:${token}`).toString('base64');
-}
-
-function normalizeBase(baseUrl) {
-  return (baseUrl || '').replace(/\/+$/, '').replace(/\/wiki$/i, '');
-}
+const {
+  pageIdFromUrl, authHeader, normalizeBase, errDetail,
+  getPage, updatePage, createPage, searchUsers, lookupUsers, uploadAttachment, fetchAttachment,
+} = require('./confluence-write.cjs');
 
 function sess() {
   return session.fromPartition(PARTITION);
-}
-
-// Read a short snippet of an error response body. Atlassian states the actual
-// reason there ("Current user not permitted to use Confluence", a scope error,
-// …); without it every failure collapses into a bare status number.
-async function errDetail(res) {
-  try {
-    const text = (await res.text()).slice(0, 400);
-    try {
-      const j = JSON.parse(text);
-      return String(j.message || j.reason || (j.data && j.data.message) || text).slice(0, 220);
-    } catch {
-      return text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
-    }
-  } catch {
-    return '';
-  }
 }
 
 async function hasAuthCookie(base) {
@@ -150,6 +124,15 @@ async function mapPool(items, limit, fn) {
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 
 module.exports = function registerConfluenceHandlers() {
+  // Runbook Editor: storage read, save, create, and the PIC user search.
+  ipcMain.handle('confluence:getPage', (_event, opts) => getPage(opts, fetch));
+  ipcMain.handle('confluence:updatePage', (_event, opts) => updatePage(opts, fetch));
+  ipcMain.handle('confluence:createPage', (_event, opts) => createPage(opts, fetch));
+  ipcMain.handle('confluence:searchUsers', (_event, opts) => searchUsers(opts, fetch));
+  ipcMain.handle('confluence:lookupUsers', (_event, opts) => lookupUsers(opts, fetch));
+  ipcMain.handle('confluence:uploadAttachment', (_event, opts) => uploadAttachment(opts, fetch));
+  ipcMain.handle('confluence:fetchAttachment', (_event, opts) => fetchAttachment(opts, fetch));
+
   // Open a login window; resolve once the Atlassian session cookie appears.
   ipcMain.handle('confluence:login', async (_event, { baseUrl }) => {
     const base = normalizeBase(baseUrl);

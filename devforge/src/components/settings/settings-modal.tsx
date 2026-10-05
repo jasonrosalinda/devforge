@@ -662,7 +662,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 placeholder="https://your-site.atlassian.net"
                 className="text-xs font-mono"
               />
-              <p className="text-xs text-muted-foreground">Your Atlassian Cloud site root. The Release Pilot page appends <span className="font-mono">/wiki/rest/api</span>.</p>
+              <p className="text-xs text-muted-foreground">Your Atlassian Cloud site root. The Release Pilot and Release Runbook pages append <span className="font-mono">/wiki/rest/api</span>.</p>
             </div>
 
             <Separator />
@@ -701,7 +701,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   </button>
                 </Hint>
               </div>
-              <p className="text-xs text-muted-foreground">Used with Basic auth to fetch runbook pages + attachments. Atlassian tokens expire (one year at most) — when one does, Release Pilot shows <span className="text-foreground">API token expired</span> and every load fails with 401.</p>
+              <p className="text-xs text-muted-foreground">Used with Basic auth to fetch runbook pages + attachments, and by Release Runbook to save and create pages (your account needs edit permission there; a scoped token needs write scope). Atlassian tokens expire (one year at most) — when one does, Release Pilot and Release Runbook show <span className="text-foreground">API token expired</span> and every load fails with 401.</p>
 
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5">
                 <div className="mb-1.5 text-xs font-medium text-foreground">How to create and apply a token</div>

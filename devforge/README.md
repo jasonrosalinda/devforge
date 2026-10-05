@@ -1,6 +1,6 @@
 # devForge
 
-Developer toolkit built with Electron, React, and TypeScript. Bundles Azure App Service / Container Apps monitoring, PageSpeed auditing, unused-asset scanning, release runbook prep and everyday developer utilities into a single cross-platform desktop app.
+Developer toolkit built with Electron, React, and TypeScript. Bundles Azure App Service / Container Apps monitoring, PageSpeed auditing, unused-asset scanning, release runbook prep and editing, and everyday developer utilities into a single cross-platform desktop app.
 
 ---
 
@@ -57,6 +57,17 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 - Copy a Teams-ready summary, either as text only (always fits) or with full-resolution screenshots. You can also copy any single screenshot.
 - **Export** every section as one full-quality HTML file.
 - **Needs:** a Confluence base URL, account email and API token in **Settings → Atlassian**.
+
+#### Release Runbook
+
+**Use it to** reschedule a runbook when the deployment moves, start the next release's runbook from a template, or change activities, durations, statuses and PICs — and save it back to Confluence.
+
+- **Time rules, always applied:** Planned Start = Time (SGT), Planned End = Planned Start + Duration (`< 5m`, `30m`, `2h`, `1h 30m`). Both are computed, never typed; an end past midnight shows **+1d**.
+- **Reschedule:** set **Deployment start** (date + time, SGT) and the activity it starts with (default: the first Prod activity). Every Date, Time, planned time and logbook check-time drawer moves by the same offset, so gaps and parallel activities stay as planned; rows pushed past midnight get their own date, and a date at the start of the title follows.
+- **Edit:** a table per section. Change the date / time (or link it to the row above, like Confluence's merged cells), activity, duration, status and PIC(s) (Confluence user search → real @mentions). Insert, duplicate, move and delete rows. Click an **Activity** or **Logbook** cell to edit it as rich text in a side panel: bold / italic / code, bullet, numbered and task lists, links, tables, drawers (expand), @mentions, status lozenges, and screenshots (paste, drop or upload). Confluence content the editor can't edit (dates, code blocks, panels, Jira links…) shows as a chip and is kept exactly as it is. Screenshots upload on save — before the page is saved (an upload failure saves nothing); a runbook created from a template copies the template's screenshots to the new page.
+- **Start points:** **Edit a runbook** (paste its URL; the recent-URL list is shared with Release Pilot), **New from template** (any runbook or template page: statuses reset to TODO, logbooks emptied, check-time drawers kept), or **New blank** (Pre-Prod / Prod / Post-Prod / Rollback plan). **Save as template…** turns the current runbook into a `[Template]` page.
+- **Saving is reviewed and safe:** **Review & save** lists every change (old → new) before anything is written; only the runbook tables are rewritten, the rest of the page stays byte-identical. If someone saved the page meanwhile, devForge says who and when and never overwrites — **Reload latest** shows your edits to redo.
+- **Needs:** **Settings → Atlassian** credentials, with edit permission on the space.
 
 ### Utilities
 
@@ -124,7 +135,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - **Frontend** — React 19, TypeScript, Vite (rolldown-vite), Tailwind CSS
 - **UI** — Radix UI primitives, shadcn-style components, sonner toasts, recharts, `@tanstack/react-table`
 - **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
-- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST
+- **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST; Release Runbook reads and writes the storage format (REST v1) and edits only the runbook tables
 - **Markdown / capture** — `marked`, `html2canvas`
 - **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis and the Unused Assets review
 - **Testing** — Vitest + happy-dom
@@ -244,6 +255,7 @@ devforge/
 │       ├── pagespeed-insight.cjs     # Google PageSpeed API + Markdown report / fix brief
 │       ├── unused-assets.cjs         # Unused CSS/JS scan + Claude review
 │       ├── confluence.cjs            # Release runbook fetch (session + REST)
+│       ├── confluence-write.cjs      # Release Runbook page read / save / create, attachments, user search
 │       ├── claude-cli.cjs            # Shared Claude CLI spawning
 │       └── commands.cjs, ipapi.cjs, …
 ├── src/

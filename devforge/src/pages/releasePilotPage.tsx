@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Rocket, Loader2, ExternalLink, TriangleAlert, Settings as SettingsIcon, LogIn, RefreshCw, Copy, Download, CheckCircle2, Circle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Rocket, Loader2, ExternalLink, TriangleAlert, Copy, Download, CheckCircle2, Circle } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/page-header';
 import { Input } from '@/components/ui/input';
@@ -7,31 +7,19 @@ import { Button } from '@/components/ui/button';
 import { Hint } from "@/components/ui/hint";
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { useSettings } from '@/context/settings-context';
-import { useSettingsUi } from '@/context/settings-ui-context';
-import { parseRunbookSections, collectImageUrls, extractGoals, extractReleaseLabel, extractProdSchedule, type RunbookAttachment } from '@/lib/parse-runbook';
+import { parseRunbookSections, extractGoals, extractReleaseLabel, extractProdSchedule } from '@/lib/parse-runbook';
+import { loadRunbook, RUNBOOK_URL_HISTORY_KEY, type ImageFetchStats, type RunbookPage } from '@/lib/load-runbook';
+import { loadUrlHistory, pushUrlHistory } from '@/lib/url-history';
+import { copyImageToClipboard } from '@/lib/clipboard-image';
+import { useConfluenceConnection } from '@/hooks/useConfluenceConnection';
 import { RunbookTable } from '@/components/release-pilot/runbookTable';
 import { ReleaseSummary, summaryClipboard } from '@/components/release-pilot/releaseSummary';
 import { ImageLightbox, type LightboxImage } from '@/components/release-pilot/imageLightbox';
-import {
-  TokenStatusPill, TokenIssueBanner, tokenBlocked, type TokenStatus,
-} from '@/components/release-pilot/tokenStatusPill';
+import { TokenIssueBanner } from '@/components/release-pilot/tokenStatusPill';
+import { ConfluenceConnectionPills, ConfluenceCredsBanner } from '@/components/release-pilot/confluenceConnection';
 
-interface RunbookResult {
-  ok: boolean;
-  error?: string;
-  url?: string;
-  title?: string;
-  version?: number;
-  author?: string;
-  when?: string;
-  spaceKey?: string;
-  html?: string;
-  attachments?: RunbookAttachment[];
-}
+type RunbookResult = RunbookPage & { ok: true };
 
 // Downscale + JPEG-compress a data URI for clipboard HTML (Teams paste limit).
 function shrinkDataUri(src: string, maxW = 600, quality = 0.72): Promise<string> {
@@ -63,28 +51,11 @@ function shrinkDataUri(src: string, maxW = 600, quality = 0.72): Promise<string>
   });
 }
 
-// Recently-loaded URL history (plain localStorage — just URLs, not secrets).
+// Recently-loaded URL history (the runbook list is shared with Release Runbook).
 const PLAN_HIST_KEY = 'release-pilot:plan-urls';
-const RUNBOOK_HIST_KEY = 'release-pilot:runbook-urls';
-
-function loadHistory(key: string): string[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(key) || '[]');
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-function pushHistory(key: string, url: string): string[] {
-  const next = [url, ...loadHistory(key).filter(u => u !== url)].slice(0, 20);
-  try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* ignore quota */ }
-  return next;
-}
 
 export default function ReleasePilotPage() {
   const { settings } = useSettings();
-  const { openSettings } = useSettingsUi();
   const { confluenceBaseUrl, email, apiToken } = settings.atlassian;
   const hasCreds = !!(confluenceBaseUrl && email && apiToken);
 
@@ -99,13 +70,9 @@ export default function ReleasePilotPage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RunbookResult | null>(null);
   const [lightbox, setLightbox] = useState<LightboxImage | null>(null);
-  const [imgDebug, setImgDebug] = useState<{ fetched: number; total: number; sampleUrl?: string | undefined; status?: number | undefined; err?: string | undefined; textHead?: string | undefined } | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [tokenStatus, setTokenStatus] = useState<TokenStatus>({ state: 'checking' });
-  // A network-level check failure ('error') still allows a try — the page fetch
-  // may work where the probe didn't. A rejected token never will.
-  const tokenDead = tokenBlocked(tokenStatus.state) && tokenStatus.state !== 'error';
+  const [imgDebug, setImgDebug] = useState<ImageFetchStats | null>(null);
+  const conn = useConfluenceConnection(settings.atlassian);
+  const { tokenStatus, tokenDead, checkToken } = conn;
   const [activeTab, setActiveTab] = useState('summary');
   const [closure, setClosure] = useState(false);
 
@@ -154,28 +121,6 @@ export default function ReleasePilotPage() {
     await writeClipboard(plainNoImg, htmlNoImg, 'Release summary (no images)');
   }
 
-  // Copy a single screenshot as a full-resolution PNG blob — paste straight into
-  // Teams (handled as an upload, so no clipboard-HTML size limit).
-  async function copyImageToClipboard(src: string) {
-    try {
-      const img = new Image();
-      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load')); img.src = src; });
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('ctx');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-      const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/png'));
-      if (!blob) throw new Error('blob');
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      toast.success('Image copied', { description: 'Paste into Teams (full resolution).' });
-    } catch {
-      toast.error('Image copy failed');
-    }
-  }
-
   // Export the full-quality summary (full-res images, no shrink) to an HTML file
   // — bypasses the Teams clipboard paste-size limit. Attach the file in chat.
   async function handleExportSummary() {
@@ -187,49 +132,9 @@ export default function ReleasePilotPage() {
 
   // Load saved URL history once.
   useEffect(() => {
-    setPlanHistory(loadHistory(PLAN_HIST_KEY));
-    setRunbookHistory(loadHistory(RUNBOOK_HIST_KEY));
+    setPlanHistory(loadUrlHistory(PLAN_HIST_KEY));
+    setRunbookHistory(loadUrlHistory(RUNBOOK_URL_HISTORY_KEY));
   }, []);
-
-  // Check Confluence session status on mount / when base URL changes.
-  useEffect(() => {
-    if (!confluenceBaseUrl) { setConnected(false); return; }
-    window.electronAPI?.confluence?.authStatus({ baseUrl: confluenceBaseUrl })
-      .then(s => setConnected(!!s?.connected))
-      .catch(() => setConnected(false));
-  }, [confluenceBaseUrl]);
-
-  // Validate the API token itself (separate from the browser session — the page
-  // fetch uses the token, so an expired one fails every load).
-  const checkToken = useCallback(async () => {
-    if (!confluenceBaseUrl) { setTokenStatus({ state: 'no-base' }); return; }
-    setTokenStatus({ state: 'checking' });
-    try {
-      const s = await window.electronAPI?.confluence?.tokenStatus({ baseUrl: confluenceBaseUrl, email, apiToken });
-      setTokenStatus((s as TokenStatus) ?? { state: 'error', detail: 'Confluence bridge unavailable.' });
-    } catch (e) {
-      setTokenStatus({ state: 'error', detail: e instanceof Error ? e.message : String(e) });
-    }
-  }, [confluenceBaseUrl, email, apiToken]);
-
-  useEffect(() => { void checkToken(); }, [checkToken]);
-
-  async function handleConnect() {
-    if (!confluenceBaseUrl || connecting) return;
-    setConnecting(true);
-    try {
-      await window.electronAPI?.confluence?.login({ baseUrl: confluenceBaseUrl });
-      const s = await window.electronAPI?.confluence?.authStatus({ baseUrl: confluenceBaseUrl });
-      setConnected(!!s?.connected);
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  async function handleDisconnect() {
-    await window.electronAPI?.confluence?.logout();
-    setConnected(false);
-  }
 
   const sections = useMemo(() => {
     if (!result?.ok || !result.html) return [];
@@ -274,87 +179,18 @@ export default function ReleasePilotPage() {
           setGoals(extractGoals(planRes.html));
           setReleaseLabel(extractReleaseLabel(planRes.html));
           setSchedule(extractProdSchedule(planRes.html));
-          setPlanHistory(pushHistory(PLAN_HIST_KEY, planUrl.trim()));
+          setPlanHistory(pushUrlHistory(PLAN_HIST_KEY, planUrl.trim()));
         }
       }
 
-      const res = await window.electronAPI?.confluence?.fetchRunbook({
-        baseUrl: confluenceBaseUrl,
-        email,
-        apiToken,
-        pageUrl: url.trim(),
-      });
-      if (!res) {
-        setError('Confluence bridge unavailable.');
-      } else if (!res.ok) {
-        setError(res.error || 'Failed to load runbook.');
-        // An auth-shaped failure means the token state on screen is stale.
-        if (/\b40[13]\b/.test(res.error || '')) void checkToken();
+      const loaded = await loadRunbook(window.electronAPI?.confluence, { baseUrl: confluenceBaseUrl, email, apiToken }, url.trim());
+      if (!loaded.ok) {
+        setError(loaded.error);
+        if (loaded.authFailed) void checkToken();
       } else {
-        setRunbookHistory(pushHistory(RUNBOOK_HIST_KEY, url.trim()));
-        // Primary: attachments downloaded by the main process via the REST
-        // _links.download path (accepts API-token Basic auth).
-        let attachments: RunbookAttachment[] = (res.attachments ?? []).map(a => ({
-          filename: a.filename,
-          mediaType: a.mediaType,
-          isImage: a.isImage,
-          dataUri: a.dataUri,
-          id: a.id,
-          fileId: a.fileId,
-          srcUrl: a.srcUrl,
-        }));
-
-        const dbg: NonNullable<typeof imgDebug> = {
-          fetched: res.attDebug?.downloaded ?? attachments.length,
-          total: res.attDebug?.listed ?? attachments.length,
-          err: res.attDebug?.firstErr,
-          status: res.attDebug?.listStatus,
-          sampleUrl: 'REST _links.download',
-        };
-
-        // The REST child/attachment list is unreliable — editor "media" images
-        // (download-link <img>s) often aren't listed, so REST may return only a
-        // macro icon. Fetch every <img> URL in the HTML that REST didn't already
-        // cover (by filename) and merge it in, keyed by its source URL.
-        if (res.html) {
-          const restNames = new Set(attachments.map(a => a.filename.toLowerCase()));
-          const baseOf = (u: string) =>
-            decodeURIComponent((u.split('?')[0]?.split('/').pop()) || '').toLowerCase();
-          const missing = collectImageUrls(res.html).filter(u => {
-            const b = baseOf(u);
-            return b && !restNames.has(b);
-          });
-          if (missing.length > 0) {
-            const imgRes = await window.electronAPI?.confluence?.fetchImages({ urls: missing });
-            const results = imgRes?.results ?? [];
-            const failed = results.filter(r => !r.ok);
-            const firstFail = failed[0];
-            dbg.fetched += results.length - failed.length;
-            dbg.total += missing.length;
-            if (firstFail) {
-              dbg.sampleUrl = firstFail.url;
-              dbg.status = firstFail.status;
-              dbg.err = firstFail.error;
-              dbg.textHead = firstFail.textHead;
-            }
-            attachments = [
-              ...attachments,
-              ...results
-                .filter(r => r.ok && r.dataUri)
-                .map(r => ({
-                  filename: r.url.split('/').pop()?.split('?')[0] || 'image',
-                  mediaType: r.mediaType || 'image/png',
-                  isImage: r.isImage ?? true,
-                  dataUri: r.dataUri as string,
-                  srcUrl: r.url,
-                })),
-            ];
-          }
-        }
-
-        setImgDebug(dbg);
-        console.info('[release-pilot] attachments:', attachments.length, 'attDebug:', res.attDebug);
-        setResult({ ...res, attachments });
+        setRunbookHistory(pushUrlHistory(RUNBOOK_URL_HISTORY_KEY, url.trim()));
+        setImgDebug(loaded.imageStats);
+        setResult({ ...loaded.page, ok: true });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -369,68 +205,10 @@ export default function ReleasePilotPage() {
         icon={Rocket}
         title="Release Pilot"
         subtitle="Load a Confluence deployment runbook — activity table + all screenshots, including ones inside expand drawers."
-        actions={confluenceBaseUrl ? (
-          <div className="flex items-center gap-2">
-          <TokenStatusPill status={tokenStatus} onRecheck={() => void checkToken()} />
-          {connecting ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Connecting…
-            </span>
-          ) : connected ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-success/60 bg-success/10 px-3 py-1 text-xs text-success hover:bg-success/20 transition-colors">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-success" />
-                  Connected
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={handleDisconnect} className="text-destructive focus:text-destructive">
-                  <LogIn className="h-3.5 w-3.5 mr-2 rotate-180" /> Disconnect
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-card px-3 py-1 text-xs text-destructive hover:bg-accent transition-colors">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-destructive" />
-                  Not connected
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <div className="px-2 py-1.5 text-xs text-muted-foreground">Screenshots need a Confluence session.</div>
-                <DropdownMenuItem onClick={handleConnect}>
-                  <RefreshCw className="h-3.5 w-3.5 mr-2" /> Connect Confluence
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-          </div>
-        ) : undefined}
+        actions={confluenceBaseUrl ? <ConfluenceConnectionPills conn={conn} /> : undefined}
       />
 
-      {!hasCreds && (
-        <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
-          <SettingsIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>
-            Add your Confluence base URL, email, and API token in{' '}
-            {/* The fix is one click from the message rather than a place to go find:
-                this banner is the only thing on the page until the creds exist. */}
-            <Hint label="Open Settings on the Atlassian tab">
-              <button
-                type="button"
-                onClick={() => openSettings('atlassian')}
-                className="font-medium text-info underline underline-offset-2 hover:opacity-80"
-              >
-                Settings → Atlassian
-              </button>
-            </Hint>{' '}
-            before loading a runbook.
-          </span>
-        </div>
-      )}
+      {!hasCreds && <ConfluenceCredsBanner />}
 
       {/* An expired or rejected token fails every load — say so before the user
           pastes a URL, and carry the fix with the message. */}
