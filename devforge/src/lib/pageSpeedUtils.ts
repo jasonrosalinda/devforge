@@ -145,85 +145,111 @@ export function getPageSpeedInsightResultMessages(result1: PageSpeedInsightResul
 export type ComparableMetricKey =
     'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint';
 
-export interface RunComparison {
-    /** Better-or-equal on every compared metric AND strictly better on at least one. */
-    wins: boolean;
-    /** How many metrics are not worse — ranks near-misses when nothing wins outright. */
-    notWorse: number;
-    /** Mean candidate/baseline ratio; lower is faster. Infinity when nothing compared. */
-    ratio: number;
+export interface BaselineRun {
+    /** Index into the Before run history (0 for a single-run result). */
+    runIndex: number;
+    /** That run's value — the slowest any Before run measured. */
+    metric: PageSpeedMetrics;
 }
 
 /**
- * Compare one run against the run it is trying to beat.
- *
- * Uses `numericValue`, never the display string: the same metric can render as
- * "0.8 s" in one run and "980 ms" in another, and parsing those would compare 0.8
- * against 980. Every metric here is lower-is-better. Metrics the baseline never
- * measured (0) are skipped — there is nothing to beat.
+ * Per metric, the slowest Before run: the baseline an After run must stay under.
+ * Each metric picks its own run — SI's baseline can be run #7 while LCP's is run #2.
+ * Errored and unmeasured runs never count; a tie keeps the earliest run.
  */
-export function compareRunToBaseline(
-    candidate: PageSpeedInsightResult,
-    baseline: PageSpeedInsightResult,
+export function findBaselineRuns(
+    before: PageSpeedInsightResult | undefined,
     keys: ComparableMetricKey[],
-): RunComparison {
-    let allBetterOrEqual = true;
-    let strictlyBetter = false;
-    let notWorse = 0;
-    let ratioSum = 0;
-    let counted = 0;
+): Partial<Record<ComparableMetricKey, BaselineRun>> {
+    const found: Partial<Record<ComparableMetricKey, BaselineRun>> = {};
+    if (!before) return found;
+    const runs = before.runHistory?.length ? before.runHistory : [before];
+    for (const key of keys) {
+        runs.forEach((r, i) => {
+            if (resultHasError(r) || !metricMeasured(r[key])) return;
+            const current = found[key];
+            if (!current || r[key].numericValue > current.metric.numericValue) found[key] = { runIndex: i, metric: r[key] };
+        });
+    }
+    return found;
+}
+
+// The value as shown on screen, in one unit (ms for timings), so "0.6 s" and "600 ms"
+// compare equal. Strings can't be compared directly: Lighthouse writes "0.6 s"
+// (non-breaking space) while an aggregate writes "0.6 s", and a CLS of "0" aggregates
+// to "0.000". Falls back to the raw value when the display carries no number.
+function shownValue(metric: PageSpeedMetrics): number {
+    const display = String(metric.displayValue ?? '').replace(/[\s,]/g, '').toLowerCase();
+    const n = parseFloat(display);
+    if (!Number.isFinite(n)) return metric.numericValue;
+    return display.endsWith('s') && !display.endsWith('ms') ? n * 1000 : n;
+}
+
+// Above the baseline on screen, not just in the raw number: a run that rounds to the
+// baseline's display value ("2.14 s" vs "2.10 s", both "2.1 s") reads as a tie.
+function aboveBaseline(value: PageSpeedMetrics, baseline: PageSpeedMetrics): boolean {
+    return shownValue(value) > shownValue(baseline);
+}
+
+/**
+ * How far one run sits above the per-metric baselines, summed as fractions of each
+ * baseline (0.5 = 50 % slower). 0 means the run is within baseline on every metric.
+ * An errored run is Infinity so any measured run beats it; a metric the run did not
+ * measure, or that has no baseline, adds nothing.
+ */
+export function baselineExcess(
+    run: PageSpeedInsightResult,
+    baselines: Partial<Record<ComparableMetricKey, BaselineRun>>,
+    keys: ComparableMetricKey[],
+): number {
+    if (resultHasError(run)) return Number.POSITIVE_INFINITY;
+    let excess = 0;
+    for (const key of keys) {
+        const b = baselines[key]?.metric;
+        const v = run[key];
+        if (!b?.numericValue || !metricMeasured(v) || !aboveBaseline(v, b)) continue;
+        excess += v.numericValue / b.numericValue - 1;
+    }
+    return excess;
+}
+
+export interface DegradingRuns {
+    /** The slowest Before run for this metric — what an After run must stay under. */
+    baseline: BaselineRun;
+    /** Indexes into the After run history that land above the baseline. */
+    runs: Set<number>;
+}
+
+/**
+ * The After runs to blame for a regressed metric: those slower than EVERY Before run.
+ *
+ * A run inside the Before range is ordinary noise; one beyond Before's slowest run is
+ * an outlier no Before run matched, and it is what drags the average (or median) into
+ * the negative. Only metrics whose Improvement is actually negative are examined, and
+ * a run that rounds to the same display value as the baseline is not flagged.
+ */
+export function findDegradingRuns(
+    before: PageSpeedInsightResult | undefined,
+    after: PageSpeedInsightResult | undefined,
+    keys: ComparableMetricKey[],
+): Partial<Record<ComparableMetricKey, DegradingRuns>> {
+    const found: Partial<Record<ComparableMetricKey, DegradingRuns>> = {};
+    const afterRuns = after?.runHistory;
+    if (!before || !afterRuns?.length) return found;
+    const baselines = findBaselineRuns(before, keys);
 
     for (const key of keys) {
-        const b = baseline[key]?.numericValue ?? 0;
-        const c = candidate[key]?.numericValue ?? 0;
-        if (!b) continue;
-        counted++;
-        if (c > b) allBetterOrEqual = false; else notWorse++;
-        if (c < b) strictlyBetter = true;
-        ratioSum += c / b;
+        const pct = improvementPercent(before[key], after?.[key]);
+        const baseline = baselines[key];
+        if (pct === null || pct >= 0 || !baseline) continue;
+
+        const runs = new Set<number>();
+        afterRuns.forEach((r, i) => {
+            if (!resultHasError(r) && metricMeasured(r[key]) && aboveBaseline(r[key], baseline.metric)) runs.add(i);
+        });
+        if (runs.size) found[key] = { baseline, runs };
     }
-
-    return {
-        wins: counted > 0 && allBetterOrEqual && strictlyBetter,
-        notWorse,
-        ratio: counted ? ratioSum / counted : Number.POSITIVE_INFINITY,
-    };
-}
-
-export interface UnwinnableMetric {
-    key: ComparableMetricKey;
-    /** Best (lowest) value seen across every run sampled. */
-    best: number;
-    /** The value it has to beat. */
-    target: number;
-    /** How much the metric varies between runs — the noise floor. */
-    spread: number;
-    samples: number;
-}
-
-// A metric whose best value is still worse than the target by far more than the runs
-// vary between themselves is a real regression, not an unlucky sample. Re-running it
-// is wasted API quota, so a brute audit uses this to stop early and say why.
-const UNWINNABLE_SPREAD_FACTOR = 5;
-const MIN_SAMPLES_FOR_VERDICT = 3;
-
-export function findUnwinnableMetrics(
-    samples: Partial<Record<ComparableMetricKey, number[]>>,
-    baseline: PageSpeedInsightResult,
-    keys: ComparableMetricKey[],
-): UnwinnableMetric[] {
-    return keys.flatMap(key => {
-        const target = baseline[key]?.numericValue ?? 0;
-        const values = samples[key] ?? [];
-        if (!target || values.length < MIN_SAMPLES_FOR_VERDICT) return [];
-        const best = Math.min(...values);
-        const spread = Math.max(...values) - best;
-        const gap = best - target;
-        if (gap <= 0) return [];
-        // A perfectly stable metric (spread 0) that is worse is unwinnable outright.
-        if (spread > 0 && gap <= spread * UNWINNABLE_SPREAD_FACTOR) return [];
-        return [{ key, best, target, spread, samples: values.length }];
-    });
+    return found;
 }
 
 export function aggregatePageSpeedInsightResults(

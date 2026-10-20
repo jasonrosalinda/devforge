@@ -33,7 +33,7 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 **Use it to** measure a site's Lighthouse performance, or to prove a release made it faster or slower.
 
 - Add https URLs; each is audited on **Desktop** and **Mobile** through the PageSpeed Insights API: SI, LCP, CLS, TBT and FCP, plus opportunities and diagnostics.
-- There are three modes. **Single** takes one snapshot. **Comparison** shows before → after with % change. **Accuracy** does 1–10 runs per URL, averaged or median.
+- There are three modes. **Single** takes one snapshot. **Comparison** shows before → after with % change; when a metric regresses, the After runs slower than every Before run are flagged red against the slowest Before run (the per-metric baseline); **Re-audit** re-runs just those runs, up to 3 attempts each, until they land within baseline. **Accuracy** does 1–10 runs per URL, averaged or median.
 - **Copy for Teams** (Excel-style table), **Copy as Image** and **Claude Analysis** (a short findings / assessment summary).
 - A **Fix brief** writes a Markdown task file into a repo folder for an AI coding agent. **History** keeps up to 25 saved runs.
 - **Needs:** a Google PageSpeed API key in **Settings → API Keys**. Claude Analysis needs the Claude CLI. Full guide: [docs/pagespeed-insights.md](docs/pagespeed-insights.md).

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, RotateCw, AlertTriangle, Copy, Zap, Play, Ban, Image as ImageIcon } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, RotateCw, AlertTriangle, ArrowUp, Copy, Play, Ban, Image as ImageIcon } from 'lucide-react';
 import { marked } from 'marked';
 
 type AnalysisStatus = 'running' | 'done' | 'error';
@@ -10,7 +10,7 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, compareRunToBaseline, improvementPercent, findUnwinnableMetrics, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey, type UnwinnableMetric } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, improvementPercent, baselineExcess, findBaselineRuns, findDegradingRuns, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -121,11 +121,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [auditing2, setAuditing2] = useState(false);
     const [retryingRows, setRetryingRows] = useState<Set<string>>(new Set());
     const [rerunningRuns, setRerunningRuns] = useState<Set<string>>(new Set());
-    // Brute audit: run key → the attempt currently in flight (1-based).
-    const [bruteProgress, setBruteProgress] = useState<Record<string, number>>({});
-    const bruteCancelRef = useRef<Set<string>>(new Set());
-    // Rows the user asked to brute anyway after being told the regression is real.
-    const bruteForceRef = useRef<Set<string>>(new Set());
+    // Re-audit of flagged runs: row key → the run and attempt in flight (both 1-based).
+    const [reauditProgress, setReauditProgress] = useState<Record<string, { run: number; attempt: number }>>({});
+    const reauditCancelRef = useRef<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
     const [expandedInsights, setExpandedInsights] = useState<Set<string>>(new Set());
     // Drawer Before/After cards — collapsed keys (default open).
@@ -151,8 +149,8 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [times2, setTimes2] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
     const isAuditing = auditing1 || auditing2;
     const isRetryingAny = retryingRows.size > 0;
-    // One brute at a time — each one can fire up to 10 audits at the API.
-    const isBrutingAny = Object.keys(bruteProgress).length > 0;
+    // One re-audit at a time — each can fire up to 3 audits per flagged run.
+    const isReauditingAny = Object.keys(reauditProgress).length > 0;
 
     // Let the parent re-evaluate results-dependent UI (e.g. header "Copy as Table" button)
     // whenever this strategy's results change — refs alone don't trigger parent re-renders.
@@ -492,28 +490,23 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         }
     }, [auditWithRetry, config.urls, results1, results2]);
 
-    // ─── Brute audit ──────────────────────────────────────────────────────────
-    // Re-run the noisiest runs of one After row until the ROW as a whole beats its
-    // Before row on every shown metric. PSI is noisy enough that one unlucky run drags
-    // an average down and makes a genuinely faster release read as a regression; this
-    // keeps replacing the worst offender until the aggregate turns positive.
-    //
-    // Budget scales with the run count — more runs means one bad run is diluted more,
-    // but also more runs that can go bad.
-    const bruteBudget = () => Math.max(5, config.runs * 5);
+    // ─── Re-audit flagged runs ────────────────────────────────────────────────
+    // PSI is noisy enough that one unlucky run drags an average down and makes a
+    // release read as a regression. Re-audit re-runs only the After runs flagged as
+    // slower than the Before baseline, up to REAUDIT_MAX_ATTEMPTS times each, stopping
+    // a run as soon as it lands within baseline on every shown metric. A fresh run only
+    // replaces the flagged one when it sits closer to the baselines, so a row can never
+    // end up worse than where it started.
+    const REAUDIT_MAX_ATTEMPTS = 3;
 
-    // Only the metrics the user is actually showing count toward the verdict.
-    const bruteMetricKeys = (): ComparableMetricKey[] => ([
+    // Only the metrics the user is actually showing count.
+    const shownMetricKeys = (): ComparableMetricKey[] => ([
         ['speedIndex', displayAudit.SI],
         ['largestContentfulPaint', displayAudit.LCP],
         ['cumulativeLayoutShift', displayAudit.CLS],
         ['totalBlockingTime', displayAudit.TBT],
         ['firstContentfulPaint', displayAudit.FCP],
     ] as const).filter(([, show]) => show).map(([key]) => key);
-
-    // Brute audit runs against the whole row, so the baseline is the Before aggregate —
-    // the number the Improvement column actually compares against.
-    const bruteBaseline = (index: number): PageSpeedInsightResult | undefined => getSlot1(index) || undefined;
 
     const METRIC_LABELS: Record<ComparableMetricKey, string> = {
         speedIndex: 'SI',
@@ -523,117 +516,78 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         firstContentfulPaint: 'FCP',
     };
 
-    const formatMetricValue = (key: ComparableMetricKey, value: number): string => {
-        if (key === 'cumulativeLayoutShift') return value.toFixed(3);
-        return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`;
+    // After runs flagged on any shown metric (red rows), in run order.
+    const flaggedRunIndexes = (index: number): number[] => {
+        const found = findDegradingRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys());
+        return [...new Set(Object.values(found).flatMap(d => [...d.runs]))].sort((x, y) => x - y);
     };
 
-
-    const bruteAudit = useCallback(async (index: number) => {
+    const reauditFlaggedRuns = useCallback(async (index: number) => {
         const url = config.urls[index];
         if (!url || !config.comparisonMode) return;
         const key = `2-${index}`;
 
-        // Second click on a running brute stops it after the attempt in flight.
-        if (bruteProgress[key] !== undefined) {
-            bruteCancelRef.current.add(key);
+        // Second click on a running re-audit stops it after the attempt in flight.
+        if (reauditProgress[key]) {
+            reauditCancelRef.current.add(key);
             return;
         }
 
-        const baseline = bruteBaseline(index);
-        if (!baseline) {
-            toast.warning(`Audit ${config.beforeLabel} first — there is nothing to beat.`);
-            return;
-        }
-        const after = getSlot2(index) || undefined;
-        let history = after?.runHistory ? [...after.runHistory] : (after ? [after] : []);
-        if (!history.length) {
-            toast.warning(`Audit ${config.afterLabel} first.`);
-            return;
-        }
+        const before = getSlot1(index) || undefined;
+        let history = [...((getSlot2(index) || undefined)?.runHistory ?? [])];
+        const flagged = flaggedRunIndexes(index);
+        if (!before || !history.length || !flagged.length) return;
 
-        const keys = bruteMetricKeys();
-        const budget = bruteBudget();
+        const keys = shownMetricKeys();
+        // Fixed for the whole re-audit: the Before side is not being re-run.
+        const baselines = findBaselineRuns(before, keys);
         const commit = (runs: PageSpeedInsightResult[]) => setResults2(prev => {
             const next = [...prev];
             next[index] = aggregatePageSpeedInsightResults(url, runs, config.aggregation);
             return next;
         });
 
-        // Every value ever seen for this row, so a metric's real spread can be told
-        // apart from an unlucky run.
-        const samples: Partial<Record<ComparableMetricKey, number[]>> = {};
-        const addSamples = (run: PageSpeedInsightResult) => keys.forEach(k => {
-            const v = run[k]?.numericValue;
-            if (v) (samples[k] ??= []).push(v);
-        });
-        history.forEach(addSamples);
-
-        const describeBlockers = (blockers: UnwinnableMetric[]) => blockers
-            .map(b => `${METRIC_LABELS[b.key]} (best ${formatMetricValue(b.key, b.best)} vs ${formatMetricValue(b.key, b.target)}, varies by only ${formatMetricValue(b.key, b.spread)} across ${b.samples} runs)`)
-            .join(' and ');
-
-        // Don't spend a single audit proving what the existing runs already show.
-        const preBlockers = findUnwinnableMetrics(samples, baseline, keys);
-        if (preBlockers.length && !bruteForceRef.current.has(key)) {
-            bruteForceRef.current.add(key);
-            toast.warning(`${describeBlockers(preBlockers)} — that is a real regression, not run-to-run noise, so re-running cannot make this row positive. Click again to brute anyway.`);
-            return;
-        }
-        bruteForceRef.current.delete(key);
-
-        bruteCancelRef.current.delete(key);
+        reauditCancelRef.current.delete(key);
         if (activeAuditsRef.current === 0) setAuditEnd(null);
         activeAuditsRef.current++;
 
-        let won = compareRunToBaseline(aggregatePageSpeedInsightResults(url, history, config.aggregation), baseline, keys).wins;
-        let blockers: UnwinnableMetric[] = [];
-        let attempt = 0;
+        let fixed = 0;
         try {
-            while (!won && attempt < budget) {
-                if (bruteCancelRef.current.has(key)) break;
-                attempt++;
-                setBruteProgress(prev => ({ ...prev, [key]: attempt }));
-
-                // Replace the run that is dragging the row down hardest — re-running a
-                // good run would only risk making the aggregate worse.
-                let worstIdx = 0;
-                let worstRatio = -Infinity;
-                history.forEach((run, i) => {
-                    const { ratio } = compareRunToBaseline(run, baseline, keys);
-                    if (ratio > worstRatio) { worstRatio = ratio; worstIdx = i; }
-                });
-
-                let fresh: PageSpeedInsightResult;
+            runs: for (const runIdx of flagged) {
+                const runKey = `2-${index}-${runIdx}`;
+                setRerunningRuns(prev => new Set(prev).add(runKey));
+                let excess = baselineExcess(history[runIdx]!, baselines, keys);
                 try {
-                    fresh = await auditWithRetry(url, undefined, 1);
-                } catch (error) {
-                    console.error(`Brute audit attempt ${attempt} failed for ${url}:`, error);
-                    continue;
+                    for (let attempt = 1; attempt <= REAUDIT_MAX_ATTEMPTS && excess > 0; attempt++) {
+                        if (reauditCancelRef.current.has(key)) break runs;
+                        setReauditProgress(prev => ({ ...prev, [key]: { run: runIdx + 1, attempt } }));
+                        let fresh: PageSpeedInsightResult;
+                        try {
+                            fresh = await auditWithRetry(url, undefined, 1);
+                        } catch (error) {
+                            console.error(`Re-audit of run ${runIdx + 1} (attempt ${attempt}) failed for ${url}:`, error);
+                            continue;
+                        }
+                        const freshExcess = baselineExcess(fresh, baselines, keys);
+                        if (freshExcess < excess) {
+                            history = history.map((r, i) => (i === runIdx ? fresh : r));
+                            excess = freshExcess;
+                            commit(history);
+                        }
+                    }
+                } finally {
+                    setRerunningRuns(prev => {
+                        const next = new Set(prev);
+                        next.delete(runKey);
+                        return next;
+                    });
                 }
-                if (slotHasError(fresh)) continue;
-                addSamples(fresh);
-
-                // Only keep the new run if it is closer to beating the baseline than the
-                // one it replaces, so the row can never get worse than where it started.
-                const freshRatio = compareRunToBaseline(fresh, baseline, keys).ratio;
-                if (freshRatio < worstRatio) {
-                    history = history.map((run, i) => (i === worstIdx ? fresh : run));
-                    commit(history);
-                    won = compareRunToBaseline(aggregatePageSpeedInsightResults(url, history, config.aggregation), baseline, keys).wins;
-                }
-
-                // Each fresh run sharpens the noise estimate; once a metric is provably a
-                // real regression, stop rather than burn the rest of the budget on it.
-                if (!won) {
-                    blockers = findUnwinnableMetrics(samples, baseline, keys);
-                    if (blockers.length) break;
-                }
+                if (excess === 0) fixed++;
             }
         } finally {
-            const cancelled = bruteCancelRef.current.has(key);
-            bruteCancelRef.current.delete(key);
-            setBruteProgress(prev => {
+            const cancelled = reauditCancelRef.current.has(key);
+            reauditCancelRef.current.delete(key);
+            setReauditProgress(prev => {
                 const next = { ...prev };
                 delete next[key];
                 return next;
@@ -642,13 +596,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             activeAuditsRef.current--;
             if (activeAuditsRef.current === 0) setAuditEnd(new Date());
 
-            if (won) toast.success(`${config.afterLabel} now beats ${config.beforeLabel} on every shown metric (${attempt} of ${budget} attempts).`);
-            else if (cancelled) toast.info(`Brute audit stopped after ${attempt} attempt(s). Kept the best runs found.`);
-            else if (blockers.length) toast.warning(`Stopped after ${attempt} of ${budget} attempts: ${describeBlockers(blockers)} — a real regression that re-running cannot fix. Kept the best runs found.`);
-            else toast.warning(`Still not positive on every shown metric after ${budget} attempts. Kept the best runs found.`);
+            const total = flagged.length;
+            if (cancelled) toast.info(`Re-audit stopped. ${fixed} of ${total} flagged run(s) now within the ${config.beforeLabel} baseline.`);
+            else if (fixed === total) toast.success(`All ${total} flagged run(s) are now within the ${config.beforeLabel} baseline.`);
+            else toast.warning(`${fixed} of ${total} flagged run(s) now within the ${config.beforeLabel} baseline. The rest stayed above it after ${REAUDIT_MAX_ATTEMPTS} attempts each, which points to a real regression. Kept the closest runs found.`);
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [auditWithRetry, config.urls, config.runs, config.aggregation, config.comparisonMode, config.beforeLabel, config.afterLabel, results1, results2, bruteProgress]);
+    }, [auditWithRetry, config.urls, config.aggregation, config.comparisonMode, config.beforeLabel, results1, results2, reauditProgress]);
 
     const calculateImprovement = (before?: PageSpeedMetrics, after?: PageSpeedMetrics): React.ReactNode => {
         const improvement = improvementPercent(before, after);
@@ -743,7 +697,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         matchedByMetric.set(m.key, new Set(vals2.filter(v => set1.has(v))));
                     }
                 }
-                const runCell = (v: string, metricKey: string): string => {
+                // After runs slower than every Before run — the ones dragging a regression.
+                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key));
+                // The slowest Before run per metric — the baseline those After runs are held to.
+                const baselines = single ? {} : findBaselineRuns(r1, metricDefs.map(m => m.key));
+                const runCell = (v: string, metricKey: ComparableMetricKey, degraded = false, baseline = false): string => {
+                    if (degraded) return td(v, ';background:#fde2e2;color:#b91c1c;font-weight:600');
+                    if (baseline) return td(v, ';outline:1px dashed #dc2626;outline-offset:-3px;font-weight:600');
                     const hl = v !== '-' && matchedByMetric.get(metricKey)?.has(v);
                     return td(v, hl ? ';background:#fff3cd;color:#92400e;font-weight:600;font-style:italic' : ';color:#888');
                 };
@@ -756,7 +716,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         if (single) rtds += td(v1, ';color:#888');
                         else {
                             const v2 = run2?.[m.key]?.displayValue ?? '-';
-                            rtds += runCell(v1, m.key) + runCell(v2, m.key);
+                            rtds += runCell(v1, m.key, false, baselines[m.key]?.runIndex === ri) + runCell(v2, m.key, !!degrading[m.key]?.runs.has(ri));
                             if (showImp) rtds += td('');
                         }
                     }
@@ -799,11 +759,15 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         matched.set(m.key, new Set(vals2.filter(v => set1.has(v))));
                     }
                 }
+                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key));
                 const mark = (v: string, key: string) => (v !== '-' && matched.get(key)?.has(v)) ? `*${v}*` : v;
+                // ↑ = slower than every Before run, i.e. this run drives the regression.
+                const markAfter = (v: string, key: ComparableMetricKey, ri: number) =>
+                    degrading[key]?.runs.has(ri) ? `${v} ↑` : mark(v, key);
                 for (let ri = 0; ri < runCount; ri++) {
                     const runParts = metricDefs.map(m => single
                         ? `${m.label} ${h1[ri]?.[m.key]?.displayValue ?? '-'}`
-                        : `${m.label} ${mark(h1[ri]?.[m.key]?.displayValue ?? '-', m.key)} → ${mark(h2[ri]?.[m.key]?.displayValue ?? '-', m.key)}`);
+                        : `${m.label} ${mark(h1[ri]?.[m.key]?.displayValue ?? '-', m.key)} → ${markAfter(h2[ri]?.[m.key]?.displayValue ?? '-', m.key, ri)}`);
                     runLines += `\n  #${ri + 1}: ${runParts.join(', ')}`;
                 }
             }
@@ -1475,6 +1439,26 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             },
         );
 
+        // After runs slower than every Before run — the outliers behind a regressed aggregate.
+        const degradingSection = (() => {
+            const found = findDegradingRuns(r1, r2, shownMetricKeys());
+            const lines = shownMetricKeys().flatMap(key => {
+                const d = found[key];
+                if (!d) return [];
+                const runs = [...d.runs].map(i => `#${i + 1} (${h2?.[i]?.[key]?.displayValue})`).join(', ');
+                return [`- ${METRIC_LABELS[key]}: ${runs} — baseline (slowest ${config.beforeLabel} run, #${d.baseline.runIndex + 1}) was ${d.baseline.metric.displayValue}`];
+            });
+            if (!lines.length) return '';
+            return [
+                '',
+                `### ${config.afterLabel} runs driving the regression`,
+                `These ${config.afterLabel} runs are slower than EVERY ${config.beforeLabel} run on a metric whose aggregate regressed:`,
+                lines.join('\n'),
+                'Interpretation: if only one or two runs sit above the Before range while the rest overlap it, the regression is likely an outlier (noise) rather than a consistent code-level change.',
+                '',
+            ].join('\n');
+        })();
+
         return [
             `URL: ${url}`,
             `Strategy: ${config.strategy}`,
@@ -1484,6 +1468,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             slot(config.afterLabel, r2, h2),
             evidenceSection,
             matchedSection,
+            degradingSection,
         ].join('\n');
     };
 
@@ -1494,27 +1479,43 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return `Comparison across ${blocks.length} URL(s).\n\n${blocks.join('\n\n---\n\n')}`;
     };
 
-    // Values appearing in BOTH before and after run sets for a metric (any run index) —
-    // highlighted to flag likely network jitter / measurement noise.
-    const crossRunMatches = (index: number): Map<string, Set<string>> => {
-        const map = new Map<string, Set<string>>();
-        const h1 = (getSlot1(index) || undefined)?.runHistory ?? [];
-        const h2 = (getSlot2(index) || undefined)?.runHistory ?? [];
-        if (!h1.length || !h2.length) return map;
-        const keys = ['speedIndex', 'largestContentfulPaint', 'cumulativeLayoutShift', 'totalBlockingTime', 'firstContentfulPaint'] as const;
-        for (const key of keys) {
-            const set1 = new Set(h1.map(r => r[key]?.displayValue).filter(Boolean) as string[]);
-            const matches = new Set((h2.map(r => r[key]?.displayValue).filter(Boolean) as string[]).filter(v => set1.has(v)));
-            if (matches.size) map.set(key, matches);
-        }
-        return map;
-    };
-
     // Individual-runs metrics table. Insights are consolidated separately, below the table.
     const renderRunHistory = (history: PageSpeedInsightResult[], index: number, slotKey: '1' | '2'): React.ReactNode => {
-        const matches = crossRunMatches(index);
-        const hl = (key: 'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint', run: PageSpeedInsightResult): string =>
-            matches.get(key)?.has(run[key]?.displayValue ?? '') ? ' italic font-semibold text-warning' : '';
+        // After runs slower than every Before run on a regressed metric — the runs that
+        // turn the Improvement negative. Only the After table can drag a comparison down.
+        const degrading = slotKey === '2' && config.comparisonMode
+            ? findDegradingRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys())
+            : {};
+        // Before side: per metric, the slowest run is the baseline the After runs are held to —
+        // SI's baseline and LCP's can come from different runs.
+        const baselines = slotKey === '1' && config.comparisonMode && getSlot2(index)
+            ? findBaselineRuns(getSlot1(index) || undefined, shownMetricKeys())
+            : {};
+        const metricCell = (key: ComparableMetricKey, run: PageSpeedInsightResult, runIdx: number): React.ReactNode => {
+            if (baselines[key]?.runIndex === runIdx) {
+                return (
+                    <td className="text-center py-1 px-2">
+                        <Hint label={`Baseline: the slowest ${config.beforeLabel} ${METRIC_LABELS[key]} — ${config.afterLabel} runs above it are flagged`}>
+                            <span className="rounded border border-dashed border-error/60 px-1">{historyMetricValue(run[key])}</span>
+                        </Hint>
+                    </td>
+                );
+            }
+            const d = degrading[key];
+            if (!d?.runs.has(runIdx)) {
+                return <td className="text-center py-1 px-2">{historyMetricValue(run[key])}</td>;
+            }
+            return (
+                <td className="text-center py-1 px-2 font-semibold text-error">
+                    <Hint label={`Slower than every ${config.beforeLabel} run (baseline ${d.baseline.metric.displayValue}, run #${d.baseline.runIndex + 1}) — this run pulls the ${METRIC_LABELS[key]} ${config.aggregation} into a regression`}>
+                        <span className="inline-flex items-center gap-0.5">
+                            {historyMetricValue(run[key])}
+                            <ArrowUp className="h-3 w-3" />
+                        </span>
+                    </Hint>
+                </td>
+            );
+        };
         // Run + shown metrics + the trailing re-run column (hidden while copying as image).
         const runColCount = 1
             + [displayAudit.SI, displayAudit.LCP, displayAudit.CLS, displayAudit.TBT, displayAudit.FCP].filter(Boolean).length
@@ -1550,7 +1551,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         ].filter(Boolean).join(' / ');
                         return (
                             <React.Fragment key={runIdx}>
-                            <tr className={`border-b border-border/50 ${messagesOpen && runMessages.length > 0 ? '' : 'last:border-0'}`}>
+                            <tr className={`border-b border-border/50 ${messagesOpen && runMessages.length > 0 ? '' : 'last:border-0'}${Object.values(degrading).some(d => d.runs.has(runIdx)) ? ' bg-error/10' : ''}`}>
                                 <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
                                     <Hint label={`Run #${runIdx + 1}${run.fetchTime ? ` - ${formatRunTime(run.fetchTime)}` : ''}`}>
                                         <span>#{runIdx + 1}</span>
@@ -1568,17 +1569,17 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                         </Hint>
                                     )}
                                 </td>
-                                {displayAudit.SI && <td className={`text-center py-1 px-2${hl('speedIndex', run)}`}>{historyMetricValue(run.speedIndex)}</td>}
-                                {displayAudit.LCP && <td className={`text-center py-1 px-2${hl('largestContentfulPaint', run)}`}>{historyMetricValue(run.largestContentfulPaint)}</td>}
-                                {displayAudit.CLS && <td className={`text-center py-1 px-2${hl('cumulativeLayoutShift', run)}`}>{historyMetricValue(run.cumulativeLayoutShift)}</td>}
-                                {displayAudit.TBT && <td className={`text-center py-1 px-2${hl('totalBlockingTime', run)}`}>{historyMetricValue(run.totalBlockingTime)}</td>}
-                                {displayAudit.FCP && <td className={`text-center py-1 px-2${hl('firstContentfulPaint', run)}`}>{historyMetricValue(run.firstContentfulPaint)}</td>}
+                                {displayAudit.SI && metricCell('speedIndex', run, runIdx)}
+                                {displayAudit.LCP && metricCell('largestContentfulPaint', run, runIdx)}
+                                {displayAudit.CLS && metricCell('cumulativeLayoutShift', run, runIdx)}
+                                {displayAudit.TBT && metricCell('totalBlockingTime', run, runIdx)}
+                                {displayAudit.FCP && metricCell('firstContentfulPaint', run, runIdx)}
                                 {!copying && (
                                     <td className="py-1 px-2 w-px whitespace-nowrap text-right" data-html2canvas-ignore="true">
                                         <Hint label={`Re-run only run #${runIdx + 1}, then re-aggregate this row`}>
                                             <button
                                                 onClick={() => rerunSingleRun(index, runIdx, slotKey)}
-                                                disabled={isAuditing || isRetryingAny || rerunning || isBrutingAny}
+                                                disabled={isAuditing || isRetryingAny || rerunning || isReauditingAny}
                                                 className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors"
                                             >
                                                 <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
@@ -1853,11 +1854,10 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                         {history2 && showSide2 && (() => {
                                                             const cardKey = `runs-${index}-2`;
                                                             const cardOpen = !collapsedRunCards.has(cardKey);
-                                                            const bruteKey = `2-${index}`;
-                                                            const bruteAttempt = bruteProgress[bruteKey];
-                                                            const bruting = bruteAttempt !== undefined;
-                                                            // Needs a Before row to beat; comparison mode only.
-                                                            const canBrute = config.comparisonMode && !!bruteBaseline(index);
+                                                            const progress = reauditProgress[`2-${index}`];
+                                                            const reauditing = progress !== undefined;
+                                                            // Comparison mode only, and only while there are flagged (red) runs.
+                                                            const flaggedCount = config.comparisonMode ? flaggedRunIndexes(index).length : 0;
                                                             return (
                                                             <div className="rounded-md border border-border bg-background p-3">
                                                                 <div className="mb-1.5 flex items-center gap-1">
@@ -1866,18 +1866,20 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                         <p className="text-xs font-medium text-muted-foreground">{config.afterLabel} — Individual Runs</p>
                                                                     </button>
                                                                     </Hint>
-                                                                    {!copying && canBrute && (
-                                                                        <Hint label={bruting
-                                                                            ? `Attempt ${bruteAttempt} of ${bruteBudget()} — click to stop and keep the best runs found`
-                                                                            : `Brute audit: keep replacing the worst run until ${config.afterLabel} beats ${config.beforeLabel} on every shown metric, up to ${bruteBudget()} attempts (${config.runs} run${config.runs === 1 ? '' : 's'} × 5)`}>
+                                                                    {!copying && (flaggedCount > 0 || reauditing) && (
+                                                                        <Hint label={reauditing
+                                                                            ? `Re-auditing run #${progress.run}, attempt ${progress.attempt} of ${REAUDIT_MAX_ATTEMPTS} — click to stop and keep the closest runs found`
+                                                                            : `Re-audit the ${flaggedCount} flagged run${flaggedCount === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each) until each is within the ${config.beforeLabel} baseline`}>
                                                                             <button
-                                                                                onClick={() => bruteAudit(index)}
-                                                                                disabled={isAuditing || isRetryingAny || (isBrutingAny && !bruting)}
-                                                                                className={`inline-flex items-center justify-center gap-0.5 rounded p-1 hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors ${bruting ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                                                                                onClick={() => reauditFlaggedRuns(index)}
+                                                                                disabled={isAuditing || isRetryingAny || (isReauditingAny && !reauditing)}
+                                                                                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors ${reauditing ? 'text-primary' : 'text-error hover:text-foreground'}`}
                                                                                 data-html2canvas-ignore="true"
                                                                             >
-                                                                                <Zap className={`h-3.5 w-3.5 ${bruting ? 'animate-pulse' : ''}`} />
-                                                                                {bruting && <span className="text-[10px] font-medium tabular-nums">{bruteAttempt}/{bruteBudget()}</span>}
+                                                                                <RotateCcw className={`h-3.5 w-3.5 ${reauditing ? 'animate-spin' : ''}`} />
+                                                                                {reauditing
+                                                                                    ? <span className="tabular-nums">#{progress.run} · {progress.attempt}/{REAUDIT_MAX_ATTEMPTS}</span>
+                                                                                    : <span>Re-audit ({flaggedCount})</span>}
                                                                             </button>
                                                                         </Hint>
                                                                     )}
