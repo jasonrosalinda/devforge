@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PageSpeedConfiguration, PageSpeedInsightResult, PageSpeedMetrics } from '@shared/types/pageSpeedInsight.types';
-import { allRunsFailed, defaultPageSpeedConfiguration, describePageSpeedTestEnvironment, baselineExcess, findBaselineRuns, findDegradingRuns, displayPageSpeedAudit, improvementPercent, resultHasError, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
+import { absoluteChange, zeroBaseline, zeroBaselineFloor, allRunsFailed, defaultPageSpeedConfiguration, describePageSpeedTestEnvironment, aggregateValues, excessOverTargets, findDegradingRuns, displayPageSpeedAudit, improvementPercent, resultHasError, mapUrlsToPreviousIndexes, realignIndexSet, realignIndexedRecord, realignSlots, type ComparableMetricKey } from './pageSpeedUtils';
 
 const m = (numericValue: number, displayValue = ''): PageSpeedMetrics => ({ numericValue, displayValue, numericUnit: 'millisecond' });
 
@@ -154,8 +154,23 @@ describe('improvementPercent', () => {
         expect(improvementPercent(measured(2, '2'), undefined)).toBeNull();
     });
 
-    it('is null when the baseline is zero — there is no percentage of nothing', () => {
-        expect(improvementPercent(measured(0, '0'), measured(0, '0'))).toBeNull();
+    it('is 0 when both runs measured zero — nothing changed', () => {
+        expect(improvementPercent(measured(0, '0'), measured(0, '0.000'))).toBe(0);
+    });
+
+    it('measures a rise from a zero baseline against the "good" threshold, not against nothing', () => {
+        // CLS: 0.004 is 4% of 0.1.
+        expect(improvementPercent(measured(0, '0'), measured(0.004, '0.004'))).toBeCloseTo(-4);
+        expect(improvementPercent(measured(0, '0.000'), measured(0.001, '0.001'))).toBeCloseTo(-1);
+        // TBT: 50 ms is 25% of 200 ms; 300 ms goes past it.
+        const ms = (v: number, d: string): PageSpeedMetrics => ({ numericValue: v, displayValue: d, numericUnit: 'millisecond' });
+        expect(improvementPercent(ms(0, '0 ms'), ms(50, '50 ms'))).toBeCloseTo(-25);
+        expect(improvementPercent(ms(0, '0 ms'), ms(300, '300 ms'))).toBeCloseTo(-150);
+        expect(zeroBaselineFloor(measured(0, '0')).value).toBe(0.1);
+        expect(zeroBaselineFloor(ms(0, '0 ms')).value).toBe(200);
+        expect(zeroBaseline(measured(0, '0.000'), measured(0.001, '0.001'))).toBe(true);
+        expect(zeroBaseline(measured(0, '0'), measured(0, '0.000'))).toBe(false);
+        expect(zeroBaseline(measured(0.1, '0.1'), measured(0.2, '0.2'))).toBe(false);
     });
 
     it('falls back to the raw value when the displayed one is not a number', () => {
@@ -163,139 +178,123 @@ describe('improvementPercent', () => {
     });
 });
 
-// The baseline is per metric: SI's slowest Before run and LCP's can be different runs.
-describe('findBaselineRuns', () => {
-    it('picks the slowest Before run for each metric independently', () => {
-        const before = {
-            ...run(),
-            runHistory: [
-                run({ speedIndex: m(2100, '2.1 s'), largestContentfulPaint: m(500, '0.5 s') }),
-                run({ speedIndex: m(1000, '1.0 s'), largestContentfulPaint: m(700, '0.7 s') }),
-            ],
-        };
-        const found = findBaselineRuns(before, ['speedIndex', 'largestContentfulPaint']);
-        expect(found.speedIndex!.runIndex).toBe(0);
-        expect(found.largestContentfulPaint!.runIndex).toBe(1);
-    });
-
-    it('keeps the earliest run on a tie and skips errored or unmeasured runs', () => {
-        const failed = { ...run({ speedIndex: m(9000, '9.0 s') }), errorResponse: { code: 500, message: 'boom' } };
-        const unmeasured = run({ speedIndex: m(0, '') });
-        const before = { ...run(), runHistory: [failed, unmeasured, run({ speedIndex: m(1500, '1.5 s') }), run({ speedIndex: m(1500, '1.5 s') })] };
-        expect(findBaselineRuns(before, ['speedIndex']).speedIndex!.runIndex).toBe(2);
-    });
-
-    it('returns nothing without a Before result', () => {
-        expect(findBaselineRuns(undefined, ['speedIndex'])).toEqual({});
-    });
-});
-
-// The After runs to blame for a negative Improvement: those slower than every Before
-// run. Mirrors the screenshot case — Before SI 0.9–2.1 s, After #1 3.5 s and #2 2.6 s.
+// The After runs to blame for a negative Improvement: the fewest worst runs whose
+// removal brings the After score back to the Before score.
 describe('findDegradingRuns', () => {
     const si = (sec: number) => m(sec * 1000, `${sec.toFixed(1)} s`);
-    const runsOf = (...values: number[]) => values.map(v => run({ speedIndex: si(v) }));
-    const agg = (history: PageSpeedInsightResult[], avg: number): PageSpeedInsightResult =>
-        ({ ...run({ speedIndex: si(avg) }), runHistory: history });
-    const before = agg(runsOf(1.2, 1.0, 1.1, 0.9, 1.1, 1.1, 2.1), 1.2);
+    const lcp = (sec: number) => run({ largestContentfulPaint: m(sec * 1000, `${sec.toFixed(1)} s`) });
+    const slotSI = (secs: number[], shown: number): PageSpeedInsightResult =>
+        ({ ...run({ speedIndex: si(shown) }), runHistory: secs.map(v => run({ speedIndex: si(v) })) });
+    const slotLCP = (secs: number[], shown: number): PageSpeedInsightResult =>
+        ({ ...lcp(shown), runHistory: secs.map(lcp) });
     const SI: ComparableMetricKey[] = ['speedIndex'];
+    const LCP: ComparableMetricKey[] = ['largestContentfulPaint'];
 
-    it('flags only the After runs above the slowest Before run', () => {
-        const after = agg(runsOf(3.5, 2.6, 0.9, 0.9, 1.0, 1.1, 1.9), 1.7);
+    it('flags the outlier runs behind an average regression (screenshot 1: SI 1.2 s → 1.7 s)', () => {
+        const before = slotSI([1.2, 1.0, 1.1, 0.9, 1.1, 1.1, 2.1], 1.2);
+        const after = slotSI([3.5, 2.6, 0.9, 0.9, 1.0, 1.1, 1.9], 1.7);
         const found = findDegradingRuns(before, after, SI);
         expect([...found.speedIndex!.runs]).toEqual([0, 1]);
-        expect(found.speedIndex!.baseline).toMatchObject({ runIndex: 6, metric: { displayValue: '2.1 s' } });
+        expect(found.speedIndex!.target.displayValue).toBe('1.2 s');
+        expect(found.speedIndex!.without).toBeCloseTo(1160);
+    });
+
+    it('flags runs inside the Before range when more of them land slow (screenshot 2: LCP 9.6 s → 12.7 s)', () => {
+        // Before: 3 of 7 runs slow (16.9–18.3 s). After: 5 of 7 slow, none slower than 18.3 s.
+        const before = slotLCP([2.6, 16.9, 16.9, 2.9, 18.3, 6.9, 2.6], 9.6);
+        const after = slotLCP([15.8, 15.8, 2.7, 16.5, 17.6, 3.0, 17.5], 12.7);
+        const found = findDegradingRuns(before, after, LCP);
+        expect([...found.largestContentfulPaint!.runs].sort()).toEqual([3, 4, 6]);
+        expect(found.largestContentfulPaint!.without).toBeLessThanOrEqual(9600);
+    });
+
+    it('uses the median rule when the row is median-aggregated', () => {
+        const before = slotLCP([2.6, 16.9, 16.9, 2.9, 18.3, 6.9, 2.6], 6.9);
+        const after = slotLCP([15.8, 15.8, 2.7, 16.5, 17.6, 3.0, 17.5], 15.8);
+        const found = findDegradingRuns(before, after, LCP, 'median');
+        // Dropping 17.6, 17.5, 16.5 and one 15.8 leaves 2.7, 3.0, 15.8 → median 3.0 s.
+        expect(found.largestContentfulPaint!.runs.size).toBe(4);
+        expect(found.largestContentfulPaint!.without).toBe(3000);
     });
 
     it('flags nothing when the metric did not regress', () => {
-        const after = agg(runsOf(3.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5), 1.0);
-        expect(findDegradingRuns(before, after, SI)).toEqual({});
+        expect(findDegradingRuns(slotSI([1.0, 1.2], 1.1), slotSI([0.9, 1.1], 1.0), SI)).toEqual({});
     });
 
-    it('flags nothing when every After run stays inside the Before range', () => {
-        const after = agg(runsOf(2.0, 1.9, 1.8), 1.9);
-        expect(findDegradingRuns(before, after, SI)).toEqual({});
+    it('always keeps one run, so a uniformly slower row flags all but its best run', () => {
+        const found = findDegradingRuns(slotSI([1.0, 1.0, 1.0], 1.0), slotSI([2.0, 2.2, 2.1], 2.1), SI);
+        expect([...found.speedIndex!.runs].sort()).toEqual([1, 2]);
     });
 
-    it('does not flag a run that displays the same as the ceiling', () => {
-        const after = agg([run({ speedIndex: m(2140, '2.1 s') }), ...runsOf(3.0)], 2.6);
-        expect([...findDegradingRuns(before, after, SI).speedIndex!.runs]).toEqual([1]);
+    it('never flags a run that is no worse than the Before score', () => {
+        // Removing #2 (0.8 s) would RAISE the average, so it is never a candidate.
+        const found = findDegradingRuns(slotSI([1.0, 1.0, 1.0], 1.0), slotSI([1.4, 0.8, 1.2], 1.1), SI);
+        expect([...found.speedIndex!.runs].sort()).toEqual([0]);
     });
 
-    it('ignores errored runs on both sides', () => {
+    it('ignores errored runs', () => {
         const failed = { ...run({ speedIndex: si(9.9) }), errorResponse: { code: 500, message: 'boom' } };
-        const b = agg([...runsOf(1.0, 1.2), failed], 1.1);
-        const after = agg([failed, ...runsOf(1.5)], 1.5);
-        const found = findDegradingRuns(b, after, SI);
-        expect(found.speedIndex!.baseline.metric.displayValue).toBe('1.2 s');
-        expect([...found.speedIndex!.runs]).toEqual([1]);
+        const after = { ...run({ speedIndex: si(1.5) }), runHistory: [failed, run({ speedIndex: si(1.5) }), run({ speedIndex: si(1.0) })] };
+        expect([...findDegradingRuns(slotSI([1.0, 1.2], 1.1), after, SI).speedIndex!.runs]).toEqual([1]);
     });
 
-    it('uses a single-run Before as its own ceiling', () => {
-        const after = agg(runsOf(1.0, 2.0), 1.5);
-        expect([...findDegradingRuns(run({ speedIndex: si(1.2) }), after, SI).speedIndex!.runs]).toEqual([1]);
+    it('treats a Lighthouse "0.6\u00a0s" run and a "0.6 s" score as a tie', () => {
+        const lcpAt = (ms: number, display: string) => run({ largestContentfulPaint: m(ms, display) });
+        const before = { ...lcpAt(610, '0.6 s'), runHistory: [lcpAt(610, '0.6 s')] };
+        const after = { ...lcpAt(660, '0.7 s'), runHistory: [lcpAt(630, '0.6\u00a0s'), lcpAt(700, '0.7\u00a0s')] };
+        expect([...findDegradingRuns(before, after, LCP).largestContentfulPaint!.runs]).toEqual([1]);
     });
 
     it('returns nothing without a Before result or an After run history', () => {
-        expect(findDegradingRuns(undefined, agg(runsOf(3.0), 3.0), SI)).toEqual({});
-        expect(findDegradingRuns(before, run({ speedIndex: si(3.0) }), SI)).toEqual({});
-    });
-
-    it('treats a Lighthouse "0.6 s" and a "0.6 s" baseline as a tie', () => {
-        const lcp = (ms: number, display: string) => run({ largestContentfulPaint: m(ms, display) });
-        const lcpBefore = lcp(610, '0.6 s');
-        const lcpAfter = { ...lcp(660, '0.7 s'), runHistory: [lcp(630, '0.6 s'), lcp(700, '0.7 s')] };
-        expect([...findDegradingRuns(lcpBefore, lcpAfter, ['largestContentfulPaint']).largestContentfulPaint!.runs]).toEqual([1]);
-    });
-
-    it('compares seconds and milliseconds on the same scale', () => {
-        const tbt = (ms: number, display: string) => run({ totalBlockingTime: m(ms, display) });
-        const tbtBefore = tbt(1000, '1.0 s');
-        const tbtAfter = { ...tbt(1100, '1,100 ms'), runHistory: [tbt(990, '990 ms'), tbt(1200, '1,200 ms')] };
-        expect([...findDegradingRuns(tbtBefore, tbtAfter, ['totalBlockingTime']).totalBlockingTime!.runs]).toEqual([1]);
+        expect(findDegradingRuns(undefined, slotSI([3.0], 3.0), SI)).toEqual({});
+        expect(findDegradingRuns(slotSI([1.0], 1.0), run({ speedIndex: si(3.0) }), SI)).toEqual({});
     });
 
     it('only examines the requested metrics', () => {
-        const after = agg(runsOf(3.5, 2.6), 3.0);
-        expect(findDegradingRuns(before, after, ['largestContentfulPaint'])).toEqual({});
+        expect(findDegradingRuns(slotSI([1.0, 1.0], 1.0), slotSI([3.5, 2.6], 3.0), LCP)).toEqual({});
     });
 });
 
-// Re-audit keeps a fresh run only when it sits closer to the baselines; 0 = within.
-describe('baselineExcess', () => {
-    const baselines = {
-        speedIndex: { runIndex: 6, metric: m(2000, '2.0 s') },
-        largestContentfulPaint: { runIndex: 1, metric: m(1000, '1.0 s') },
-    };
+describe('aggregateValues', () => {
+    it('averages or takes the median, the same rule as the aggregate row', () => {
+        expect(aggregateValues([1, 2, 6], 'average')).toBe(3);
+        expect(aggregateValues([1, 2, 6], 'median')).toBe(2);
+        expect(aggregateValues([1, 2, 3, 6], 'median')).toBe(2.5);
+        expect(aggregateValues([], 'average')).toBe(0);
+    });
+});
+
+// Re-audit keeps a fresh run only when it sits closer to the Before scores; 0 = no worse.
+describe('excessOverTargets', () => {
+    const targets = { speedIndex: m(2000, '2.0 s'), largestContentfulPaint: m(1000, '1.0 s') };
     const keys: ComparableMetricKey[] = ['speedIndex', 'largestContentfulPaint'];
 
-    it('is 0 for a run within baseline on every metric', () => {
-        expect(baselineExcess(run({ speedIndex: m(1500, '1.5 s'), largestContentfulPaint: m(1000, '1.0 s') }), baselines, keys)).toBe(0);
+    it('is 0 for a run no worse than the targets', () => {
+        expect(excessOverTargets(run({ speedIndex: m(1500, '1.5 s'), largestContentfulPaint: m(1000, '1.0 s') }), targets, keys)).toBe(0);
     });
 
-    it('sums the overshoot of each metric as a fraction of its baseline', () => {
+    it('sums the overshoot of each metric as a fraction of its target', () => {
         const r = run({ speedIndex: m(3000, '3.0 s'), largestContentfulPaint: m(1200, '1.2 s') });
-        expect(baselineExcess(r, baselines, keys)).toBeCloseTo(0.5 + 0.2);
+        expect(excessOverTargets(r, targets, keys)).toBeCloseTo(0.5 + 0.2);
     });
 
-    it('treats a value that displays the same as the baseline as within it', () => {
-        expect(baselineExcess(run({ speedIndex: m(2040, '2.0 s'), largestContentfulPaint: m(900, '0.9 s') }), baselines, keys)).toBe(0);
+    it('treats a value that displays the same as the target as no worse', () => {
+        expect(excessOverTargets(run({ speedIndex: m(2040, '2.0 s'), largestContentfulPaint: m(900, '0.9 s') }), targets, keys)).toBe(0);
     });
 
-    it('treats a run CLS of "0" and a "0.000" baseline as a tie', () => {
-        const clsBaseline = { cumulativeLayoutShift: { runIndex: 0, metric: m(0.0001, '0.000') } };
-        expect(baselineExcess(run({ cumulativeLayoutShift: m(0.0002, '0') }), clsBaseline, ['cumulativeLayoutShift'])).toBe(0);
-        expect(baselineExcess(run({ cumulativeLayoutShift: m(0.02, '0.02') }), clsBaseline, ['cumulativeLayoutShift'])).toBeGreaterThan(0);
+    it('treats a run CLS of "0" and a "0.000" target as a tie', () => {
+        const clsTarget = { cumulativeLayoutShift: m(0.0001, '0.000') };
+        expect(excessOverTargets(run({ cumulativeLayoutShift: m(0.0002, '0') }), clsTarget, ['cumulativeLayoutShift'])).toBe(0);
     });
 
-    it('ignores metrics without a baseline or that the run did not measure', () => {
+    it('ignores metrics without a target or that the run did not measure', () => {
         const r = run({ speedIndex: m(0, ''), largestContentfulPaint: m(900, '0.9 s'), totalBlockingTime: m(9000, '9,000 ms') });
-        expect(baselineExcess(r, baselines, [...keys, 'totalBlockingTime'])).toBe(0);
+        expect(excessOverTargets(r, targets, [...keys, 'totalBlockingTime'])).toBe(0);
     });
 
     it('is Infinity for an errored run', () => {
         const failed = { ...run(), errorResponse: { code: 500, message: 'boom' } };
-        expect(baselineExcess(failed, baselines, keys)).toBe(Number.POSITIVE_INFINITY);
+        expect(excessOverTargets(failed, targets, keys)).toBe(Number.POSITIVE_INFINITY);
     });
 });
 
@@ -378,5 +377,29 @@ describe('describePageSpeedTestEnvironment', () => {
         const { summary, detail } = describePageSpeedTestEnvironment('mobile', [agg, false]);
         expect(summary).toContain('1.1–1.3x CPU slowdown');
         expect(detail).toContain('140–170');
+    });
+});
+
+// A zero baseline has no percentage change, but the reader still needs a value.
+describe('absoluteChange', () => {
+    const cls = (v: number, d: string): PageSpeedMetrics => ({ numericValue: v, displayValue: d, numericUnit: 'unitless' });
+    const ms = (v: number, d: string): PageSpeedMetrics => ({ numericValue: v, displayValue: d, numericUnit: 'millisecond' });
+
+    it('reads CLS 0.000 → 0.001 as -0.001 (worse)', () => {
+        expect(absoluteChange(cls(0, '0.000'), cls(0.001, '0.001'))).toEqual({ value: -0.001, text: '-0.001' });
+    });
+
+    it('uses + for better and formats timings in ms or s', () => {
+        expect(absoluteChange(ms(0, '0 ms'), ms(50, '50 ms'))?.text).toBe('-50 ms');
+        expect(absoluteChange(ms(1500, '1.5 s'), ms(0, '0 ms'))?.text).toBe('+1.5 s');
+    });
+
+    it('has no sign when nothing changed', () => {
+        expect(absoluteChange(cls(0, '0'), cls(0, '0.000'))?.text).toBe('0.000');
+    });
+
+    it('is null when either side never measured the metric', () => {
+        expect(absoluteChange(undefined, cls(0.001, '0.001'))).toBeNull();
+        expect(absoluteChange(cls(0, '0'), { numericValue: 0, displayValue: '', numericUnit: '' })).toBeNull();
     });
 });

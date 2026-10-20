@@ -90,6 +90,8 @@ export interface PageSpeedConfiguration {
     strategy: PageSpeedStrategy;
     runs: number;
     aggregation: "average" | "median";
+    /** Audit each URL once first and discard it, so a cold CDN/server cache can't skew run #1. */
+    warmUpRun: boolean;
     urls: string[];
     comparisonMode: boolean;
     /** Which side of a comparison the table draws. One enum rather than two booleans:
@@ -108,7 +110,7 @@ export interface PageSpeedConfiguration {
 }
 
 export interface UsePageSpeedInsightHooks {
-    audit: (url: string, signal?: AbortSignal, runs?: number) => Promise<PageSpeedInsightResult>;
+    audit: (url: string, signal?: AbortSignal, runs?: number, warmUp?: boolean) => Promise<PageSpeedInsightResult>;
 }
 
 export interface PageSpeedApiResponse {

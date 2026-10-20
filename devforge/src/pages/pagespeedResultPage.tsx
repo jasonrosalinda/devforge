@@ -1,10 +1,13 @@
 import { PageSpeedResults, type PageSpeedResultsHandle } from "@/components/pagespeed/pagespeed-result";
+import { CopyForTeamsButton } from "@/components/pagespeed/copy-for-teams-button";
+import { breakableUrlLink } from "@/lib/teams-html";
+import { teamsCopyHeader, urlLabels } from "@/lib/pagespeed-teams-copy";
 import { useCallback, useEffect, useRef, useState } from "react";
 import PageSpeedConfig from "@/components/pagespeed/pagespeed-config";
 import PageSpeedHistoryDropdown from "@/components/pagespeed/pagespeed-history-dropdown";
 import { type PageSpeedConfiguration, type PageSpeedStrategy } from "@shared/types/pageSpeedInsight.types";
 import type { AttributionResult, GitRefResolution } from "@shared/types/electron";
-import { defaultPageSpeedConfiguration, describePageSpeedTestEnvironment } from "@/lib/pageSpeedUtils";
+import { defaultPageSpeedConfiguration, describePageSpeedTestEnvironment, improvementPercent } from "@/lib/pageSpeedUtils";
 import {
     loadHistory,
     saveSnapshot,
@@ -437,7 +440,8 @@ export default function PageSpeedResultPage() {
 
     // Excel-style Desktop+Mobile comparison table: individual runs as rows, then an
     // averaged row, then a %-improvement row per metric pair — mirrors a pasted Excel sheet.
-    const copyAsExcelTable = () => {
+    // `includeRuns` false drops the per-run rows — averages and Δ only.
+    const copyAsExcelTable = (includeRuns = true) => {
         const desktop = desktopRef.current?.getResults();
         const mobile = mobileRef.current?.getResults();
         if (!desktop || !mobile) return;
@@ -470,6 +474,18 @@ export default function PageSpeedResultPage() {
         const soloSlot = <T,>(before: T, after: T): T => (soloAfter ? after : before);
         const colsPerStrategy = metricDefs.length * colsPerMetric;
 
+        // Pages as paths when every URL shares one host; the host goes in the header.
+        const { host, labels } = urlLabels(desktopConfig.urls);
+        const header = teamsCopyHeader({
+            comparison: bothColumns,
+            soloLabel: desktopConfig.comparisonMode ? (soloAfter ? afterLabel : beforeLabel) : '',
+            beforeLabel,
+            afterLabel,
+            runs: desktopConfig.runs,
+            aggregation: desktopConfig.aggregation,
+            host,
+        });
+
         // The legacy align attribute rides along with the CSS: Teams and Word drop
         // `text-align` on a cell in some paste paths, and a colspan'd cell is where that
         // shows up first - the value ends up hugging the left edge of a double-width cell.
@@ -481,7 +497,9 @@ export default function PageSpeedResultPage() {
         // Keep the whole Desktop+Mobile table inside one screenful: fixed layout + a colgroup
         // so the URL column can't stretch to its longest URL (auto layout ignores a width hint
         // once the table overflows), and the metric columns stay just wide enough for a value.
-        const URL_W = 50;
+        // Teams drops that CSS on paste, so the URL cell also carries a legacy width attribute
+        // and wrap points inside its text (breakableUrlLink).
+        const URL_W = 140;
         const COL_W = 38;
         const totalDataCols = strategies.length * colsPerStrategy;
         const colgroup = `<colgroup><col style="width:${URL_W}px" />${`<col style="width:${COL_W}px" />`.repeat(totalDataCols)}</colgroup>`;
@@ -494,7 +512,7 @@ export default function PageSpeedResultPage() {
             : '';
 
         const headerRows =
-            `<tr>${th('URL', 1, 4, ';background:#fff')}${th(`PAGESPEED${aggLabel}`, strategies.length * colsPerStrategy)}</tr>` +
+            `<tr>${th(host ? 'PAGE' : 'URL', 1, 4, ';background:#fff').replace('<th ', `<th width="${URL_W}" `)}${th(`PAGESPEED${aggLabel}`, strategies.length * colsPerStrategy)}</tr>` +
             `<tr>${strategies.map(s => th(s.label, colsPerStrategy)).join('')}</tr>` +
             `<tr>${strategies.map(() => metricDefs.map(m => th(m.label, colsPerMetric)).join('')).join('')}</tr>` +
             (desktopConfig.comparisonMode
@@ -504,23 +522,20 @@ export default function PageSpeedResultPage() {
                 : '');
 
         const cellText = (slot: AuditSlot, key: MetricKey): string => (slot ? slot[key]?.displayValue ?? '-' : '-');
-        const cellNum = (slot: AuditSlot, key: MetricKey): number => {
-            if (!slot) return 0;
-            const n = parseFloat(String(slot[key]?.displayValue ?? '').replace(/,/g, ''));
-            return Number.isFinite(n) ? n : (slot[key]?.numericValue ?? 0);
-        };
 
         const bodyRows: string[] = [];
         desktopConfig.urls.forEach((url, i) => {
             const slots = strategies.map(s => ({ before: s.bundle.results1[i], after: s.bundle.results2[i] }));
-            const numRuns = Math.max(0, ...slots.flatMap(s => [s.before, s.after]).map(s => (s && s.runHistory?.length) || 0));
+            const numRuns = includeRuns
+                ? Math.max(0, ...slots.flatMap(s => [s.before, s.after]).map(s => (s && s.runHistory?.length) || 0))
+                : 0;
             const rowCount = (numRuns > 0 ? numRuns + 1 : 1) + (bothColumns ? 1 : 0);
 
             let urlCellEmitted = false;
             const urlCell = () => {
                 if (urlCellEmitted) return '';
                 urlCellEmitted = true;
-                return `<td rowspan="${rowCount}" align="left" style="text-align:left;padding:1px 3px;border:1px solid #999;font-size:10px;vertical-align:top;line-height:1.2;word-break:break-all;overflow-wrap:anywhere">${url}</td>`;
+                return `<td rowspan="${rowCount}" width="${URL_W}" align="left" style="width:${URL_W}px;max-width:${URL_W}px;text-align:left;padding:1px 3px;border:1px solid #999;font-size:10px;vertical-align:top;line-height:1.2;word-break:break-all;overflow-wrap:anywhere">${breakableUrlLink(url, labels[i])}</td>`;
             };
 
             // Values appearing in BOTH before and after run sets for a metric (any run index)
@@ -538,7 +553,7 @@ export default function PageSpeedResultPage() {
                 }
                 return map;
             });
-            const HL = ';background:#fff3cd;color:#92400e;font-weight:600;font-style:italic';
+            const HL = ';background:#fff3cd;color:#92400e;font-style:italic';
 
             for (let r = 0; r < numRuns; r++) {
                 const rowHtml = slots.map((s, si) => metricDefs.map(m => {
@@ -561,10 +576,9 @@ export default function PageSpeedResultPage() {
 
             if (bothColumns) {
                 const pctRowHtml = slots.map(s => metricDefs.map(m => {
-                    const b = cellNum(s.before, m.key);
-                    const a = cellNum(s.after, m.key);
-                    if (!b || !a) return `<td colspan="2" align="center" style="text-align:center;padding:1px 2px;border:1px solid #999;font-size:10px;color:#999">-</td>`;
-                    const pct = ((b - a) / b) * 100;
+                    // Same rule as the results table, incl. the -100% cap on a zero baseline.
+                    const pct = s.before && s.after ? improvementPercent(s.before[m.key], s.after[m.key]) : null;
+                    if (pct === null) return `<td colspan="2" align="center" style="text-align:center;padding:1px 2px;border:1px solid #999;font-size:10px;color:#999">-</td>`;
                     const text = `${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`;
                     const color = pct >= 0 ? '#16a34a' : (Math.abs(pct) > desktopConfig.improvementThreshold ? '#dc2626' : '#ea580c');
                     return `<td colspan="2" align="center" style="text-align:center;padding:1px 2px;border:1px solid #999;font-size:10px;color:${color};font-weight:600">${text}</td>`;
@@ -593,9 +607,9 @@ export default function PageSpeedResultPage() {
         const envHtml = envLines.length
             ? `<p style="margin:4px 0 0;font-family:Segoe UI,Arial,sans-serif;font-size:10px;color:#666">${envLines.join('<br/>')}</p>`
             : '';
-        const html = `<table style="border-collapse:collapse;table-layout:fixed;width:${tableWidth}px;font-family:Segoe UI,Arial,sans-serif">${colgroup}${headerRows}${bodyRows.join('')}</table>${envHtml}${reportsHtml}`;
+        const html = `${header.html}<table style="border-collapse:collapse;table-layout:fixed;width:${tableWidth}px;font-family:Segoe UI,Arial,sans-serif">${colgroup}${headerRows}${bodyRows.join('')}</table>${envHtml}${reportsHtml}`;
 
-        const plain = desktopConfig.urls.map((url, i) => {
+        const plain = `${header.plain}\n\n` + desktopConfig.urls.map((url, i) => {
             const parts = strategies.map(s => {
                 const before = s.bundle.results1[i];
                 const after = s.bundle.results2[i];
@@ -604,7 +618,7 @@ export default function PageSpeedResultPage() {
                     : `${m.label} ${cellText(soloSlot(before, after), m.key)}`).join(', ');
                 return `${s.label}: ${metrics}`;
             }).join(' | ');
-            return `${url}: ${parts}`;
+            return `${labels[i] ?? url}: ${parts}`;
         }).join('\n') + (envLines.length ? `\n\n${envLines.join('\n')}` : '') + (reportsMd ? `\n\n${reportsMd}` : '');
 
         const copy = navigator.clipboard.write([
@@ -680,11 +694,12 @@ export default function PageSpeedResultPage() {
                         </Button>
                     </Hint>
                     <div className="flex items-center gap-2">
-                        <Hint label="Copy Desktop + Mobile as one Excel-style table, ready to paste into Teams">
-                            <Button variant="outline" onClick={copyAsExcelTable} disabled={isAuditing || !hasResults}>
-                                <TableIcon className="mr-1 h-4 w-4" />Copy for Teams
-                            </Button>
-                        </Hint>
+                        <CopyForTeamsButton
+                            onCopy={copyAsExcelTable}
+                            disabled={isAuditing || !hasResults}
+                            hint="Copy Desktop + Mobile as one Excel-style table, ready to paste into Teams"
+                            icon={<TableIcon className="mr-1 h-4 w-4" />}
+                        />
                         <Hint label="Ask Claude to read the measurements for both strategies — what moved, by how much, and where mobile and desktop diverge. Seconds, and it never touches your code.">
                             <Button variant="outline" onClick={runPageAnalysis} disabled={!hasResults || pageAnalysis?.status === 'running'}>
                                 {pageAnalysis?.status === 'running'

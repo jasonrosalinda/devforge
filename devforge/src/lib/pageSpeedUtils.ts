@@ -7,6 +7,7 @@ export function defaultPageSpeedConfiguration(strategy?: PageSpeedStrategy): Pag
         strategy: strategy || 'desktop',
         runs: 1,
         aggregation: 'average',
+        warmUpRun: false,
         urls: [],
 
         comparisonMode: false,
@@ -145,109 +146,99 @@ export function getPageSpeedInsightResultMessages(result1: PageSpeedInsightResul
 export type ComparableMetricKey =
     'speedIndex' | 'largestContentfulPaint' | 'cumulativeLayoutShift' | 'totalBlockingTime' | 'firstContentfulPaint';
 
-export interface BaselineRun {
-    /** Index into the Before run history (0 for a single-run result). */
-    runIndex: number;
-    /** That run's value — the slowest any Before run measured. */
-    metric: PageSpeedMetrics;
-}
-
-/**
- * Per metric, the slowest Before run: the baseline an After run must stay under.
- * Each metric picks its own run — SI's baseline can be run #7 while LCP's is run #2.
- * Errored and unmeasured runs never count; a tie keeps the earliest run.
- */
-export function findBaselineRuns(
-    before: PageSpeedInsightResult | undefined,
-    keys: ComparableMetricKey[],
-): Partial<Record<ComparableMetricKey, BaselineRun>> {
-    const found: Partial<Record<ComparableMetricKey, BaselineRun>> = {};
-    if (!before) return found;
-    const runs = before.runHistory?.length ? before.runHistory : [before];
-    for (const key of keys) {
-        runs.forEach((r, i) => {
-            if (resultHasError(r) || !metricMeasured(r[key])) return;
-            const current = found[key];
-            if (!current || r[key].numericValue > current.metric.numericValue) found[key] = { runIndex: i, metric: r[key] };
-        });
-    }
-    return found;
-}
-
 // The value as shown on screen, in one unit (ms for timings), so "0.6 s" and "600 ms"
-// compare equal. Strings can't be compared directly: Lighthouse writes "0.6 s"
+// compare equal. Strings can't be compared directly: Lighthouse writes "0.6\u00a0s"
 // (non-breaking space) while an aggregate writes "0.6 s", and a CLS of "0" aggregates
 // to "0.000". Falls back to the raw value when the display carries no number.
-function shownValue(metric: PageSpeedMetrics): number {
+export function shownValue(metric: PageSpeedMetrics): number {
     const display = String(metric.displayValue ?? '').replace(/[\s,]/g, '').toLowerCase();
     const n = parseFloat(display);
     if (!Number.isFinite(n)) return metric.numericValue;
     return display.endsWith('s') && !display.endsWith('ms') ? n * 1000 : n;
 }
 
-// Above the baseline on screen, not just in the raw number: a run that rounds to the
-// baseline's display value ("2.14 s" vs "2.10 s", both "2.1 s") reads as a tie.
-function aboveBaseline(value: PageSpeedMetrics, baseline: PageSpeedMetrics): boolean {
-    return shownValue(value) > shownValue(baseline);
+/** Average or median of plain values — the same rule the aggregate row uses. */
+export function aggregateValues(values: number[], aggregation: PageSpeedConfiguration['aggregation']): number {
+    if (!values.length) return 0;
+    if (aggregation === 'median') {
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+    }
+    return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
 /**
- * How far one run sits above the per-metric baselines, summed as fractions of each
- * baseline (0.5 = 50 % slower). 0 means the run is within baseline on every metric.
+ * How far one run sits above the target scores (the Before column), summed as
+ * fractions of each target (0.5 = 50 % worse). 0 means the run is no worse than the
+ * target on any metric — compared as displayed, so a rounding tie is not "worse".
  * An errored run is Infinity so any measured run beats it; a metric the run did not
- * measure, or that has no baseline, adds nothing.
+ * measure, or that has no target, adds nothing.
  */
-export function baselineExcess(
+export function excessOverTargets(
     run: PageSpeedInsightResult,
-    baselines: Partial<Record<ComparableMetricKey, BaselineRun>>,
+    targets: Partial<Record<ComparableMetricKey, PageSpeedMetrics>>,
     keys: ComparableMetricKey[],
 ): number {
     if (resultHasError(run)) return Number.POSITIVE_INFINITY;
     let excess = 0;
     for (const key of keys) {
-        const b = baselines[key]?.metric;
+        const t = targets[key];
         const v = run[key];
-        if (!b?.numericValue || !metricMeasured(v) || !aboveBaseline(v, b)) continue;
-        excess += v.numericValue / b.numericValue - 1;
+        if (!t || !metricMeasured(t) || !metricMeasured(v)) continue;
+        const target = shownValue(t);
+        const value = shownValue(v);
+        if (!target || value <= target) continue;
+        excess += value / target - 1;
     }
     return excess;
 }
 
 export interface DegradingRuns {
-    /** The slowest Before run for this metric — what an After run must stay under. */
-    baseline: BaselineRun;
-    /** Indexes into the After run history that land above the baseline. */
+    /** The Before score (average or median) the After score must not exceed. */
+    target: PageSpeedMetrics;
+    /** The fewest worst After runs whose removal clears the regression. */
     runs: Set<number>;
+    /** The After score without those runs, in the displayed unit (ms; unitless for CLS). */
+    without: number;
 }
 
 /**
- * The After runs to blame for a regressed metric: those slower than EVERY Before run.
+ * The After runs to blame for a regressed metric: the fewest worst runs whose removal
+ * brings the After score back to the Before score or better.
  *
- * A run inside the Before range is ordinary noise; one beyond Before's slowest run is
- * an outlier no Before run matched, and it is what drags the average (or median) into
- * the negative. Only metrics whose Improvement is actually negative are examined, and
- * a run that rounds to the same display value as the baseline is not flagged.
+ * This explains every negative Improvement — one outlier beyond the Before range, or
+ * a shift in how many runs land slow (e.g. 5 of 7 slow instead of 3 of 7). Only runs
+ * worse than the Before score are candidates: dropping a better run cannot help. At
+ * least one run is always kept, so a fully slower row flags all but its best run.
  */
 export function findDegradingRuns(
     before: PageSpeedInsightResult | undefined,
     after: PageSpeedInsightResult | undefined,
     keys: ComparableMetricKey[],
+    aggregation: PageSpeedConfiguration['aggregation'] = 'average',
 ): Partial<Record<ComparableMetricKey, DegradingRuns>> {
     const found: Partial<Record<ComparableMetricKey, DegradingRuns>> = {};
     const afterRuns = after?.runHistory;
-    if (!before || !afterRuns?.length) return found;
-    const baselines = findBaselineRuns(before, keys);
+    if (!before || !after || !afterRuns?.length) return found;
 
     for (const key of keys) {
-        const pct = improvementPercent(before[key], after?.[key]);
-        const baseline = baselines[key];
-        if (pct === null || pct >= 0 || !baseline) continue;
+        const pct = improvementPercent(before[key], after[key]);
+        if (pct === null || pct >= 0) continue;
+        const target = shownValue(before[key]);
+
+        const measured = afterRuns.flatMap((r, i) =>
+            !resultHasError(r) && metricMeasured(r[key]) ? [{ i, v: shownValue(r[key]) }] : []);
+        if (!measured.length) continue;
 
         const runs = new Set<number>();
-        afterRuns.forEach((r, i) => {
-            if (!resultHasError(r) && metricMeasured(r[key]) && aboveBaseline(r[key], baseline.metric)) runs.add(i);
-        });
-        if (runs.size) found[key] = { baseline, runs };
+        let without = aggregateValues(measured.map(m => m.v), aggregation);
+        for (const worst of [...measured].sort((x, y) => y.v - x.v || x.i - y.i)) {
+            if (without <= target || worst.v <= target || runs.size >= measured.length - 1) break;
+            runs.add(worst.i);
+            without = aggregateValues(measured.filter(m => !runs.has(m.i)).map(m => m.v), aggregation);
+        }
+        if (runs.size) found[key] = { target: before[key], runs, without };
     }
     return found;
 }
@@ -456,10 +447,14 @@ export function displayedMetricValue(metric: PageSpeedMetrics | undefined): numb
 
 /**
  * Percent improvement from `before` to `after`, positive when the metric got faster.
- * Null means "no percentage exists", which the caller renders as a dash:
+ * Null means "no percentage exists" — either run never measured the metric — which
+ * the caller renders as a dash.
  *
- *  - either run never measured the metric — nothing to compare;
- *  - the baseline is zero — a share of nothing is undefined, not 100%.
+ * A zero baseline (CLS, TBT) has no true percentage: any increase over nothing is
+ * infinite, and a flat cap would make 0.001 look as bad as 0.5. So the change is
+ * measured against the metric's "good" threshold instead (`zeroBaselineFloor`):
+ * CLS 0 → 0.001 is 1% of 0.1, i.e. -1%; TBT 0 → 50 ms is -25%. `zeroBaseline` tells
+ * callers to say so. Zero to zero is no change: 0%.
  *
  * A measured zero in `after` is NOT one of those cases: dropping CLS to 0 is the best
  * outcome a page can post and reads as +100%. Testing the number for falsiness instead
@@ -471,6 +466,44 @@ export function improvementPercent(
 ): number | null {
     if (!metricMeasured(before) || !metricMeasured(after)) return null;
     const b = displayedMetricValue(before);
-    if (!b) return null;
+    if (!b) {
+        if (displayedMetricValue(after) === 0) return 0;
+        return -(shownValue(after!) / zeroBaselineFloor(after!).value) * 100;
+    }
     return ((b - displayedMetricValue(after)) / b) * 100;
+}
+
+/**
+ * What a zero-baseline change is measured against: the metric's Lighthouse "good"
+ * threshold. Only CLS (unitless) and TBT (ms) can measure 0 — SI, LCP and FCP never
+ * do — so the unit decides which one applies.
+ */
+export function zeroBaselineFloor(metric: PageSpeedMetrics): { value: number; label: string } {
+    return metric.numericUnit === 'unitless'
+        ? { value: 0.1, label: '0.1, the "good" CLS threshold' }
+        : { value: 200, label: '200 ms, the "good" TBT threshold' };
+}
+
+/** True when the Before value displays as zero — its % is against `zeroBaselineFloor`, not Before. */
+export function zeroBaseline(before: PageSpeedMetrics | undefined, after: PageSpeedMetrics | undefined): boolean {
+    return metricMeasured(before) && metricMeasured(after) && displayedMetricValue(before) === 0 && displayedMetricValue(after) !== 0;
+}
+
+/**
+ * The change as an absolute amount — what a zero-baseline % (e.g. CLS 0.000 → 0.001)
+ * actually was. Same sign convention: + is better, - is worse. "-0.001" for CLS, "-50 ms" / "-1.2 s" for timings. Null when
+ * either side never measured the metric.
+ */
+export function absoluteChange(
+    before: PageSpeedMetrics | undefined,
+    after: PageSpeedMetrics | undefined,
+): { value: number; text: string } | null {
+    if (!before || !after || !metricMeasured(before) || !metricMeasured(after)) return null;
+    const value = shownValue(before) - shownValue(after);
+    const magnitude = Math.abs(value);
+    const unitless = before.numericUnit === 'unitless' || after.numericUnit === 'unitless';
+    const amount = unitless
+        ? magnitude.toFixed(3)
+        : magnitude >= 1000 ? `${(magnitude / 1000).toFixed(1)} s` : `${Math.round(magnitude)} ms`;
+    return { value, text: `${value > 0 ? '+' : value < 0 ? '-' : ''}${amount}` };
 }

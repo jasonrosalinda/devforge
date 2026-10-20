@@ -34,11 +34,26 @@ class GoogleApiService {
     runs: number = MIN_RUNS,
     aggregation: PageSpeedConfiguration['aggregation'] = 'average',
     signal?: AbortSignal,
+    warmUp = false,
   ): Promise<PageSpeedInsightResult> {
     const numRuns = Math.min(MAX_RUNS, Math.max(MIN_RUNS, Math.round(runs) || MIN_RUNS));
     const endpoint = `/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&key=${apiKey}&strategy=${strategy}&category=performance&locale=en`;
 
     const results: PageSpeedInsightResult[] = [];
+
+    // Warm-up: one throwaway audit so a cold CDN/server cache hits it instead of run #1.
+    // Its result (or failure) is discarded — only the runs below are recorded.
+    if (warmUp) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      try {
+        await this.request<PageSpeedApiResponse>(endpoint, { method: 'GET' }, signal);
+        console.log(`[PageSpeed] warm-up run for ${url} done (discarded)`);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        console.warn(`[PageSpeed] warm-up run for ${url} failed (ignored):`, error);
+      }
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
 
     for (let run = 1; run <= numRuns; run++) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');

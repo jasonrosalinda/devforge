@@ -156,6 +156,13 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
         });
     };
 
+    const onWarmUpRunChange = (e: boolean) => {
+        onSetConfigState({
+            ...config,
+            warmUpRun: e,
+        });
+    };
+
     const onShowWarningsChange = (e: boolean) => {
         onSetConfigState({
             ...config,
@@ -276,6 +283,17 @@ export default function PageSpeedConfig({ configHasChanged, isAuditing, value, r
                                             </Field>
                                         </FieldLabel>
                                     )}
+                                    <FieldLabel htmlFor="switch-warm-up-run" className="my-3">
+                                        <Field orientation="horizontal">
+                                            <FieldContent>
+                                                <FieldTitle>Warm-up run</FieldTitle>
+                                                <FieldDescription className="text-xs text-muted-foreground">
+                                                    Audit each URL once first and discard it, so a cold CDN or server cache can't skew run #1. Costs 1 extra API call per URL.
+                                                </FieldDescription>
+                                            </FieldContent>
+                                            <Switch id="switch-warm-up-run" checked={config.warmUpRun} onCheckedChange={onWarmUpRunChange} />
+                                        </Field>
+                                    </FieldLabel>
                                 </AccordionContent>
                             </AccordionItem>
 

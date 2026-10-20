@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { usePageSpeedInsight } from '../../hooks/usePageSpeedInsight';
-import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, RotateCw, AlertTriangle, ArrowUp, Copy, Play, Ban, Image as ImageIcon } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, RotateCcw, Triangle, Square, Circle, RotateCw, AlertTriangle, ArrowUp, Copy, Play, Snowflake, CircleAlert, CircleCheck, CircleHelp, Waves, Equal, Info, X, Ban, Image as ImageIcon } from 'lucide-react';
 import { marked } from 'marked';
 
 type AnalysisStatus = 'running' | 'done' | 'error';
@@ -10,8 +10,14 @@ import { Button, Toast } from '../ui';
 import { Hint } from '../ui/hint';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, PageSpeedInsightResultMessage, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, improvementPercent, baselineExcess, findBaselineRuns, findDegradingRuns, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey } from '@/lib/pageSpeedUtils';
+import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, improvementPercent, absoluteChange, zeroBaseline, zeroBaselineFloor, excessOverTargets, findDegradingRuns, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
+import { detectWarmUp, explainSpike, flaggedAfterRuns, isRunFlagged, metricVerdict, nextReauditRun, type MetricVerdict, type MetricVerdictResult } from '@/lib/pagespeedRunForensics';
+import { RunSpreadStrip } from './run-spread-strip';
+import { CopyForTeamsButton } from './copy-for-teams-button';
+import { breakableUrlLink } from '@/lib/teams-html';
+import { teamsCopyHeader, urlLabels } from '@/lib/pagespeed-teams-copy';
+import { consolidateInsights, diffInsights, insightKey, type InsightChange, type InsightSet } from '@/lib/pagespeed-insight-diff';
 import { isNullOrEmpty } from '@shared/utils/stringHelper';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { StrategySnapshot } from '@/lib/pagespeed-history';
@@ -123,6 +129,14 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [rerunningRuns, setRerunningRuns] = useState<Set<string>>(new Set());
     // Re-audit of flagged runs: row key → the run and attempt in flight (both 1-based).
     const [reauditProgress, setReauditProgress] = useState<Record<string, { run: number; attempt: number }>>({});
+    // Re-audit outcome, shown inside the After card until dismissed or the next audit —
+    // a toast is too easy to miss once the user has scrolled to another row.
+    const [reauditNotice, setReauditNotice] = useState<Record<string, { tone: 'success' | 'info' | 'warning'; text: string }>>({});
+    const dismissReauditNotice = (key: string) => setReauditNotice(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+    });
     const reauditCancelRef = useRef<Set<string>>(new Set());
     const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
     const [expandedInsights, setExpandedInsights] = useState<Set<string>>(new Set());
@@ -256,12 +270,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
      * A partial failure is kept, not retried: its surviving runs still aggregate into
      * numbers worth reading, and re-running would discard them for no gain.
      */
-    const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal, runs?: number): Promise<PageSpeedInsightResult> => {
+    // `warmUp` undefined → the config decides; single-run re-runs pass false (cache already warm).
+    const auditWithRetry = useCallback(async (url: string, signal?: AbortSignal, runs?: number, warmUp?: boolean): Promise<PageSpeedInsightResult> => {
         let lastError: unknown;
         let lastFailed: PageSpeedInsightResult | undefined;
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
-                const result = await audit(url, signal, runs);
+                const result = await audit(url, signal, runs, warmUp);
                 if (!allRunsFailed(result)) return result;
                 lastFailed = result;
             } catch (err) {
@@ -295,6 +310,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         activeAuditsRef.current++;
         setAuditingWithCallback(setAuditing, true, otherAuditing);
         setResults(new Array(config.urls.length).fill(null));
+        if (slotKey === '2') setReauditNotice({});
 
         try {
             const urlQueue: Array<[number, string]> = [...config.urls.entries()];
@@ -417,7 +433,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 // Re-run each failed run as a single audit, splice back into the run list, re-average.
                 const merged = [...history];
                 for (const fi of failedRunIdx) {
-                    merged[fi] = await auditWithRetry(url, undefined, 1);
+                    merged[fi] = await auditWithRetry(url, undefined, 1, false);
                 }
                 result = aggregatePageSpeedInsightResults(url, merged, config.aggregation);
             } else {
@@ -467,7 +483,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         setRerunningRuns(prev => new Set(prev).add(runKey));
 
         try {
-            const fresh = await auditWithRetry(url, undefined, 1);
+            const fresh = await auditWithRetry(url, undefined, 1, false);
             const merged = [...history];
             merged[runIdx] = fresh;
             const result = aggregatePageSpeedInsightResults(url, merged, config.aggregation);
@@ -491,12 +507,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     }, [auditWithRetry, config.urls, results1, results2]);
 
     // ─── Re-audit flagged runs ────────────────────────────────────────────────
-    // PSI is noisy enough that one unlucky run drags an average down and makes a
-    // release read as a regression. Re-audit re-runs only the After runs flagged as
-    // slower than the Before baseline, up to REAUDIT_MAX_ATTEMPTS times each, stopping
-    // a run as soon as it lands within baseline on every shown metric. A fresh run only
-    // replaces the flagged one when it sits closer to the baselines, so a row can never
-    // end up worse than where it started.
+    // PSI is noisy enough that a few unlucky runs drag a score down and make a release
+    // read as a regression. Re-audit re-runs only the flagged After runs — the fewest
+    // worst runs whose removal clears the regression — up to REAUDIT_MAX_ATTEMPTS times
+    // each. A run is done once it is no worse than the Before score on every shown
+    // metric, and the whole re-audit stops as soon as the row is no longer worse than
+    // Before. A fresh run only replaces the flagged one when it sits closer to the Before
+    // scores, so a row can never end up worse than where it started.
     const REAUDIT_MAX_ATTEMPTS = 3;
 
     // Only the metrics the user is actually showing count.
@@ -516,10 +533,80 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         firstContentfulPaint: 'FCP',
     };
 
+    // A value in the displayed unit (ms; unitless CLS), formatted like the table.
+    const formatShown = (key: ComparableMetricKey, value: number): string => {
+        if (key === 'cumulativeLayoutShift') return value.toFixed(3);
+        return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`;
+    };
+
     // After runs flagged on any shown metric (red rows), in run order.
-    const flaggedRunIndexes = (index: number): number[] => {
-        const found = findDegradingRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys());
-        return [...new Set(Object.values(found).flatMap(d => [...d.runs]))].sort((x, y) => x - y);
+    const flaggedRunIndexes = (index: number): number[] =>
+        flaggedAfterRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys(), config.aggregation);
+
+    // ─── Run forensics ────────────────────────────────────────────────────────
+    // Whether a Before → After change is real or run-to-run noise, and why each flagged
+    // run spiked. Pure analysis lives in pagespeedRunForensics; this is presentation.
+    const VERDICT_LABELS: Record<MetricVerdict, string> = {
+        regression: 'real regression',
+        improved: 'real improvement',
+        noise: 'likely noise',
+        'no-change': 'within noise',
+        'too-few': 'too few runs',
+    };
+    // Icon beside the Improvement %; the label and the reasoning live in the tooltip.
+    const VERDICT_ICONS: Record<MetricVerdict, { icon: typeof CircleAlert; className: string }> = {
+        regression: { icon: CircleAlert, className: 'text-error' },
+        improved: { icon: CircleCheck, className: 'text-success' },
+        noise: { icon: Waves, className: 'text-muted-foreground' },
+        'no-change': { icon: Equal, className: 'text-muted-foreground' },
+        'too-few': { icon: CircleHelp, className: 'text-muted-foreground' },
+    };
+
+    const runList = (runs: number[]): string => runs.map(i => `#${i + 1}`).join(', ');
+    const runRange = (runs: number[]): string =>
+        runs.length > 1 ? `#${runs[0]! + 1}–#${runs[runs.length - 1]! + 1}` : `#${runs[0]! + 1}`;
+
+    // Only comparison rows with run histories on both sides have runs to weigh.
+    const verdictOf = (r1: PageSpeedInsightResult | undefined, r2: PageSpeedInsightResult | undefined, key: ComparableMetricKey): MetricVerdictResult | undefined =>
+        config.comparisonMode && r1?.runHistory && r2?.runHistory ? metricVerdict(r1, r2, key, config.aggregation) : undefined;
+
+    // The table and the copy only mark degraded scores — a gain needs no explaining.
+    const degradedVerdictOf = (r1: PageSpeedInsightResult | undefined, r2: PageSpeedInsightResult | undefined, key: ComparableMetricKey): MetricVerdictResult | undefined => {
+        const pct = improvementPercent(r1?.[key], r2?.[key]);
+        return pct !== null && pct < 0 ? verdictOf(r1, r2, key) : undefined;
+    };
+
+    const describeVerdict = (v: MetricVerdictResult): string => {
+        if (v.verdict === 'too-few') return 'Needs at least 3 runs on each side to tell a real change from noise. Raise Runs per URL.';
+        const share = `${config.afterLabel} is slower in ${Math.round(v.slowerShare * 100)}% of the ${v.pairs} ${config.beforeLabel}/${config.afterLabel} run pairs (50% = no difference).`;
+        const meaning = {
+            regression: `The ${config.afterLabel} runs are consistently slower: a real regression, not noise.`,
+            improved: `The ${config.afterLabel} runs are consistently faster: a real improvement.`,
+            noise: 'The runs overlap, so this regression is within run-to-run noise.',
+            'no-change': 'The runs overlap; the difference is within run-to-run noise.',
+        }[v.verdict];
+        const trimmed = v.trimmedImprovement !== undefined
+            ? ` Without run${v.excluded.length > 1 ? 's' : ''} ${runList(v.excluded)}: ${v.trimmedImprovement > 0 ? '+' : ''}${v.trimmedImprovement.toFixed(2)}%.`
+            : '';
+        return `${share} ${meaning}${trimmed}`;
+    };
+
+    const verdictChip = (r1: PageSpeedInsightResult | undefined, r2: PageSpeedInsightResult | undefined, key: ComparableMetricKey): React.ReactNode => {
+        const v = degradedVerdictOf(r1, r2, key);
+        if (!v) return null;
+        const { icon: Icon, className } = VERDICT_ICONS[v.verdict];
+        const label = VERDICT_LABELS[v.verdict];
+        return (
+            <Hint label={`${label.charAt(0).toUpperCase()}${label.slice(1)}: ${describeVerdict(v)}`}>
+                <span className={`inline-flex ${className}`} role="img" aria-label={label}>
+                    <Icon className="h-3.5 w-3.5" />
+                </span>
+            </Hint>
+        );
+    };
+
+    const pageOriginOf = (index: number): string | undefined => {
+        try { return new URL(config.urls[index] ?? '').origin; } catch { return undefined; }
     };
 
     const reauditFlaggedRuns = useCallback(async (index: number) => {
@@ -540,39 +627,58 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
         const keys = shownMetricKeys();
         // Fixed for the whole re-audit: the Before side is not being re-run.
-        const baselines = findBaselineRuns(before, keys);
-        const commit = (runs: PageSpeedInsightResult[]) => setResults2(prev => {
-            const next = [...prev];
-            next[index] = aggregatePageSpeedInsightResults(url, runs, config.aggregation);
-            return next;
-        });
+        const targets = Object.fromEntries(keys.map(k => [k, before[k]])) as Partial<Record<ComparableMetricKey, PageSpeedMetrics>>;
+        const commit = (runs: PageSpeedInsightResult[]): boolean => {
+            const aggregated = aggregatePageSpeedInsightResults(url, runs, config.aggregation);
+            setResults2(prev => {
+                const next = [...prev];
+                next[index] = aggregated;
+                return next;
+            });
+            // Cleared once no shown metric is worse than Before any more.
+            return Object.keys(findDegradingRuns(before, aggregated, keys, config.aggregation)).length === 0;
+        };
 
         reauditCancelRef.current.delete(key);
+        dismissReauditNotice(key);
         if (activeAuditsRef.current === 0) setAuditEnd(null);
         activeAuditsRef.current++;
 
         let fixed = 0;
+        let cleared = false;
+        // Each run gets one turn of up to REAUDIT_MAX_ATTEMPTS. A run's turn ends as soon as
+        // it is no longer flagged — even if it is still worse than Before on some metric it
+        // was never flagged for — and the next still-flagged run takes over.
+        const attempted = new Set<number>();
         try {
-            runs: for (const runIdx of flagged) {
+            runs: for (;;) {
+                const next = nextReauditRun(before, history, keys, config.aggregation, attempted);
+                if (!next) break;
+                // Judge this run only on the metrics it is flagged for.
+                const { runIdx, keys: runKeys } = next;
+                attempted.add(runIdx);
                 const runKey = `2-${index}-${runIdx}`;
                 setRerunningRuns(prev => new Set(prev).add(runKey));
-                let excess = baselineExcess(history[runIdx]!, baselines, keys);
+                let excess = excessOverTargets(history[runIdx]!, targets, runKeys);
+                let stillFlagged = true;
                 try {
-                    for (let attempt = 1; attempt <= REAUDIT_MAX_ATTEMPTS && excess > 0; attempt++) {
+                    for (let attempt = 1; attempt <= REAUDIT_MAX_ATTEMPTS && stillFlagged; attempt++) {
                         if (reauditCancelRef.current.has(key)) break runs;
                         setReauditProgress(prev => ({ ...prev, [key]: { run: runIdx + 1, attempt } }));
                         let fresh: PageSpeedInsightResult;
                         try {
-                            fresh = await auditWithRetry(url, undefined, 1);
+                            fresh = await auditWithRetry(url, undefined, 1, false);
                         } catch (error) {
                             console.error(`Re-audit of run ${runIdx + 1} (attempt ${attempt}) failed for ${url}:`, error);
                             continue;
                         }
-                        const freshExcess = baselineExcess(fresh, baselines, keys);
+                        const freshExcess = excessOverTargets(fresh, targets, runKeys);
                         if (freshExcess < excess) {
                             history = history.map((r, i) => (i === runIdx ? fresh : r));
                             excess = freshExcess;
-                            commit(history);
+                            cleared = commit(history);
+                            if (cleared) break runs;
+                            stillFlagged = isRunFlagged(before, history, keys, config.aggregation, runIdx);
                         }
                     }
                 } finally {
@@ -582,7 +688,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         return next;
                     });
                 }
-                if (excess === 0) fixed++;
+                if (!stillFlagged) fixed++;
             }
         } finally {
             const cancelled = reauditCancelRef.current.has(key);
@@ -596,10 +702,14 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             activeAuditsRef.current--;
             if (activeAuditsRef.current === 0) setAuditEnd(new Date());
 
-            const total = flagged.length;
-            if (cancelled) toast.info(`Re-audit stopped. ${fixed} of ${total} flagged run(s) now within the ${config.beforeLabel} baseline.`);
-            else if (fixed === total) toast.success(`All ${total} flagged run(s) are now within the ${config.beforeLabel} baseline.`);
-            else toast.warning(`${fixed} of ${total} flagged run(s) now within the ${config.beforeLabel} baseline. The rest stayed above it after ${REAUDIT_MAX_ATTEMPTS} attempts each, which points to a real regression. Kept the closest runs found.`);
+            if (cleared) fixed = attempted.size;
+            const total = attempted.size;
+            const notice = cleared
+                ? { tone: 'success' as const, text: `${config.afterLabel} is no longer worse than ${config.beforeLabel} on any shown metric (${fixed} of ${total} flagged run${total === 1 ? '' : 's'} re-audited into range).` }
+                : cancelled
+                    ? { tone: 'info' as const, text: `Re-audit stopped. ${fixed} of ${total} flagged run${total === 1 ? '' : 's'} now no worse than the ${config.beforeLabel} score. Kept the best runs found.` }
+                    : { tone: 'warning' as const, text: `Still worse than ${config.beforeLabel} after re-auditing ${total} flagged run${total === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each). ${fixed} cleared; the rest stayed slow, which points to a real regression. Kept the best runs found.` };
+            setReauditNotice(prev => ({ ...prev, [key]: notice }));
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [auditWithRetry, config.urls, config.aggregation, config.comparisonMode, config.beforeLabel, results1, results2, reauditProgress]);
@@ -613,11 +723,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             : Math.abs(improvement) > config.improvementThreshold
                 ? 'text-error'
                 : 'text-warning';
-        return (
-            <div className={color}>
-                {improvement > 0 ? `+${formatted}%` : `${formatted}%`}
-            </div>
-        );
+        const text = improvement > 0 ? `+${formatted}%` : `${formatted}%`;
+        // From zero there is no true percentage; say what this one is measured against.
+        if (zeroBaseline(before, after)) {
+            return (
+                <Hint label={`${config.beforeLabel} was 0, so this is measured against ${zeroBaselineFloor(after!).label} instead. Actual change: ${absoluteChange(before, after)?.text ?? '-'} (${before?.displayValue} → ${after?.displayValue}).`}>
+                    <div className={color}>{text}</div>
+                </Hint>
+            );
+        }
+        return <div className={color}>{text}</div>;
     };
 
     const onCopyAsImage = async () => {
@@ -632,7 +747,8 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     };
 
     // Copy the comparison table (+ all-URLs analysis if present) as rich HTML for Teams.
-    const copyForTeams = () => {
+    // `includeRuns` false copies one row per URL — the aggregates and Δ only.
+    const copyForTeams = (includeRuns = true) => {
         const metricDefs = ([
             { show: displayAudit.SI, label: 'SI', key: 'speedIndex' },
             { show: displayAudit.LCP, label: 'LCP', key: 'largestContentfulPaint' },
@@ -647,16 +763,32 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         const primaryOf = <T,>(a: T, b: T): T => (showSide1 ? a : b);
         const soloLabel = showSide1 ? config.beforeLabel : config.afterLabel;
         const showImp = displayAudit.improvement;
+        // Pages as paths when every URL shares one host; the host goes in the header.
+        const { host, labels } = urlLabels(config.urls);
+        const header = teamsCopyHeader({
+            comparison: config.comparisonMode && !single,
+            soloLabel: config.comparisonMode ? soloLabel : '',
+            beforeLabel: config.beforeLabel,
+            afterLabel: config.afterLabel,
+            runs: config.runs,
+            aggregation: config.aggregation,
+            host,
+            strategy: config.strategy === 'mobile' ? 'Mobile' : 'Desktop',
+        });
         const td = (v: string, extra = '') => `<td style="padding:6px;border:1px solid #ccc${extra}">${v}</td>`;
-        const impCell = (b?: PageSpeedMetrics, a?: PageSpeedMetrics): string => {
+        const verdictNote = (r1: PageSpeedInsightResult | undefined, r2: PageSpeedInsightResult | undefined, key: ComparableMetricKey): string => {
+            const v = degradedVerdictOf(r1, r2, key);
+            return v ? ` · ${VERDICT_LABELS[v.verdict]}` : '';
+        };
+        const impCell = (b?: PageSpeedMetrics, a?: PageSpeedMetrics, note = ''): string => {
             const pct = improvementPercent(b, a);
             if (pct === null) return td('-');
-            const text = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
+            const text = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%${note}`;
             const color = pct >= 0 ? '#16a34a' : (Math.abs(pct) > config.improvementThreshold ? '#dc2626' : '#ea580c');
             return td(text, `;color:${color};font-weight:600`);
         };
 
-        const headCells = ['URL'];
+        const headCells = [host ? 'Page' : 'URL'];
         for (const m of metricDefs) {
             if (single) headCells.push(displayAudit.singleResult ? m.label : `${m.label} (${soloLabel})`);
             else {
@@ -664,19 +796,22 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 if (showImp) headCells.push(`${m.label} Δ`);
             }
         }
-        const thead = `<tr>${headCells.map(h => `<th style="background:#f1f1f1;text-align:left;padding:6px;border:1px solid #ccc">${h}</th>`).join('')}</tr>`;
+        // Teams drops CSS widths on paste; the URL column keeps a legacy width attribute and
+        // wraps through the break points breakableUrlLink puts in the text.
+        const URL_W = 180;
+        const thead = `<tr>${headCells.map((h, i) => `<th${i === 0 ? ` width="${URL_W}"` : ''} style="background:#f1f1f1;text-align:left;padding:6px;border:1px solid #ccc${i === 0 ? `;width:${URL_W}px` : ''}">${h}</th>`).join('')}</tr>`;
 
         const rows = config.urls.map((url, i) => {
             const r1 = getSlot1(i) || undefined;
             const r2 = getSlot2(i) || undefined;
-            let tds = td(url);
+            let tds = `<td width="${URL_W}" style="padding:6px;border:1px solid #ccc;width:${URL_W}px;max-width:${URL_W}px;vertical-align:top">${breakableUrlLink(url, labels[i])}</td>`;
             for (const m of metricDefs) {
                 const v1 = r1?.[m.key]?.displayValue ?? '-';
                 const v2 = r2?.[m.key]?.displayValue ?? '-';
                 if (single) tds += td(primaryOf(v1, v2));
                 else {
                     tds += td(v1) + td(v2);
-                    if (showImp) tds += impCell(r1?.[m.key], r2?.[m.key]);
+                    if (showImp) tds += impCell(r1?.[m.key], r2?.[m.key], verdictNote(r1, r2, m.key));
                 }
             }
             let html = `<tr>${tds}</tr>`;
@@ -686,7 +821,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             const h1 = (single ? primaryOf(r1, r2) : r1)?.runHistory ?? [];
             const h2 = single ? [] : (r2?.runHistory ?? []);
             const runCount = Math.max(h1.length, h2.length);
-            if (runCount > 1) {
+            if (includeRuns && runCount > 1) {
                 // Values appearing in BOTH before and after run sets for the same metric get highlighted,
                 // regardless of run index — spots identical measurements across the two runs.
                 const matchedByMetric = new Map<string, Set<string>>();
@@ -697,15 +832,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         matchedByMetric.set(m.key, new Set(vals2.filter(v => set1.has(v))));
                     }
                 }
-                // After runs slower than every Before run — the ones dragging a regression.
-                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key));
-                // The slowest Before run per metric — the baseline those After runs are held to.
-                const baselines = single ? {} : findBaselineRuns(r1, metricDefs.map(m => m.key));
-                const runCell = (v: string, metricKey: ComparableMetricKey, degraded = false, baseline = false): string => {
-                    if (degraded) return td(v, ';background:#fde2e2;color:#b91c1c;font-weight:600');
-                    if (baseline) return td(v, ';outline:1px dashed #dc2626;outline-offset:-3px;font-weight:600');
+                // After runs that drive the regression — the fewest worst runs whose removal clears it.
+                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key), config.aggregation);
+                const runCell = (v: string, metricKey: ComparableMetricKey, degraded = false): string => {
+                    if (degraded) return td(v, ';background:#fde2e2;color:#b91c1c');
                     const hl = v !== '-' && matchedByMetric.get(metricKey)?.has(v);
-                    return td(v, hl ? ';background:#fff3cd;color:#92400e;font-weight:600;font-style:italic' : ';color:#888');
+                    return td(v, hl ? ';background:#fff3cd;color:#92400e;font-style:italic' : ';color:#888');
                 };
                 for (let ri = 0; ri < runCount; ri++) {
                     const run1 = h1[ri];
@@ -716,7 +848,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         if (single) rtds += td(v1, ';color:#888');
                         else {
                             const v2 = run2?.[m.key]?.displayValue ?? '-';
-                            rtds += runCell(v1, m.key, false, baselines[m.key]?.runIndex === ri) + runCell(v2, m.key, !!degrading[m.key]?.runs.has(ri));
+                            rtds += runCell(v1, m.key) + runCell(v2, m.key, !!degrading[m.key]?.runs.has(ri));
                             if (showImp) rtds += td('');
                         }
                     }
@@ -730,27 +862,22 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
         const analysisMd = analyses[-1]?.status === 'done' ? analyses[-1]!.markdown : '';
         const analysisHtml = analysisMd ? `<br/>${marked.parse(analysisMd, { async: false }) as string}` : '';
-        const titleParts = [
-            config.runs > 1 ? (config.aggregation === 'median' ? 'Median' : 'Average') : '',
-            config.comparisonMode ? `${config.beforeLabel} vs ${config.afterLabel}` : '',
-        ].filter(Boolean);
-        const title = `${config.strategy.toUpperCase()} — PageSpeed${titleParts.length ? ` (${titleParts.join(' · ')})` : ''}`;
         // Throttling/emulation PSI used, so a reader knows what the numbers were measured on.
         const envSummary = describePageSpeedTestEnvironment(config.strategy, [...results1, ...results2]).summary;
-        const envHtml = `<p style="margin:4px 0 0;font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#666">${envSummary}</p>`;
-        const html = `<h3>${title}</h3>${tableHtml}${envHtml}${analysisHtml}`;
+        const envHtml = `<p style="margin:4px 0 0;font-family:Segoe UI,Arial,sans-serif;font-size:10px;color:#6b7280">${envSummary}</p>`;
+        const html = `${header.html}${tableHtml}${envHtml}${analysisHtml}`;
 
-        const plain = `${title}\n` + config.urls.map((url, i) => {
+        const plain = `${header.plain}\n` + config.urls.map((url, i) => {
             const r1 = getSlot1(i) || undefined;
             const r2 = getSlot2(i) || undefined;
             const parts = metricDefs.map(m => single
                 ? `${m.label} ${primaryOf(r1, r2)?.[m.key]?.displayValue ?? '-'}`
-                : `${m.label} ${r1?.[m.key]?.displayValue ?? '-'} → ${r2?.[m.key]?.displayValue ?? '-'}`);
+                : `${m.label} ${r1?.[m.key]?.displayValue ?? '-'} → ${r2?.[m.key]?.displayValue ?? '-'}${verdictNote(r1, r2, m.key)}`);
             const h1 = (single ? primaryOf(r1, r2) : r1)?.runHistory ?? [];
             const h2 = single ? [] : (r2?.runHistory ?? []);
             const runCount = Math.max(h1.length, h2.length);
             let runLines = '';
-            if (runCount > 1) {
+            if (includeRuns && runCount > 1) {
                 const matched = new Map<string, Set<string>>();
                 if (!single) {
                     for (const m of metricDefs) {
@@ -759,9 +886,9 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         matched.set(m.key, new Set(vals2.filter(v => set1.has(v))));
                     }
                 }
-                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key));
+                const degrading = single ? {} : findDegradingRuns(r1, r2, metricDefs.map(m => m.key), config.aggregation);
                 const mark = (v: string, key: string) => (v !== '-' && matched.get(key)?.has(v)) ? `*${v}*` : v;
-                // ↑ = slower than every Before run, i.e. this run drives the regression.
+                // ↑ = this run drives the regression.
                 const markAfter = (v: string, key: ComparableMetricKey, ri: number) =>
                     degrading[key]?.runs.has(ri) ? `${v} ↑` : mark(v, key);
                 for (let ri = 0; ri < runCount; ri++) {
@@ -771,7 +898,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     runLines += `\n  #${ri + 1}: ${runParts.join(', ')}`;
                 }
             }
-            return `${url}: ${parts.join(', ')}` + runLines;
+            return `${labels[i] ?? url}: ${parts.join(', ')}` + runLines;
         }).join('\n') + `\n\n${envSummary}` + (analysisMd ? `\n\n${analysisMd}` : '');
 
         const copy = navigator.clipboard.write([
@@ -1192,7 +1319,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return `${label} ${runs.map(r => `#${r}`).join(', ')}`;
     };
 
-    const renderInsightRow = (o: PageSpeedOpportunity, idPrefix: string, occurrence?: { runs: number[]; total: number }): React.ReactNode => {
+    const INSIGHT_BADGE: Record<InsightChange['status'], { label: string; className: string }> = {
+        new: { label: 'New', className: 'border-error/40 bg-error/10 text-error' },
+        worse: { label: 'Worse', className: 'border-warning/40 bg-warning/10 text-warning' },
+        fixed: { label: 'Fixed', className: 'border-success/40 bg-success/10 text-success' },
+    };
+
+    const renderInsightRow = (o: PageSpeedOpportunity, idPrefix: string, occurrence?: { runs: number[]; total: number }, change?: InsightChange): React.ReactNode => {
         const key = `${idPrefix}-${o.auditKey ?? o.title}`;
         const open = expandedInsights.has(key);
         const savings = formatSavings(o);
@@ -1208,6 +1341,13 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 >
                     {severityIcon(o.score)}
                     <span className="text-xs font-medium text-foreground">{o.title}</span>
+                    {change && (
+                        <Hint label={change.detail}>
+                            <span className={`rounded border px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${INSIGHT_BADGE[change.status].className}`}>
+                                {INSIGHT_BADGE[change.status].label}
+                            </span>
+                        </Hint>
+                    )}
                     {savings && <span className={`text-xs ${scoreColor(o.score)}`}>— {savings}</span>}
                     {metrics.map(m => (
                         <span key={m} className="text-[9px] uppercase tracking-wide px-1 py-px rounded border border-border text-muted-foreground">{m}</span>
@@ -1233,10 +1373,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         items: PageSpeedOpportunity[],
         idPrefix: string,
         occurrences?: Record<string, { runs: number[]; total: number }>,
+        changes?: Record<string, InsightChange>,
     ): React.ReactNode => {
         if (!items.length) return null;
         const groupKey = `group-${idPrefix}`;
         const open = expandedInsights.has(groupKey);
+        // What the release changed reads first: new, then worse, then fixed, then the rest.
+        const RANK: Record<InsightChange['status'], number> = { new: 0, worse: 1, fixed: 2 };
+        const rank = (o: PageSpeedOpportunity) => { const c = changes?.[insightKey(o)]; return c ? RANK[c.status] : 3; };
+        const ordered = changes ? [...items].sort((a, b) => rank(a) - rank(b)) : items;
+        const counts = (['new', 'worse', 'fixed'] as const)
+            .map(status => [status, items.filter(o => changes?.[insightKey(o)]?.status === status).length] as const)
+            .filter(([, n]) => n > 0);
         return (
             <div className="mt-3">
                 <Hint label={open ? `Hide these ${items.length} items` : `Show these ${items.length} items`} side="right">
@@ -1246,11 +1394,16 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 >
                     <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
                     {heading} ({items.length})
+                    {counts.map(([status, n]) => (
+                        <span key={status} className={`ml-1 rounded border px-1 text-[9px] font-semibold uppercase ${INSIGHT_BADGE[status].className}`}>
+                            {n} {INSIGHT_BADGE[status].label}
+                        </span>
+                    ))}
                 </button>
                 </Hint>
                 {open && (
                     <div className="border border-border rounded-md overflow-hidden bg-background">
-                        {items.map(o => renderInsightRow(o, idPrefix, occurrences?.[o.auditKey ?? o.title]))}
+                        {ordered.map(o => renderInsightRow(o, idPrefix, occurrences?.[insightKey(o)], changes?.[insightKey(o)]))}
                     </div>
                 )}
             </div>
@@ -1262,6 +1415,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         idPrefix: string,
         label?: string,
         occurrences?: Record<string, { runs: number[]; total: number }>,
+        changes?: Record<string, InsightChange>,
     ): React.ReactNode => {
         // Only keep insights that affect a metric currently shown as a column.
         const metricShown: Record<string, boolean> = {
@@ -1278,41 +1432,32 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return (
             <div className="mt-3">
                 {label && <p className="text-xs font-semibold text-foreground">{label}</p>}
-                {renderInsightGroup('PAGESPEED INSIGHTS', visible, `${idPrefix}-o`, occurrences)}
+                {renderInsightGroup('PAGESPEED INSIGHTS', visible, `${idPrefix}-o`, occurrences, changes)}
             </div>
         );
     };
 
-    const renderInsights = (result: PageSpeedInsightResult, idPrefix: string, label?: string): React.ReactNode =>
-        renderInsightsList((result.opportunities ?? []).filter(o => o.type === 'opportunity'), idPrefix, label);
+    const renderInsights = (result: PageSpeedInsightResult, idPrefix: string, label?: string, changes?: Record<string, InsightChange>): React.ReactNode =>
+        renderInsightsList((result.opportunities ?? []).filter(o => o.type === 'opportunity'), idPrefix, label, undefined, changes);
 
     // Merge each run's insights into one set: dedupe by audit, keep the worst-scoring instance,
     // and track how many of the runs each audit appeared in.
-    const consolidateRunInsights = (history: PageSpeedInsightResult[]): {
-        opportunities: PageSpeedOpportunity[];
-        occurrences: Record<string, { runs: number[]; total: number }>;
-    } => {
-        const total = history.length;
-        const byKey = new Map<string, PageSpeedOpportunity>();
-        const runsByKey: Record<string, number[]> = {};
-        history.forEach((run, runIdx) => {
-            for (const o of run.opportunities ?? []) {
-                if (o.type !== 'opportunity') continue;
-                const key = o.auditKey ?? o.title;
-                (runsByKey[key] ??= []).push(runIdx + 1);
-                const existing = byKey.get(key);
-                if (!existing || (o.score ?? 0) < (existing.score ?? 0)) byKey.set(key, o);
-            }
-        });
-        const occurrences: Record<string, { runs: number[]; total: number }> = {};
-        for (const [key, runs] of Object.entries(runsByKey)) occurrences[key] = { runs, total };
-        const opportunities = [...byKey.values()].sort((a, b) => (a.score ?? 1) - (b.score ?? 1));
-        return { opportunities, occurrences };
+    const consolidateRunInsights = consolidateInsights;
+
+    const renderConsolidatedInsights = (history: PageSpeedInsightResult[], idPrefix: string, label?: string, changes?: Record<string, InsightChange>): React.ReactNode => {
+        const { opportunities, occurrences } = consolidateRunInsights(history);
+        return renderInsightsList(opportunities, idPrefix, label, occurrences, changes);
     };
 
-    const renderConsolidatedInsights = (history: PageSpeedInsightResult[], idPrefix: string, label?: string): React.ReactNode => {
-        const { opportunities, occurrences } = consolidateRunInsights(history);
-        return renderInsightsList(opportunities, idPrefix, label, occurrences);
+    // NEW / WORSE for the After insights and FIXED for the Before ones — comparison only.
+    const insightChanges = (index: number): ReturnType<typeof diffInsights> | undefined => {
+        const r1 = getSlot1(index) || undefined;
+        const r2 = getSlot2(index) || undefined;
+        if (!config.comparisonMode || !r1 || !r2) return undefined;
+        const setOf = (r: PageSpeedInsightResult): InsightSet => r.runHistory?.length
+            ? consolidateInsights(r.runHistory)
+            : { opportunities: (r.opportunities ?? []).filter(o => o.type === 'opportunity') };
+        return diffInsights(setOf(r1), setOf(r2), { before: config.beforeLabel, after: config.afterLabel });
     };
 
     // ─── Claude before/after analysis ──────────────────────────────────────────
@@ -1439,22 +1584,63 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
             },
         );
 
-        // After runs slower than every Before run — the outliers behind a regressed aggregate.
+        // The fewest worst After runs whose removal clears each regressed metric.
         const degradingSection = (() => {
-            const found = findDegradingRuns(r1, r2, shownMetricKeys());
+            const found = findDegradingRuns(r1, r2, shownMetricKeys(), config.aggregation);
             const lines = shownMetricKeys().flatMap(key => {
                 const d = found[key];
                 if (!d) return [];
-                const runs = [...d.runs].map(i => `#${i + 1} (${h2?.[i]?.[key]?.displayValue})`).join(', ');
-                return [`- ${METRIC_LABELS[key]}: ${runs} — baseline (slowest ${config.beforeLabel} run, #${d.baseline.runIndex + 1}) was ${d.baseline.metric.displayValue}`];
+                const runs = [...d.runs].sort((x, y) => x - y).map(i => `#${i + 1} (${h2?.[i]?.[key]?.displayValue})`).join(', ');
+                return [`- ${METRIC_LABELS[key]}: ${runs}. Without them the ${config.afterLabel} ${config.aggregation} is ${formatShown(key, d.without)} vs ${config.beforeLabel}'s ${d.target.displayValue}.`];
             });
             if (!lines.length) return '';
             return [
                 '',
                 `### ${config.afterLabel} runs driving the regression`,
-                `These ${config.afterLabel} runs are slower than EVERY ${config.beforeLabel} run on a metric whose aggregate regressed:`,
+                `For each regressed metric, the fewest worst ${config.afterLabel} runs whose removal brings the score back to ${config.beforeLabel} or better:`,
                 lines.join('\n'),
-                'Interpretation: if only one or two runs sit above the Before range while the rest overlap it, the regression is likely an outlier (noise) rather than a consistent code-level change.',
+                'Interpretation: one or two flagged runs while the rest overlap Before point to outliers (noise). Many flagged runs, or runs flagged on several metrics, point to a consistent change.',
+                '',
+            ].join('\n');
+        })();
+
+        // Which PageSpeed Insights findings the release introduced, worsened or fixed.
+        const insightChangeSection = (() => {
+            const changes = insightChanges(index);
+            if (!changes) return '';
+            const titleOf = (side: PageSpeedInsightResult | undefined, key: string) => {
+                const list = side?.runHistory?.length ? consolidateInsights(side.runHistory).opportunities : (side?.opportunities ?? []);
+                return list.find(o => insightKey(o) === key)?.title ?? key;
+            };
+            const lines = [
+                ...Object.entries(changes.after).map(([key, c]) => `- ${c.status.toUpperCase()}: ${titleOf(r2, key)}. ${c.detail}`),
+                ...Object.entries(changes.before).map(([key, c]) => `- FIXED: ${titleOf(r1, key)}. ${c.detail}`),
+            ];
+            if (!lines.length) return '';
+            return ['', `### PageSpeed Insights changes (${config.beforeLabel} → ${config.afterLabel})`, lines.join('\n'), ''].join('\n');
+        })();
+
+        // Is each metric's change real, and why did the flagged runs spike?
+        const forensicsSection = (() => {
+            if (!r1?.runHistory || !r2?.runHistory) return '';
+            const keys = shownMetricKeys();
+            const verdicts = keys.map(key => {
+                const v = metricVerdict(r1, r2, key, config.aggregation);
+                return `- ${METRIC_LABELS[key]}: ${VERDICT_LABELS[v.verdict]}. ${describeVerdict(v)}`;
+            });
+            const flagged = flaggedAfterRuns(r1, r2, keys, config.aggregation);
+            const origin = pageOriginOf(index);
+            const causes = flagged.map(i =>
+                `- Run #${i + 1}: ${explainSpike(i, r2, flagged, origin).map(c => `${c.label}. ${c.detail}`).join(' ')}`);
+            const warm = detectWarmUp(r1, r2, keys, config.aggregation);
+            return [
+                '',
+                '### Run forensics (is the change real?)',
+                `Verdict per metric. "Slower in X% of run pairs" is Mann-Whitney U / (n1*n2): 71% or more = consistent regression, 29% or less = consistent improvement, in between = overlapping runs (noise).`,
+                verdicts.join('\n'),
+                ...(causes.length ? ['', `Why each flagged ${config.afterLabel} run spiked (compared with a typical ${config.afterLabel} run):`, causes.join('\n')] : []),
+                ...(warm ? ['', `Warm-up pattern: runs ${runRange(warm.runs)} were slow, then steady. Likely a cold CDN/server cache after deploy, not a code change.`] : []),
+                'Interpretation: treat "likely noise" / "within noise" metrics as unchanged. Only "real regression" metrics warrant a code-level explanation.',
                 '',
             ].join('\n');
         })();
@@ -1462,13 +1648,15 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         return [
             `URL: ${url}`,
             `Strategy: ${config.strategy}`,
-            `Runs: ${config.runs}${isMultiRun ? ` (${config.aggregation})` : ''}${isMultiRun && h1 ? ` — ${h1.length} completed` : ''}`,
+            `Runs: ${config.runs}${isMultiRun ? ` (${config.aggregation})` : ''}${config.warmUpRun ? ' (+1 discarded warm-up run per URL)' : ''}${isMultiRun && h1 ? ` — ${h1.length} completed` : ''}`,
             '',
             slot(config.beforeLabel, r1, h1),
             slot(config.afterLabel, r2, h2),
             evidenceSection,
             matchedSection,
             degradingSection,
+            forensicsSection,
+            insightChangeSection,
         ].join('\n');
     };
 
@@ -1481,33 +1669,24 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
     // Individual-runs metrics table. Insights are consolidated separately, below the table.
     const renderRunHistory = (history: PageSpeedInsightResult[], index: number, slotKey: '1' | '2'): React.ReactNode => {
-        // After runs slower than every Before run on a regressed metric — the runs that
-        // turn the Improvement negative. Only the After table can drag a comparison down.
+        // The fewest worst After runs whose removal clears a regressed metric — the runs
+        // that turn the Improvement negative. Only the After table can drag a comparison down.
         const degrading = slotKey === '2' && config.comparisonMode
-            ? findDegradingRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys())
+            ? findDegradingRuns(getSlot1(index) || undefined, getSlot2(index) || undefined, shownMetricKeys(), config.aggregation)
             : {};
-        // Before side: per metric, the slowest run is the baseline the After runs are held to —
-        // SI's baseline and LCP's can come from different runs.
-        const baselines = slotKey === '1' && config.comparisonMode && getSlot2(index)
-            ? findBaselineRuns(getSlot1(index) || undefined, shownMetricKeys())
-            : {};
+        // Why each flagged run spiked, vs a typical After run.
+        const flagged = slotKey === '2' && config.comparisonMode ? flaggedRunIndexes(index) : [];
+        const afterResult = getSlot2(index) || undefined;
+        const spikeCauses = (runIdx: number) =>
+            afterResult && flagged.includes(runIdx) ? explainSpike(runIdx, afterResult, flagged, pageOriginOf(index)) : [];
         const metricCell = (key: ComparableMetricKey, run: PageSpeedInsightResult, runIdx: number): React.ReactNode => {
-            if (baselines[key]?.runIndex === runIdx) {
-                return (
-                    <td className="text-center py-1 px-2">
-                        <Hint label={`Baseline: the slowest ${config.beforeLabel} ${METRIC_LABELS[key]} — ${config.afterLabel} runs above it are flagged`}>
-                            <span className="rounded border border-dashed border-error/60 px-1">{historyMetricValue(run[key])}</span>
-                        </Hint>
-                    </td>
-                );
-            }
             const d = degrading[key];
             if (!d?.runs.has(runIdx)) {
                 return <td className="text-center py-1 px-2">{historyMetricValue(run[key])}</td>;
             }
             return (
                 <td className="text-center py-1 px-2 font-semibold text-error">
-                    <Hint label={`Slower than every ${config.beforeLabel} run (baseline ${d.baseline.metric.displayValue}, run #${d.baseline.runIndex + 1}) — this run pulls the ${METRIC_LABELS[key]} ${config.aggregation} into a regression`}>
+                    <Hint label={`Drives the ${METRIC_LABELS[key]} regression. Without run${d.runs.size > 1 ? 's' : ''} ${[...d.runs].sort((x, y) => x - y).map(i => `#${i + 1}`).join(', ')} the ${config.afterLabel} ${config.aggregation} would be ${formatShown(key, d.without)}, no worse than ${config.beforeLabel}'s ${d.target.displayValue}.`}>
                         <span className="inline-flex items-center gap-0.5">
                             {historyMetricValue(run[key])}
                             <ArrowUp className="h-3 w-3" />
@@ -1556,6 +1735,17 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                     <Hint label={`Run #${runIdx + 1}${run.fetchTime ? ` - ${formatRunTime(run.fetchTime)}` : ''}`}>
                                         <span>#{runIdx + 1}</span>
                                     </Hint>
+                                    {(() => {
+                                        const causes = spikeCauses(runIdx);
+                                        if (!causes.length) return null;
+                                        return (
+                                            <Hint label={causes.map(c => c.detail).join(' ')}>
+                                                <span className="ml-1.5 inline-block rounded border border-error/40 px-1 align-middle text-[10px] font-medium leading-4 text-error">
+                                                    {causes[0]!.label}{causes.length > 1 ? ` +${causes.length - 1}` : ''}
+                                                </span>
+                                            </Hint>
+                                        );
+                                    })()}
                                     {runMessages.length > 0 && (
                                         <Hint label={messagesOpen ? `Hide the ${badgeLabel} from run #${runIdx + 1}` : `Show the ${badgeLabel} from run #${runIdx + 1}`}>
                                             <button
@@ -1619,6 +1809,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         slot2: AuditSlot,
         metrics1: PageSpeedMetrics | undefined,
         metrics2: PageSpeedMetrics | undefined,
+        key: ComparableMetricKey,
     ): React.ReactNode => (
         <>
             {show && (
@@ -1636,7 +1827,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     {displayAudit.improvement && (
                         <TableCell className="text-center border">
                             {metrics1 && metrics2
-                                ? calculateImprovement(metrics1, metrics2)
+                                ? <div className="inline-flex items-center justify-center gap-1">{calculateImprovement(metrics1, metrics2)}{verdictChip(slot1 || undefined, slot2 || undefined, key)}</div>
                                 : isAuditing
                                     ? <Skeleton className="mx-auto h-4 w-12" />
                                     : '-'}
@@ -1665,7 +1856,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         <div className="flex items-center gap-2">
                             {config.comparisonMode && (
                                 <>
-                                    <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}on ${config.strategy} and fill the ${config.beforeLabel} columns`}>
+                                    <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}${config.warmUpRun ? '(after 1 discarded warm-up run) ' : ''}on ${config.strategy} and fill the ${config.beforeLabel} columns`}>
                                         <Button variant="outline" onClick={audit1} disabled={isAuditing}>
                                             {auditing1 ? (
                                                 <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
@@ -1692,7 +1883,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 </>
                             )}
                             {!config.comparisonMode && (
-                                <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}on ${config.strategy}`}>
+                                <Hint label={`Audit every URL ${config.runs > 1 ? `${config.runs} times ` : ''}${config.warmUpRun ? '(after 1 discarded warm-up run) ' : ''}on ${config.strategy}`}>
                                     <Button variant="outline" onClick={audit1} disabled={isAuditing}>
                                         {auditing1 ? (
                                             <span className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
@@ -1713,12 +1904,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                 </Hint>
                             )}
                             {config.urls.some((_, i) => getSlot1(i) || getSlot2(i)) && (
-                                <Hint label={`Copy this ${config.strategy} table as rich text, ready to paste into Teams`}>
-                                    <Button variant="outline" onClick={copyForTeams} disabled={copying}>
-                                        <Copy className="mr-1 h-4 w-4" />
-                                        Copy for Teams
-                                    </Button>
-                                </Hint>
+                                <CopyForTeamsButton
+                                    onCopy={copyForTeams}
+                                    disabled={copying}
+                                    hint={`Copy this ${config.strategy} table as rich text, ready to paste into Teams`}
+                                    icon={<Copy className="mr-1 h-4 w-4" />}
+                                />
                             )}
                             <Hint label="Copy this card to the clipboard as a PNG screenshot">
                                 <Button variant="outline" onClick={onCopyAsImage} disabled={copying || isAuditing}>
@@ -1816,11 +2007,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                 </div>
                                             </TableCell>
 
-                                            {cellMetrics(displayAudit.SI, slot1, slot2, result1?.speedIndex, result2?.speedIndex)}
-                                            {cellMetrics(displayAudit.LCP, slot1, slot2, result1?.largestContentfulPaint, result2?.largestContentfulPaint)}
-                                            {cellMetrics(displayAudit.CLS, slot1, slot2, result1?.cumulativeLayoutShift, result2?.cumulativeLayoutShift)}
-                                            {cellMetrics(displayAudit.TBT, slot1, slot2, result1?.totalBlockingTime, result2?.totalBlockingTime)}
-                                            {cellMetrics(displayAudit.FCP, slot1, slot2, result1?.firstContentfulPaint, result2?.firstContentfulPaint)}
+                                            {cellMetrics(displayAudit.SI, slot1, slot2, result1?.speedIndex, result2?.speedIndex, 'speedIndex')}
+                                            {cellMetrics(displayAudit.LCP, slot1, slot2, result1?.largestContentfulPaint, result2?.largestContentfulPaint, 'largestContentfulPaint')}
+                                            {cellMetrics(displayAudit.CLS, slot1, slot2, result1?.cumulativeLayoutShift, result2?.cumulativeLayoutShift, 'cumulativeLayoutShift')}
+                                            {cellMetrics(displayAudit.TBT, slot1, slot2, result1?.totalBlockingTime, result2?.totalBlockingTime, 'totalBlockingTime')}
+                                            {cellMetrics(displayAudit.FCP, slot1, slot2, result1?.firstContentfulPaint, result2?.firstContentfulPaint, 'firstContentfulPaint')}
                                         </TableRow>
 
                                         {/* Details drawer row */}
@@ -1828,6 +2019,33 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                             <TableRow className="bg-muted/30">
                                                 <TableCell colSpan={totalColCount} className="p-0">
                                                     <div className="px-4 py-3">
+                                                        {/* Run spread: Before vs After runs on one axis — overlap = noise */}
+                                                        {config.comparisonMode && history1 && history2 && showSide1 && showSide2 && (() => {
+                                                            const cardKey = `spread-${index}`;
+                                                            const cardOpen = !collapsedRunCards.has(cardKey);
+                                                            return (
+                                                            <div className="mb-3 rounded-md border border-border bg-background p-3">
+                                                                <Hint label={cardOpen ? 'Collapse the run spread' : 'Expand to see every Before and After run on one axis'} className="w-full">
+                                                                <button onClick={() => toggleRunCard(cardKey)} className="flex w-full items-center gap-1 text-left mb-1.5">
+                                                                    <p className="text-xs font-medium text-muted-foreground">Run spread — overlapping lanes mean noise, separated lanes mean a real change</p>
+                                                                    <ChevronDown className={`ml-auto h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${cardOpen ? 'rotate-180' : ''}`} data-html2canvas-ignore="true" />
+                                                                </button>
+                                                                </Hint>
+                                                                {cardOpen && (
+                                                                    <RunSpreadStrip
+                                                                        before={result1!}
+                                                                        after={result2!}
+                                                                        keys={shownMetricKeys()}
+                                                                        labels={METRIC_LABELS}
+                                                                        beforeLabel={config.beforeLabel}
+                                                                        afterLabel={config.afterLabel}
+                                                                        aggregation={config.aggregation}
+                                                                    />
+                                                                )}
+                                                            </div>
+                                                            );
+                                                        })()}
+
                                                         {/* Slot 1: runs table + consolidated insights across those runs */}
                                                         {history1 && showSide1 && (() => {
                                                             const cardKey = `runs-${index}-1`;
@@ -1843,7 +2061,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                 {cardOpen && (
                                                                     <>
                                                                         {renderRunHistory(history1, index, '1')}
-                                                                        {renderConsolidatedInsights(history1, `${index}-1`, undefined)}
+                                                                        {renderConsolidatedInsights(history1, `${index}-1`, undefined, insightChanges(index)?.before)}
                                                                     </>
                                                                 )}
                                                             </div>
@@ -1869,7 +2087,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                     {!copying && (flaggedCount > 0 || reauditing) && (
                                                                         <Hint label={reauditing
                                                                             ? `Re-auditing run #${progress.run}, attempt ${progress.attempt} of ${REAUDIT_MAX_ATTEMPTS} — click to stop and keep the closest runs found`
-                                                                            : `Re-audit the ${flaggedCount} flagged run${flaggedCount === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each) until each is within the ${config.beforeLabel} baseline`}>
+                                                                            : `Re-audit the ${flaggedCount} flagged run${flaggedCount === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each) until ${config.afterLabel} is no longer worse than ${config.beforeLabel}`}>
                                                                             <button
                                                                                 onClick={() => reauditFlaggedRuns(index)}
                                                                                 disabled={isAuditing || isRetryingAny || (isReauditingAny && !reauditing)}
@@ -1889,10 +2107,63 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                     </button>
                                                                     </Hint>
                                                                 </div>
+                                                                {(() => {
+                                                                    const notice = reauditNotice[`2-${index}`];
+                                                                    if (!reauditing && !notice) return null;
+                                                                    const tone = reauditing ? 'info' : notice!.tone;
+                                                                    const styles = {
+                                                                        success: { box: 'border-success/40 bg-success/10', icon: CircleCheck, color: 'text-success' },
+                                                                        info: { box: 'border-info/40 bg-info/10', icon: Info, color: 'text-info' },
+                                                                        warning: { box: 'border-warning/40 bg-warning/10', icon: CircleAlert, color: 'text-warning' },
+                                                                    }[tone];
+                                                                    const Icon = styles.icon;
+                                                                    return (
+                                                                        <div role="status" aria-live="polite" className={`mb-2 flex items-start gap-2 rounded-md border px-2 py-1.5 text-xs ${styles.box}`}>
+                                                                            <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${styles.color} ${reauditing ? 'animate-pulse' : ''}`} />
+                                                                            <span className="flex-1">
+                                                                                {reauditing
+                                                                                    ? `Re-auditing flagged run #${progress.run}, attempt ${progress.attempt} of ${REAUDIT_MAX_ATTEMPTS}. Click the re-audit button again to stop.`
+                                                                                    : notice!.text}
+                                                                            </span>
+                                                                            {!reauditing && !copying && (
+                                                                                <Hint label="Dismiss">
+                                                                                    <button onClick={() => dismissReauditNotice(`2-${index}`)} className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Dismiss" data-html2canvas-ignore="true">
+                                                                                        <X className="h-3 w-3" />
+                                                                                    </button>
+                                                                                </Hint>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                })()}
+                                                                {cardOpen && (() => {
+                                                                    const warm = config.comparisonMode && !reauditing
+                                                                        ? detectWarmUp(result1, result2, shownMetricKeys(), config.aggregation)
+                                                                        : null;
+                                                                    if (!warm) return null;
+                                                                    return (
+                                                                        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-info/40 bg-info/10 px-2 py-1.5 text-xs">
+                                                                            <Snowflake className="h-3.5 w-3.5 shrink-0 text-info" />
+                                                                            <span className="flex-1">
+                                                                                Run{warm.runs.length > 1 ? 's' : ''} {runRange(warm.runs)} {warm.runs.length > 1 ? 'were' : 'was'} slow, then results settled. This looks like a cold cache after deploy, not a code change.
+                                                                                {!config.warmUpRun && ' Turn on Warm-up run in Configuration to skip it next time.'}
+                                                                            </span>
+                                                                            {!copying && (
+                                                                                <button
+                                                                                    onClick={() => reauditFlaggedRuns(index)}
+                                                                                    disabled={isAuditing || isRetryingAny || isReauditingAny}
+                                                                                    className="rounded border border-border px-1.5 py-0.5 text-[11px] font-medium hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                                                                    data-html2canvas-ignore="true"
+                                                                                >
+                                                                                    Re-audit {warm.runs.length > 1 ? 'them' : 'it'}
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                })()}
                                                                 {cardOpen && (
                                                                     <>
                                                                         {renderRunHistory(history2, index, '2')}
-                                                                        {renderConsolidatedInsights(history2, `${index}-2`, undefined)}
+                                                                        {renderConsolidatedInsights(history2, `${index}-2`, undefined, insightChanges(index)?.after)}
                                                                     </>
                                                                 )}
                                                             </div>
@@ -1914,7 +2185,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                     </Hint>
                                                                     {singleRunRerunButton(index, setResults1, '1')}
                                                                 </div>
-                                                                {cardOpen && renderInsights(result1, `${index}-1`)}
+                                                                {cardOpen && renderInsights(result1, `${index}-1`, undefined, insightChanges(index)?.before)}
                                                             </div>
                                                             );
                                                         })()}
@@ -1933,7 +2204,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                     </Hint>
                                                                     {singleRunRerunButton(index, setResults2, '2')}
                                                                 </div>
-                                                                {cardOpen && renderInsights(result2, `${index}-2`)}
+                                                                {cardOpen && renderInsights(result2, `${index}-2`, undefined, insightChanges(index)?.after)}
                                                             </div>
                                                             );
                                                         })()}
