@@ -642,7 +642,7 @@ function Thumb({ img, className, onImageClick, onCopyImage }: {
           title="Copy image (full resolution)"
           className="absolute right-1 top-1 z-10 rounded border border-border bg-background/80 p-1 text-muted-foreground opacity-0 shadow-sm transition hover:text-foreground group-hover/thumb:opacity-100"
         >
-          <Copy className="h-3 w-3" />
+          <Copy className="h-3 w-3 text-primary" />
         </button>
       )}
     </div>

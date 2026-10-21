@@ -16,6 +16,8 @@ export const C = {
   textSub:     UI.textMuted,
   textMuted:   UI.textDim,
   accent:      UI.info,
+  /** Action icons — same as every Button icon in the app. */
+  primary:     'hsl(var(--primary))',
   green:       UI.success,
   yellow:      UI.warning,
   red:         UI.error,

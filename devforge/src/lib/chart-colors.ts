@@ -76,6 +76,16 @@ export const PERF_COLORS = {
   line: '#58a6ff',
 } as const;
 
+/**
+ * Release marker lines. The foreground colour rather than another hue: every hue is
+ * already taken by a series somewhere on the card, and a marker must never read as
+ * one more line of data. The API's is faded so FE and API releases stay apart.
+ */
+export const RELEASE_COLORS = {
+  fe: 'hsl(var(--foreground) / 0.85)',
+  api: 'hsl(var(--foreground) / 0.45)',
+} as const;
+
 /** Fallback for an instance index past the end of INSTANCE_PALETTE. */
 export const SERIES_FALLBACK = UI.textMuted;
 

@@ -47,7 +47,7 @@ function MergeToggle({ merged, onToggle, what }: { merged: boolean; onToggle: ()
     <Hint label={merged ? `Give this row its own ${what}` : `Use the ${what} of the row above`}>
       <button type="button" onClick={onToggle} aria-label={merged ? `Split ${what}` : `Same ${what} as above`}
         className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-        {merged ? <Link2Off className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+        {merged ? <Link2Off className="h-3 w-3 text-primary" /> : <Link2 className="h-3 w-3 text-primary" />}
       </button>
     </Hint>
   );
@@ -192,7 +192,7 @@ export const RunbookSectionTable = memo(function RunbookSectionTable({
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button type="button" aria-label="Row actions" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
-                      <MoreVertical className="h-3.5 w-3.5" />
+                      <MoreVertical className="h-3.5 w-3.5 text-primary" />
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">

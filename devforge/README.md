@@ -16,15 +16,16 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 
 #### App Health Check
 
-**Use it to** see how Azure apps behaved over a time window, and to explain an outage or a spike: during an incident, for a daily check, or when a tray alert fires.
+**Use it to** see how Azure apps behaved over a time window, and to explain an outage or a spike: during an incident, for a daily check, when a tray alert fires, or after a release to compare before and after.
 
 - Pick one or more apps and a From / To range (defaults to today 00:00 → now) at 1m–6h granularity. You can turn on **Auto reload** to keep the end at "now".
 - Each app gets a card with a status (healthy / warning / critical). **Blocks** choose what the card shows: Remarks, CPU, Memory, Database, Users, Page Load, Performance, Exceptions, Instances, UptimeRobot, SNAT Ports, Restarts, Crash Monitoring, Anomaly Detection, and Frontend / API.
+- **Release markers:** every time chart on the card draws a dashed line where a release reached production (FE darker, API fainter; the CPU / Memory chart labels each one with its SGT time), so a change in CPU, restarts or errors reads as before vs after the release. The header shows **Last release** for FE and API, even when it falls outside the range (30-day look-back); hover it for the build, commit and who released. Releases come from the Activity Log (slot swaps, including manual ones) and the Kudu deployment history (pipeline deploys and swaps); Container Apps use their revisions.
 - **Anomaly Detection** flags correlated spikes across CPU, memory, DB CPU and DB memory (plus FE/API error rates when App Insights is available).
 - **Copy for Teams** puts the status header, chart image and metrics table on the clipboard in one paste.
 - **AI report** writes an AI-ready Markdown incident report for the range to `~/.claude/agents/incident-reports/` and opens it.
 - **RCA** opens a downtime root-cause analysis: add your investigation notes and Claude drafts the report. You can copy it for Teams or save it as Markdown, PDF or Word.
-- **Needs:** `az login`, and apps configured in **Settings → Azure**. Optional: an App Insights ID, a database, and the API app per entry. UptimeRobot needs a key in **Settings → API Keys**. RCA needs the [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH. Desktop app only.
+- **Needs:** `az login`, and apps configured in **Settings → Azure**. Optional: an App Insights ID, a database, and the API app per entry. UptimeRobot needs a key in **Settings → API Keys**. Release markers need Reader on the app's resource group (the header shows "n/a" without it). RCA needs the [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH. Desktop app only.
 
 ### Web quality
 

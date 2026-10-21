@@ -1772,7 +1772,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                 disabled={isAuditing || isRetryingAny || rerunning || isReauditingAny}
                                                 className="inline-flex items-center justify-center p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors"
                                             >
-                                                <RotateCw className={`h-3.5 w-3.5 ${rerunning ? 'animate-spin' : ''}`} />
+                                                <RotateCw className={`h-3.5 w-3.5 text-primary ${rerunning ? 'animate-spin' : ''}`} />
                                             </button>
                                         </Hint>
                                     </td>
@@ -2094,7 +2094,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                                 className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none transition-colors ${reauditing ? 'text-primary' : 'text-error hover:text-foreground'}`}
                                                                                 data-html2canvas-ignore="true"
                                                                             >
-                                                                                <RotateCcw className={`h-3.5 w-3.5 ${reauditing ? 'animate-spin' : ''}`} />
+                                                                                <RotateCcw className={`h-3.5 w-3.5 text-primary ${reauditing ? 'animate-spin' : ''}`} />
                                                                                 {reauditing
                                                                                     ? <span className="tabular-nums">#{progress.run} · {progress.attempt}/{REAUDIT_MAX_ATTEMPTS}</span>
                                                                                     : <span>Re-audit ({flaggedCount})</span>}

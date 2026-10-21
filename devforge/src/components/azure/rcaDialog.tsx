@@ -141,7 +141,7 @@ export function RcaDialog({
                       onClick={onCopySummary}
                       title="Copy the Quick Summary formatted for Microsoft Teams"
                     >
-                      <Share2 className="h-3 w-3" />
+                      <Share2 className="h-3 w-3 text-primary" />
                       Copy for Teams
                     </button>
                   </div>

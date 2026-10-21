@@ -154,7 +154,7 @@ export function ControlBar(props: Props) {
             borderRadius: 6,
             border: 'none',
             background: 'none',
-            color: fetchDisabled ? C.textMuted : C.textSub,
+            color: fetchDisabled ? C.textMuted : C.primary,
             fontSize: 16,
             cursor: fetchDisabled ? 'not-allowed' : 'pointer',
             display: 'flex', alignItems: 'center',

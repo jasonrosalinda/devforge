@@ -4,6 +4,12 @@ import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
+// Icons on the unfilled variants take the primary colour, so every action button
+// reads the same way across the app. Only icons without a colour class of their
+// own: a status-coloured or muted icon keeps its meaning. Not on the filled
+// variants, where a primary icon would vanish into the primary background.
+const PRIMARY_ICON = "[&_svg:not([class*='text-'])]:text-primary"
+
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
@@ -14,10 +20,10 @@ const buttonVariants = cva(
         destructive:
           "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
         outline:
-          "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+          `border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground ${PRIMARY_ICON}`,
         secondary:
-          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
-        ghost: "hover:bg-accent hover:text-accent-foreground",
+          `bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80 ${PRIMARY_ICON}`,
+        ghost: `hover:bg-accent hover:text-accent-foreground ${PRIMARY_ICON}`,
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

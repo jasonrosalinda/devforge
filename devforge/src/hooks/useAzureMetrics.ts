@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
-import type { AppMetrics, CrashResult, EndpointDependency, EndpointPerfPoint, EndpointStatusCode, RestartResult } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, CrashResult, EndpointDependency, EndpointPerfPoint, EndpointStatusCode, ReleaseResult, RestartResult } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 
 type CredStatus = 'checking' | 'ok' | 'error';
@@ -49,6 +49,10 @@ interface UseAzureMetrics {
   endpointDeps: Record<string, EndpointDepsState>;
   fetchEndpointDeps: (appKey: string, site: 'fe' | 'api', endpoint: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string) => Promise<void>;
   fetchAppRestarts: (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => Promise<void>;
+  releasesLoading: Record<string, boolean>;
+  /** Release events per app — the chart markers and the header's "last release". */
+  releases: Record<string, { fe: ReleaseResult | null; api: ReleaseResult | null }>;
+  fetchAppReleases: (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string) => Promise<void>;
   recheckCredential: () => Promise<void>;
 }
 
@@ -75,6 +79,9 @@ export function useAzureMetrics(): UseAzureMetrics {
   const detailsRequested = useRef<Set<string>>(new Set());
   const snatRequested = useRef<Set<string>>(new Set());
   const crashesRequested = useRef<Set<string>>(new Set());
+  const releasesRequested = useRef<Set<string>>(new Set());
+  const [releasesLoading, setReleasesLoading] = useState<Record<string, boolean>>({});
+  const [releases, setReleases] = useState<Record<string, { fe: ReleaseResult | null; api: ReleaseResult | null }>>({});
   const [endpointDeps, setEndpointDeps] = useState<Record<string, EndpointDepsState>>({});
   const fetchIdRef = useRef(0);
 
@@ -183,6 +190,24 @@ export function useAzureMetrics(): UseAzureMetrics {
     }
   }, []);
 
+  // Eager like restarts: the release markers belong on the very first chart a reader
+  // looks at, and a marker that appears only after a click is one they never see.
+  const fetchAppReleases = useCallback(async (appKey: string, range: string, config: AzureSettings, customStart?: string, customEnd?: string) => {
+    if (releasesRequested.current.has(appKey)) return;
+    releasesRequested.current.add(appKey);
+    setReleasesLoading(prev => ({ ...prev, [appKey]: true }));
+    try {
+      const { fe, api } = await window.electronAPI.azureMetrics.fetchReleases({ appKey, range, config, customStart, customEnd });
+      setReleases(prev => ({ ...prev, [appKey]: { fe: fe ?? null, api: api ?? null } }));
+    } catch (err: unknown) {
+      releasesRequested.current.delete(appKey);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Release fetch failed: ${msg}`);
+    } finally {
+      setReleasesLoading(prev => ({ ...prev, [appKey]: false }));
+    }
+  }, []);
+
   const fetchMetrics = useCallback(async (appKeys: string[], range: string, config: AzureSettings, customStart?: string, customEnd?: string, granularity?: string) => {
     if (credStatus === 'error') return;
     if (!appKeys.length) return;
@@ -197,7 +222,10 @@ export function useAzureMetrics(): UseAzureMetrics {
     setRestarts({});
     setCrashesLoading({});
     setCrashes({});
+    setReleasesLoading({});
+    setReleases({});
     restartsRequested.current.clear();
+    releasesRequested.current.clear();
     detailsRequested.current.clear();
     snatRequested.current.clear();
     crashesRequested.current.clear();
@@ -219,6 +247,7 @@ export function useAzureMetrics(): UseAzureMetrics {
           void fetchAppRestarts(key, range, config, customStart, customEnd, granularity);
           void fetchAppDetails(key, range, config, customStart, customEnd, granularity);
           void fetchAppCrashes(key, range, config, customStart, customEnd, granularity);
+          void fetchAppReleases(key, range, config, customStart, customEnd);
         }
       }
     } catch (err: unknown) {
@@ -229,7 +258,7 @@ export function useAzureMetrics(): UseAzureMetrics {
         setLoading(false);
       }
     }
-  }, [credStatus, fetchAppRestarts, fetchAppDetails, fetchAppCrashes]);
+  }, [credStatus, fetchAppRestarts, fetchAppDetails, fetchAppCrashes, fetchAppReleases]);
 
   // Per endpoint and on demand: only one endpoint is charted at a time, so fetching every
   // endpoint's calls to render one was most of the work wasted. Stable ([] deps) because
@@ -283,5 +312,5 @@ export function useAzureMetrics(): UseAzureMetrics {
     }
   }, []);
 
-  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, snatLoaded, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, endpointDeps, fetchEndpointDeps, recheckCredential };
+  return { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, snatLoaded, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, releasesLoading, releases, fetchAppReleases, endpointDeps, fetchEndpointDeps, recheckCredential };
 }

@@ -100,7 +100,7 @@ function AzureStatusPill({
 
 export default function AppHealthCheckPage() {
   const { settings, loading: settingsLoading } = useSettings();
-  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, endpointDeps, fetchEndpointDeps, recheckCredential } = useAzureMetrics();
+  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, releasesLoading, releases, endpointDeps, fetchEndpointDeps, recheckCredential } = useAzureMetrics();
   const allAppKeys = settings.azure.apps.map(a => a.name);
   // The picker reads by platform name; the app key stays the identity used to fetch.
   const appLabels = Object.fromEntries(
@@ -296,6 +296,9 @@ export default function AppHealthCheckPage() {
                   crashesLoading={crashesLoading[key] ?? false}
                   crashes={crashes[key]?.fe ?? null}
                   apiCrashes={crashes[key]?.api ?? null}
+                  releasesLoading={releasesLoading[key] ?? false}
+                  releases={releases[key]?.fe ?? null}
+                  apiReleases={releases[key]?.api ?? null}
                   endpointDeps={cardEndpointDeps[key] ?? EMPTY_DEPS}
                   onRequestEndpointDeps={props.onRequestEndpointDeps}
                   onRequestRestarts={props.onRequestRestarts}

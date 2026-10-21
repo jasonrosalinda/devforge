@@ -126,6 +126,7 @@ const {
 const { fetchSnatCharts } = require('./azure-snat.cjs');
 // Restart events — same detector plumbing, but per site rather than per plan.
 const { fetchRestartCharts } = require('./azure-restarts.cjs');
+const { fetchReleases } = require('./azure-releases.cjs');
 // Application Crashes detector — a crash-count timeline plus captured stack traces.
 const { fetchCrashData } = require('./azure-crashmonitoring.cjs');
 const { getPageViewInsights } = require('./azure-pageviews.cjs');
@@ -2414,6 +2415,54 @@ const handler = (_mainWindow) => {
       // Same reasoning as the SNAT cache: pinning a transient detector failure for
       // the whole TTL makes a re-fetch look broken.
       if (fe?.charts?.length || api?.charts?.length) setCached(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { fe: null, api: null, error: err.message || String(err) };
+    }
+  });
+
+  // Releases are per site too: the FE and the API ship on their own schedules, and a
+  // chart marker has to say which one went out. Not granularity-bound, so the cache
+  // key leaves it out.
+  ipcMain.handle('azure-metrics:fetch-releases', async (_event, { appKey, range, config, customStart, customEnd }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { fe: null, api: null };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { fe: null, api: null };
+
+    const cacheKey = `${appKey}:releases:${customStart ?? range}:${customEnd ?? ''}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const { cred } = sharedAzure();
+      const token = await getToken(cred);
+      const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
+      const startIso = startTime.toISOString();
+      const endIso = endTime.toISOString();
+
+      const forSite = async (siteApp) => {
+        try {
+          return await fetchReleases(token, {
+            subscriptionId: config.subscriptionId,
+            resourceGroup: siteApp.resourceGroup,
+            siteResId: resourceId(config.subscriptionId, siteApp),
+            isAppService: siteApp.type === 'appservice',
+            startIso,
+            endIso,
+          });
+        } catch { return null; }
+      };
+
+      const [fe, api] = await Promise.all([
+        forSite({ ...app, type: app.type || 'appservice' }),
+        app.apiName
+          ? forSite({ type: app.apiType || 'appservice', resourceGroup: app.resourceGroup, name: app.apiName })
+          : Promise.resolve(null),
+      ]);
+
+      const result = { fe, api };
+      const anyOk = (r) => r && Object.values(r.sources).includes('ok');
+      if (anyOk(fe) || anyOk(api)) setCached(cacheKey, result);
       return result;
     } catch (err) {
       return { fe: null, api: null, error: err.message || String(err) };

@@ -602,6 +602,35 @@ export interface RestartFetchResult {
   error?: string
 }
 
+/** One release reaching production: a slot swap, a direct deploy, or (Container Apps)
+ *  a new revision. `build` / `commit` come from the release pipeline's Kudu record. */
+export interface ReleaseEvent {
+  at: string
+  source: 'swap' | 'deploy' | 'revision'
+  by?: string
+  build?: string
+  commit?: string
+  message?: string
+}
+
+/** Where each source stood: `denied` is a 401/403 (no Reader role), not "no releases". */
+export type ReleaseSourceStatus = 'ok' | 'denied' | 'error'
+
+/** Releases for one site, oldest first, looking back at least 30 days so `last` is
+ *  known even when the chart window holds none. */
+export interface ReleaseResult {
+  events: ReleaseEvent[]
+  last: ReleaseEvent | null
+  sources: Partial<Record<'activityLog' | 'kudu' | 'revisions', ReleaseSourceStatus>>
+}
+
+/** Per site, like restarts: the FE and the API ship on their own schedules. */
+export interface ReleaseFetchResult {
+  fe: ReleaseResult | null
+  api: ReleaseResult | null
+  error?: string
+}
+
 /** One crash Proactive Crash Monitoring captured a stack trace for, from the
  *  Application Crashes detector's per-event dropdown — the same trace App
  *  Service emails out when it fires. Azure only captures these once a site has
@@ -713,6 +742,7 @@ export interface IAzureMetricsAPI {
   fetchDetectors: (opts: { appInsightsAppId: string; startIso: string; endIso: string }) => Promise<DetectorAnalysisResult>
   fetchSnat: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<SnatFetchResult>
   fetchRestarts: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<RestartFetchResult>
+  fetchReleases: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<ReleaseFetchResult>
   fetchCrashes: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<CrashFetchResult>
   /** One endpoint's downstream calls. Per endpoint and on demand — see the handler. */
   fetchEndpointDetail: (opts: { appKey: string; endpoint: string; site: 'fe' | 'api'; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<EndpointDepsResult>

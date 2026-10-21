@@ -66,7 +66,7 @@ export function PicPicker({ pics, names, onChange, search, onLearnName }: PicPic
         <Hint label="Add a person (search Confluence users)">
           <PopoverTrigger asChild>
             <button type="button" aria-label="Add PIC" className="rounded-full border border-dashed p-0.5 text-muted-foreground hover:text-foreground">
-              <Plus className="h-3 w-3" />
+              <Plus className="h-3 w-3 text-primary" />
             </button>
           </PopoverTrigger>
         </Hint>

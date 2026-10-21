@@ -112,7 +112,7 @@ export function TokenIssueBanner({ status, onRecheck }: { status: TokenStatus; o
           onClick={onRecheck}
           className="inline-flex items-center gap-1 text-muted-foreground underline underline-offset-2 hover:text-foreground"
         >
-          <RefreshCw className="h-3 w-3" /> Re-check
+          <RefreshCw className="h-3 w-3 text-primary" /> Re-check
         </button>
       </div>
     </div>

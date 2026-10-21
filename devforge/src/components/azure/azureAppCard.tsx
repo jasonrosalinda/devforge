@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch, Loader2 } from 'lucide-react';
 import { marked } from 'marked';
 import { Hint } from '@/components/ui/hint';
@@ -10,7 +10,7 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
 } from './rcaHtml';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
-import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ReleaseResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,7 @@ import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
 import { CrashMonitoringRows } from './crashMonitoringSection';
+import { ReleaseMarkersContext, LastReleaseLabel, type ReleaseMarkerSet } from './releaseMarkers';
 import { PerformanceRows } from './performanceSection';
 import { perfSummary, hasPerfData } from './performance';
 import { cardStatus, type Status } from './status';
@@ -873,6 +874,11 @@ interface AzureAppCardProps {
    *  passed in rather than read off `metrics`, kept in the hook's own map. */
   crashes?: CrashResult | null;
   apiCrashes?: CrashResult | null;
+  /** The release fetch is in flight — the header reads "…" rather than "none". */
+  releasesLoading?: boolean;
+  /** Releases for this app: a marker on every chart plus the header's last release. */
+  releases?: ReleaseResult | null;
+  apiReleases?: ReleaseResult | null;
   /** Per-endpoint dependency lookups for this card, keyed by `${site}|${endpoint}`. */
   endpointDeps?: Record<string, EndpointDepsState>;
   onRequestEndpointDeps?: ((site: 'fe' | 'api', endpoint: string) => void) | undefined;
@@ -897,7 +903,7 @@ const AI_STATUS_COLORS = { healthy: UI.success, warning: UI.warning, critical: U
  */
 export const AzureAppCard = React.memo(AzureAppCardInner);
 
-function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, snatLoading = false, onRequestSnat, restartsLoading = false, restarts, apiRestarts, onRequestRestarts, crashesLoading = false, crashes, apiCrashes, onRequestCrashes, endpointDeps = {}, onRequestEndpointDeps, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
+function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, detailsLoaded = false, onRequestDetails, snatLoading = false, onRequestSnat, restartsLoading = false, restarts, apiRestarts, onRequestRestarts, crashesLoading = false, crashes, apiCrashes, onRequestCrashes, releasesLoading = false, releases, apiReleases, endpointDeps = {}, onRequestEndpointDeps, azureSettings, uptimeRobotApiKey, uptimeRobotMonitorIds, rangeStart, rangeEnd }: AzureAppCardProps) {
   const { elementRef: cardRef, isCopying } = useCopyElementAsImage<HTMLDivElement>({
     // No timestamp here: the hook appends its own, and Date.now() in a prop gave the
     // copy callback a new identity on every single render.
@@ -1561,6 +1567,17 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasUrIncidents, rangeStart, rangeEnd, appKey]);
 
+  // Memoized: a fresh object would re-render every chart reading the context on each
+  // card render, which is the cost React.memo on this card exists to avoid. Above the
+  // loading return, like every hook here. Keyed on the API name rather than the whole
+  // settings object, which is rebuilt far more often than an app gains or loses an API.
+  const releaseApiName = azureSettings?.apps?.find(a => a.name === appKey)?.apiName;
+  const releaseSet = useMemo<ReleaseMarkerSet>(() => ({
+    fe: releases?.events ?? [],
+    api: releaseApiName ? (apiReleases?.events ?? []) : [],
+    hasApi: !!releaseApiName,
+  }), [releases, apiReleases, releaseApiName]);
+
   if (loading) {
     return (
       <Card className="overflow-hidden">
@@ -1759,7 +1776,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   );
 
   return (
-    <>
+    <ReleaseMarkersContext.Provider value={releaseSet}>
     <div ref={cardRef} className="p-3">
     <Card
       className="overflow-hidden p-0 flex flex-col border-2"
@@ -1785,6 +1802,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           <span className="text-xs text-muted-foreground">
             {typeLabel}{planMeta ? ` · ${planMeta}` : ''}
           </span>
+          <LastReleaseLabel loading={releasesLoading} fe={releases} api={apiReleases} hasApi={hasApi} />
           {/* Collapsed, the header is the only thing left, so it has to carry the two
               figures that decide whether the card is worth opening. */}
           {cardCollapsed && (
@@ -2807,6 +2825,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       onGenerate={handleRunRca}
     />
 
-    </>
+    </ReleaseMarkersContext.Provider>
   );
 }

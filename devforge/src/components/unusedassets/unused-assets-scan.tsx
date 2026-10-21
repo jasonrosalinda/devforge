@@ -86,7 +86,7 @@ function ViewCodeButton({ asset, getSnippet }: { asset: UnusedAsset; getSnippet:
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
                 <button type="button" title="View code" className="text-muted-foreground hover:text-foreground shrink-0">
-                    <Code2 className="w-3.5 h-3.5" />
+                    <Code2 className="w-3.5 h-3.5 text-primary" />
                 </button>
             </DialogTrigger>
             <DialogContent className="max-w-2xl">

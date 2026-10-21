@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 import type { MetricSeries } from '@shared/types/azureMetrics.types';
 import { CHART_COLORS, INSTANCE_PALETTE, PERF_COLORS, UI } from '@/lib/chart-colors';
+import { ReleaseMarkers } from './releaseMarkers';
 
 // Re-exported so the dashboard sections can keep importing the palettes from the
 // chart module they already depend on; `@/lib/chart-colors` is the definition.
@@ -212,6 +213,7 @@ export function SeriesChart({
           formatter={(val: unknown, key: unknown) => [fmt(Number(val)), String(key)]}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         />
+        <ReleaseMarkers stamps={series.map(p => p.t)} />
         {!singleValued && (
           <Area type="monotone" dataKey="v" name={lineLabels?.v ?? `${name} Avg`} stroke={color} fill="none" strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} />
         )}
@@ -298,6 +300,7 @@ export function InstanceHealthChart({
           }}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         />
+        <ReleaseMarkers stamps={stamps} />
         {withData.map((inst, idx) => (
           <Line
             key={inst.name}
@@ -404,6 +407,7 @@ export function EndpointSeriesChart({
           }}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
         />
+        <ReleaseMarkers stamps={stamps} />
         {withData.map((s, idx) => (
           <Line
             key={s.url}
@@ -554,6 +558,7 @@ export function EndpointPerfChart({
           width={52}
         />
         <Tooltip content={<PerfTooltip />} />
+        <ReleaseMarkers stamps={rows.map(r => r.t)} yAxisId="count" />
         {/* Stack order puts 5xx on top: it is the segment a reader is looking for, and
             the top of a stack is where a small count is still visible. */}
         <Bar yAxisId="count" dataKey="ok" name="ok" stackId="outcome" fill={okColor}     isAnimationActive={false} />
@@ -665,6 +670,7 @@ export function EventBarChart({
           }}
           labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT'}
         />
+        <ReleaseMarkers stamps={stamps} />
         {withData.map((s, i) => (
           <Bar key={s.name} dataKey={`e${i}`} name={s.name} stackId="events" fill={colors[i] ?? UI.textMuted} isAnimationActive={false} />
         ))}
@@ -844,6 +850,8 @@ export function CombinedChart({
             />
           );
         })}
+
+        <ReleaseMarkers stamps={merged.map(r => String(r.t))} showLabel />
 
         {!hiddenMetrics.has('cpu') && (
           <>
