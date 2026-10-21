@@ -95,6 +95,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         lookup: (opts) => ipcRenderer.invoke('ipapi:lookup', opts),
     },
 
+    claudeUsage: {
+        fetch: () => ipcRenderer.invoke('claude-usage:fetch'),
+    },
+
     backgroundMonitor: {
         setEnabled: (enabled) => ipcRenderer.invoke('monitor:set-enabled', enabled),
         alert: (opts) => ipcRenderer.invoke('monitor:alert', opts),

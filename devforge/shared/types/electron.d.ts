@@ -191,6 +191,20 @@ export interface IElectronAPI {
         }>;
     };
 
+    // Claude Code plan usage — session / weekly limit % from the CLI's own OAuth login
+    // (electron/ipc/claude-usage.cjs). Read-only; never refreshes the token.
+    claudeUsage: {
+        fetch(): Promise<
+            | {
+                success: true;
+                plan: string | null;
+                limits: { id: string; label: string; percent: number; resetsAt: string | null }[];
+                fetchedAt: string;
+            }
+            | { success: false; code: 'NOT_SIGNED_IN' | 'EXPIRED' | 'HTTP_ERROR' | 'BAD_RESPONSE' | 'NETWORK'; error: string }
+        >;
+    };
+
     // Confluence runbook fetch (Release Pilot)
     confluence: {
         fetchRunbook(opts: { baseUrl: string; email: string; apiToken: string; pageUrl: string }): Promise<{

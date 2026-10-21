@@ -128,7 +128,8 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 
 ## App shell
 
-- **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search.
+- **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search. Click a group heading to collapse or expand it. Every group starts expanded and the choice is remembered; searching shows all matches regardless.
+- **Claude Code usage** at the foot of the sidebar: how much of your plan's session (5-hour) and weekly limits is used, and when each resets, the same numbers `/usage` shows in the CLI. It reads the Claude Code login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) and only reads usage, so nothing is billed. It refreshes every 5 minutes, when the window regains focus, or on click. If the login has expired, run any `claude` command to refresh it. Implementation: [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs)
 - **Browser-style tabs.** Open tabs are restored on the next launch and stay mounted, so switching back keeps your inputs and results. Shortcuts: **Ctrl+Tab** / **Ctrl+Shift+Tab** to cycle, **Ctrl+W** to close, **Ctrl+1–8** to jump to a tab and **Ctrl+9** for the last one.
 - **Settings**, **Release notes** and **auto-update** are covered in their sections below.
 

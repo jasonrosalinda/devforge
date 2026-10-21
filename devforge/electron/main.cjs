@@ -139,6 +139,13 @@ app.whenReady().then(() => {
     }
 
     try {
+        require('./ipc/claude-usage.cjs')();
+        console.log('✅ claude-usage handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load claude-usage.cjs:', err);
+    }
+
+    try {
         backgroundMonitor(mainWindow);
         console.log('✅ background-monitor handlers registered');
     } catch (err) {

@@ -1,5 +1,5 @@
 import { useRef } from "react"
-import { Anvil, Laptop, Moon, ScrollText, Search, Settings, Sun, X } from "lucide-react"
+import { Anvil, ChevronDown, Laptop, Moon, ScrollText, Search, Settings, Sun, X } from "lucide-react"
 
 import {
     Sidebar,
@@ -26,7 +26,10 @@ import {
 import { useTheme } from "@/components/provider/theme-provider"
 import { useSettingsUi } from "@/context/settings-ui-context"
 import { HOME_PAGE, PAGE_GROUPS, matchesPageSearch } from "@/routes/page-routes"
+import { useCollapsedGroups } from "@/hooks/useCollapsedGroups"
+import { cn } from "@/lib/utils"
 import type { Page } from "@/types/pages.types"
+import { SidebarClaudeUsage } from "./sidebar-claude-usage"
 import { SidebarClocks } from "./sidebar-clocks"
 
 interface AppSidebarProps {
@@ -100,6 +103,7 @@ export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearc
     const { openSettings } = useSettingsUi();
     const { state, setOpen } = useSidebar();
     const searchRef = useRef<HTMLInputElement>(null);
+    const groups = useCollapsedGroups(PAGE_GROUPS);
 
     const home = pages.find((p) => p.title === HOME_PAGE);
     const matching = pages.filter((p) => p.title !== HOME_PAGE && matchesPageSearch(p, search));
@@ -177,10 +181,25 @@ export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearc
                 {PAGE_GROUPS.map((group) => {
                     const items = matching.filter((p) => p.group === group);
                     if (items.length === 0) return null;
+                    // Search results and the icon rail (which has no labels to click) always show every item.
+                    const expanded = !groups.isCollapsed(group) || Boolean(search) || state === "collapsed";
+                    const contentId = `sidebar-group-${group.replace(/\s+/g, "-").toLowerCase()}`;
                     return (
                         <SidebarGroup key={group} className="py-1">
-                            <SidebarGroupLabel className="h-7 text-[11px] uppercase tracking-wider text-sidebar-foreground/50">{group}</SidebarGroupLabel>
-                            <SidebarGroupContent>
+                            <SidebarGroupLabel asChild className="h-7 text-[11px] uppercase tracking-wider text-sidebar-foreground/50">
+                                <button
+                                    type="button"
+                                    onClick={() => groups.toggle(group)}
+                                    aria-expanded={expanded}
+                                    aria-controls={contentId}
+                                    disabled={Boolean(search)}
+                                    className="w-full hover:text-sidebar-foreground/80 disabled:cursor-default disabled:hover:text-sidebar-foreground/50"
+                                >
+                                    {group}
+                                    <ChevronDown className={cn("ml-auto transition-transform", !expanded && "-rotate-90")} />
+                                </button>
+                            </SidebarGroupLabel>
+                            <SidebarGroupContent id={contentId} hidden={!expanded}>
                                 <SidebarMenu>
                                     {items.map((page) => (
                                         <NavItem
@@ -222,6 +241,9 @@ export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearc
                         <ThemeMenu />
                     </SidebarMenuItem>
                 </SidebarMenu>
+                <div className="border-t border-sidebar-border pt-2 group-data-[collapsible=icon]:hidden">
+                    <SidebarClaudeUsage />
+                </div>
                 <div className="border-t border-sidebar-border pt-2 group-data-[collapsible=icon]:hidden">
                     <SidebarClocks />
                 </div>
