@@ -4,7 +4,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { subscriptionEnv } = require('./claude-cli.cjs');
+const { subscriptionEnv, leanFlags } = require('./claude-cli.cjs');
 
 // Exception bucket classifiers, shared with the app health check so both
 // features agree on what a socket failure is.
@@ -2556,17 +2556,26 @@ ${notesBlock}
 ${trimmed}`;
 }
 
+const RCA_DIRECTIVE = 'Analyze the Azure telemetry on standard input and produce the incident solution plan exactly as specified in the input. Output GitHub-flavored Markdown only.';
+const RCA_SYSTEM_PROMPT = 'You are an incident analyst for Azure web apps. Follow the instructions on standard input exactly and output GitHub-flavored Markdown only.';
+const AI_REMARKS_SYSTEM_PROMPT = 'You are an Azure App Service health analyst. Follow the instructions on standard input exactly and output one JSON object only.';
+
+/**
+ * The shell command for one RCA-style run. Short, quote-free directive on the command
+ * line; the large prompt + telemetry goes through stdin to avoid Windows argument
+ * length / quoting limits. leanFlags: no tools, no plugins, hooks or MCP connectors.
+ */
+function rcaCommand({ directive = RCA_DIRECTIVE, model = 'sonnet', systemPrompt = RCA_SYSTEM_PROMPT } = {}) {
+  return [`claude -p "${directive}"`, '--output-format text', `--model ${model}`, ...leanFlags(systemPrompt)].join(' ');
+}
+
 // Spawns the Claude CLI in headless print mode, feeds the prompt via stdin, and
 // streams stdout back through onChunk. Uses the user's existing Claude Code auth.
-function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000, directive, model = 'sonnet' }) {
+function runClaudeRCA({ promptBody, onChunk, timeoutMs = 420000, directive, model = 'sonnet', systemPrompt }) {
   return new Promise((resolve, reject) => {
-    // Short, quote-free directive on the command line; the large prompt + telemetry
-    // goes through stdin to avoid Windows argument length / quoting limits.
-    directive = directive || 'Analyze the Azure telemetry on standard input and produce the incident solution plan exactly as specified in the input. Output GitHub-flavored Markdown only.';
-
     let child;
     try {
-      child = spawn(`claude -p "${directive}" --output-format text --model ${model}`, {
+      child = spawn(rcaCommand({ directive, model, systemPrompt }), {
         shell: true,
         cwd: os.tmpdir(),        // neutral cwd → no project CLAUDE.md / project hooks
         env: subscriptionEnv(),  // CLI login only — never metered API billing
@@ -2656,6 +2665,7 @@ const handler = (_mainWindow) => {
       const raw = await runClaudeRCA({
         promptBody: buildAiRemarksPrompt(summary),
         directive: 'Read the JSON metrics summary on standard input and output the strict JSON health verdict exactly as specified in the input. Output JSON only.',
+        systemPrompt: AI_REMARKS_SYSTEM_PROMPT,
         timeoutMs: 120000,
       });
       const cleaned = raw.replace(/```(?:json)?/g, '').trim();
@@ -2875,6 +2885,9 @@ handler._buildInstanceHealth = buildInstanceHealth;
 handler._stripModelNarration = stripModelNarration;
 handler._generateMarkdown = generateMarkdown;
 handler._buildRcaPrompt = buildRcaPrompt;
+handler._buildAiRemarksPrompt = buildAiRemarksPrompt;
+handler._rcaCommand = rcaCommand;
+handler._AI_REMARKS_SYSTEM_PROMPT = AI_REMARKS_SYSTEM_PROMPT;
 handler._assignIncidentNumber = assignIncidentNumber;
 
 module.exports = handler;

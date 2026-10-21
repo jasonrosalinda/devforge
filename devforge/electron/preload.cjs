@@ -20,6 +20,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    telemetry: {
+        ask: (opts) => ipcRenderer.invoke('telemetry:ask', opts),
+        run: (opts) => ipcRenderer.invoke('telemetry:run', opts),
+        cancel: () => ipcRenderer.invoke('telemetry:cancel'),
+        onProgress: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('telemetry:progress', fn);
+            return () => ipcRenderer.removeListener('telemetry:progress', fn);
+        },
+    },
+
     incidentReport: {
         generate: (opts) => ipcRenderer.invoke('incident-report:generate', opts),
         fetchData: (opts) => ipcRenderer.invoke('incident-report:fetchData', opts),

@@ -20,7 +20,7 @@ import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
 import { CrashMonitoringRows } from './crashMonitoringSection';
-import { ReleaseMarkersContext, LastReleaseLabel, type ReleaseMarkerSet } from './releaseMarkers';
+import { ReleaseMarkersContext, LastReleaseLabel, SiteReleaseLabel, type ReleaseMarkerSet } from './releaseMarkers';
 import { PerformanceRows } from './performanceSection';
 import { perfSummary, hasPerfData } from './performance';
 import { cardStatus, type Status } from './status';
@@ -1643,6 +1643,10 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   // there — a lone block still gets the full card width.
   const showFeBlock  = feHasInsights && visibleBlocks.frontend;
   const showApiBlock = hasApi && visibleBlocks.api;
+  // Each site's last release sits in its own section header; the card header keeps it
+  // only for a site whose section is not on screen (card collapsed or block hidden).
+  const feReleaseInHeader  = cardCollapsed || !showFeBlock;
+  const apiReleaseInHeader = hasApi && (cardCollapsed || !showApiBlock);
 
   const SGT = { timeZone: 'Asia/Singapore' } as const;
   const fmtShort = (d: Date) => d.toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' SGT';
@@ -1802,7 +1806,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           <span className="text-xs text-muted-foreground">
             {typeLabel}{planMeta ? ` · ${planMeta}` : ''}
           </span>
-          <LastReleaseLabel loading={releasesLoading} fe={releases} api={apiReleases} hasApi={hasApi} />
+          {(feReleaseInHeader || apiReleaseInHeader) && (
+            <LastReleaseLabel
+              loading={releasesLoading}
+              fe={feReleaseInHeader ? releases : null}
+              api={apiReleaseInHeader ? apiReleases : null}
+              hasApi={hasApi}
+            />
+          )}
           {/* Collapsed, the header is the only thing left, so it has to carry the two
               figures that decide whether the card is worth opening. */}
           {cardCollapsed && (
@@ -2453,9 +2464,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 {/* One merged cell: the header carries only the label, so splitting it
                     across the four metric columns would just draw empty dividers. */}
                 <td colSpan={4}>
-                  Frontend{feSectionOpen
-                    ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                    : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                  <div className="flex items-center justify-between gap-2">
+                    <span>
+                      Frontend{feSectionOpen
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                    </span>
+                    <SiteReleaseLabel loading={releasesLoading} result={releases} />
+                  </div>
                 </td>
               </tr>
             </thead>
@@ -2618,9 +2634,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 title={apiSectionOpen ? 'Collapse API' : 'Expand API'}
               >
                 <td colSpan={4}>
-                  API{apiSectionOpen
-                    ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
-                    : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                  <div className="flex items-center justify-between gap-2">
+                    <span>
+                      API{apiSectionOpen
+                        ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
+                        : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
+                    </span>
+                    <SiteReleaseLabel loading={releasesLoading} result={apiReleases} />
+                  </div>
                 </td>
               </tr>
             </thead>

@@ -4,7 +4,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { subscriptionEnv } = require('./claude-cli.cjs');
+const { subscriptionEnv, leanFlags } = require('./claude-cli.cjs');
 
 // Reads .git/HEAD directly off disk — browsers' webkitdirectory picker hides
 // dotfiles/dotfolders from the renderer's FileList, so this is Electron-only.
@@ -39,13 +39,19 @@ let cancelled = false;
 // Spawns the Claude CLI in headless print mode, feeds the review prompt via
 // stdin, and resolves with the raw stdout. Uses the user's existing Claude
 // Code auth — same mechanism as the incident-report RCA feature.
+const REVIEW_DIRECTIVE = 'Verify the unused-asset candidates on standard input using the occurrence evidence provided. Respond with ONLY the JSON array specified — no prose, no markdown fences.';
+const REVIEW_SYSTEM_PROMPT = 'You verify static-analysis findings about unused code. Follow the instructions on standard input exactly and output one JSON array only.';
+
+// leanFlags: the evidence is all on stdin, so no tools, plugins, hooks or MCP connectors.
+function reviewCommand() {
+  return [`claude -p "${REVIEW_DIRECTIVE}"`, '--output-format text', '--model sonnet', ...leanFlags(REVIEW_SYSTEM_PROMPT)].join(' ');
+}
+
 function runClaudeReview({ promptBody, onStage, timeoutMs = 300000 }) {
   return new Promise((resolve, reject) => {
-    const directive = 'Verify the unused-asset candidates on standard input using the occurrence evidence provided. Respond with ONLY the JSON array specified — no prose, no markdown fences.';
-
     let child;
     try {
-      child = spawn(`claude -p "${directive}" --output-format text --model sonnet`, {
+      child = spawn(reviewCommand(), {
         shell: true,
         cwd: os.tmpdir(),
         env: subscriptionEnv(),   // CLI login only — never metered API billing
@@ -183,5 +189,8 @@ const handler = (_mainWindow) => {
     return { success: true };
   });
 };
+
+handler._buildReviewPrompt = buildReviewPrompt;
+handler._reviewCommand = reviewCommand;
 
 module.exports = handler;

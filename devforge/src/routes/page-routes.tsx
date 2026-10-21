@@ -1,11 +1,12 @@
 import type { Page, PageGroup } from "@/types/pages.types";
-import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch } from "lucide-react";
+import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, Telescope } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
 import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
+import TelemetryPage from "@/pages/telemetryPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
 import ReleaseRunbookPage from "@/pages/releaseRunbookPage";
 import { createToolboxToolPage } from "@/pages/toolboxToolPage";
@@ -31,6 +32,15 @@ export const pages: Page[] = [
         component: AppHealthCheckPage,
         description: "Azure App Service CPU, memory, requests and downtime",
         group: "Monitoring"
+    },
+    {
+        title: "Ask Telemetry",
+        url: "#",
+        icon: Telescope,
+        component: TelemetryPage,
+        description: "Ask about App Insights in plain English; Claude writes the KQL, devForge charts the answer",
+        group: "Monitoring",
+        keywords: ["kql", "app insights", "application insights", "query", "logs", "ai", "claude"]
     },
     {
         title: "PageSpeed",

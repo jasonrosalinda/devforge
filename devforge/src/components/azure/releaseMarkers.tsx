@@ -149,8 +149,24 @@ export function releaseStatus(r: ReleaseResult | null | undefined): { text: stri
   return { text: 'none in 30 days', title: 'No slot swap or deployment found in the last 30 days' };
 }
 
-/** "Last release" in the card header — visible collapsed too, since it is the first
- *  thing to check when a card turns red. */
+/** One site's "Last release", in the header of its own Frontend / API section. */
+export function SiteReleaseLabel({ loading, result }: {
+  loading: boolean;
+  result: ReleaseResult | null | undefined;
+}) {
+  if (loading) return <span className="text-xs font-normal text-muted-foreground">Last release …</span>;
+  const st = releaseStatus(result);
+  if (!st) return null;
+  return (
+    <span className="text-xs font-normal text-muted-foreground" title={st.title}>
+      Last release <span className="text-foreground">{st.text}</span>
+    </span>
+  );
+}
+
+/** "Last release" in the card header, for the sites whose own section is not on screen
+ *  — always when the card is collapsed, since it is the first thing to check when a
+ *  card turns red. */
 export function LastReleaseLabel({ loading, fe, api, hasApi }: {
   loading: boolean;
   fe: ReleaseResult | null | undefined;

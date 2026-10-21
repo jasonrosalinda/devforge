@@ -33,6 +33,32 @@ function subscriptionEnv(extra = {}) {
     return env;
 }
 
+/**
+ * Flags for a headless run that reads everything it needs from stdin and uses no tools.
+ *
+ * Claude Code's own system prompt and tool definitions are ~50k tokens per call, and
+ * without --safe-mode / --strict-mcp-config the user's plugins, hooks and every MCP
+ * connector load too. A no-tool task needs none of it: replacing the prompt and
+ * dropping the tools measured ~52k → ~2k tokens of the plan per call, same speed and
+ * same answers (2026-10-21). Still the CLI login — this is not --bare, which would
+ * require an API key.
+ *
+ * The prompt goes on the shell command line, so it must contain no quotes.
+ */
+function leanFlags(systemPrompt) {
+    if (!systemPrompt || /["'`\r\n]/.test(systemPrompt)) {
+        throw new Error('leanFlags: the system prompt must be one quote-free line.');
+    }
+    return [
+        '--tools ""',
+        `--system-prompt "${systemPrompt}"`,
+        '--safe-mode',
+        '--strict-mcp-config',
+        '--no-session-persistence',
+        '--permission-prompts none',
+    ];
+}
+
 // shell:true is mandatory on Windows — `claude` is a .cmd shim and Node >= 20.12
 // refuses to spawn .cmd without a shell (CVE-2024-27980). The consequence is that
 // child.pid is cmd.exe, NOT claude, so child.kill() reaps the wrapper and leaves the
@@ -235,4 +261,4 @@ function stripReportPreamble(markdown, headings) {
     return lines.slice(start, end).join('\n').trim();
 }
 
-module.exports = { runClaudeCli, killTree, tagged, stripReportPreamble, subscriptionEnv, BILLING_OVERRIDE_VARS };
+module.exports = { runClaudeCli, killTree, tagged, stripReportPreamble, subscriptionEnv, leanFlags, BILLING_OVERRIDE_VARS };

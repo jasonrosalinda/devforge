@@ -2,7 +2,7 @@ const { ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { runClaudeCli, stripReportPreamble } = require('./claude-cli.cjs');
+const { runClaudeCli, stripReportPreamble, leanFlags } = require('./claude-cli.cjs');
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -496,18 +496,17 @@ async function runClaudeAnalysis({ promptBody, onChunk, timeoutMs = 300000 }) {
         cwd: os.tmpdir(),   // neutral cwd → no project CLAUDE.md / hooks
         timeoutMs,
         onText: onChunk,
-        flags: [
-            '--output-format stream-json',
-            '--verbose',
-            '--model sonnet',
-            '--safe-mode',
-            '--strict-mcp-config',
-            '--no-session-persistence',
-            '--permission-prompts none',
-        ],
+        flags: ANALYSIS_FLAGS,
     });
     return text;
 }
+
+const ANALYSIS_FLAGS = [
+    '--output-format stream-json',
+    '--verbose',
+    '--model sonnet',
+    ...leanFlags('You analyze web page performance data. Follow the instructions on standard input exactly and output GitHub-flavored Markdown only.'),
+];
 
 module.exports = function (mainWindow) {
     ipcMain.handle('pagespeed-insight:analyze', async (event, payload) => {
@@ -554,3 +553,6 @@ module.exports = function (mainWindow) {
         }
     });
 };
+
+module.exports._buildAnalysisPrompt = buildAnalysisPrompt;
+module.exports._ANALYSIS_FLAGS = ANALYSIS_FLAGS;

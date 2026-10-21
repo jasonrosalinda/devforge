@@ -83,6 +83,13 @@ app.whenReady().then(() => {
     }
 
     try {
+        require('./ipc/telemetry-ask.cjs')(mainWindow);
+        console.log('✅ telemetry-ask handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load telemetry-ask.cjs:', err);
+    }
+
+    try {
         require('./ipc/incident-report.cjs')(mainWindow);
         console.log('✅ incident-report handlers registered');
     } catch (err) {

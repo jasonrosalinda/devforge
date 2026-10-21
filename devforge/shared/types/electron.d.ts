@@ -1,5 +1,6 @@
 import type { IAzureAPI } from './azureCapture.types';
 import type { IAzureMetricsAPI } from './azureMetrics.types';
+import type { ITelemetryAPI } from './telemetry.types';
 
 /**
  * Shared shape for the three incident-report entry points (generate / fetchData /
@@ -107,6 +108,9 @@ export interface IElectronAPI {
 
     // Azure Monitor Metrics  (new)
     azureMetrics: IAzureMetricsAPI;
+
+    // Ask Telemetry — Claude-written KQL against App Insights
+    telemetry: ITelemetryAPI;
 
     // PageSpeed AI Insights
     pagespeedInsight: {

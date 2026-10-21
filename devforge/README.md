@@ -20,12 +20,24 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 
 - Pick one or more apps and a From / To range (defaults to today 00:00 → now) at 1m–6h granularity. You can turn on **Auto reload** to keep the end at "now".
 - Each app gets a card with a status (healthy / warning / critical). **Blocks** choose what the card shows: Remarks, CPU, Memory, Database, Users, Page Load, Performance, Exceptions, Instances, UptimeRobot, SNAT Ports, Restarts, Crash Monitoring, Anomaly Detection, and Frontend / API.
-- **Release markers:** every time chart on the card draws a dashed line where a release reached production (FE darker, API fainter; the CPU / Memory chart labels each one with its SGT time), so a change in CPU, restarts or errors reads as before vs after the release. The header shows **Last release** for FE and API, even when it falls outside the range (30-day look-back); hover it for the build, commit and who released. Releases come from the Activity Log (slot swaps, including manual ones) and the Kudu deployment history (pipeline deploys and swaps); Container Apps use their revisions.
+- **Release markers:** every time chart on the card draws a dashed line where a release reached production (FE darker, API fainter; the CPU / Memory chart labels each one with its SGT time), so a change in CPU, restarts or errors reads as before vs after the release. The **Frontend** and **API** section headers each show that site's **Last release**, even when it falls outside the range (30-day look-back); hover it for the build, commit and who released. The card header shows it instead for a site whose section is not on screen: the card is collapsed or the block is hidden. Releases come from the Activity Log (slot swaps, including manual ones) and the Kudu deployment history (pipeline deploys and swaps); Container Apps use their revisions.
 - **Anomaly Detection** flags correlated spikes across CPU, memory, DB CPU and DB memory (plus FE/API error rates when App Insights is available).
 - **Copy for Teams** puts the status header, chart image and metrics table on the clipboard in one paste.
 - **AI report** writes an AI-ready Markdown incident report for the range to `~/.claude/agents/incident-reports/` and opens it.
 - **RCA** opens a downtime root-cause analysis: add your investigation notes and Claude drafts the report. You can copy it for Teams or save it as Markdown, PDF or Word.
 - **Needs:** `az login`, and apps configured in **Settings → Azure**. Optional: an App Insights ID, a database, and the API app per entry. UptimeRobot needs a key in **Settings → API Keys**. Release markers need Reader on the app's resource group (the header shows "n/a" without it). RCA needs the [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH. Desktop app only.
+
+#### Ask Telemetry
+
+**Use it to** answer a question about an app's Application Insights that App Health Check has no block for, without writing KQL or opening the Azure Portal. For example: "which endpoints got slower today?", "top exception types on the API this week" or "failed dependency calls by target".
+
+- Pick an app, **Frontend** or **API**, and a range (1h / 24h / 7d / custom), then type the question (Ctrl+Enter). Starter questions and your recent ones sit under the box.
+- Claude writes one KQL query from the app's real table schema. devForge runs it read-only and shows the query, a one-line explanation, a chart (a line over time, split by category up to 8 lines, or bars for a breakdown) and the full table.
+- If App Insights rejects the query, Claude gets the error and fixes it once by itself. The query shows a **repaired** badge when that happens.
+- The query stays editable. **Run** (Ctrl+Enter) runs your edit directly, with no Claude call. Results are capped at 5,000 rows.
+- **Save** keeps a query in the library on the right. Running a saved query reuses its KQL on the current range, so it costs no Claude call. **Copy rows** (paste into Excel or Teams) and **Copy chart** (image) share the answer.
+- **Privacy:** only the question, the table and column names, and (on a repair) the query error go to Claude. Telemetry rows never leave the machine. The query is written by Claude through your Claude Code login, never the metered API, so there is no per-question charge. Claude runs without tools or the coding-agent prompt, so a question uses about 2k tokens of your plan; each answer shows the tokens it used (hover for the API-equivalent figure).
+- **Needs:** `az login`, the app in **Settings → Azure** (the App Insights ID is looked up when not set), and the Claude CLI on PATH. Desktop app only.
 
 ### Web quality
 
@@ -58,6 +70,17 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 - Copy a Teams-ready summary, either as text only (always fits) or with full-resolution screenshots. You can also copy any single screenshot.
 - **Export** every section as one full-quality HTML file.
 - **Needs:** a Confluence base URL, account email and API token in **Settings → Atlassian**.
+
+#### Release Runbook
+
+**Use it to** write or update a Confluence deployment runbook without hand-editing its tables: start a new one from a template, or move a whole deployment to a new start time.
+
+- Start one of three ways. **Edit a runbook** opens a page URL (past URLs are remembered). **New from template** loads a template or an earlier runbook, resets the statuses to TODO, empties the logbooks and drops the "[Template] " prefix. **New blank runbook** gives Pre-Prod, Prod, Post-Prod and Rollback sections with the standard columns.
+- Edit rows: insert, duplicate, move, delete, and merge with or split from the row above. Pick PICs through Confluence user search. Edit a cell as rich text, with pasted screenshots and task lists. Planned start and end are recalculated from Time and Duration, and an unreadable duration is flagged.
+- **Reschedule:** set the deployment start date and time (SGT) and the activity it starts with. Every date, time, planned time, logbook check time and the date in the title move by the same offset.
+- **Review & save** shows a diff first; nothing is written until you confirm. **Create page…** and **Save as template…** create a new page and copy the screenshots across.
+- **Safe by design:** only tables with both a Time and an Activity column are treated as runbook tables, and a cell nobody touched is saved back unchanged. A table with merged cells is read-only ("Edit it in Confluence"). If someone else saved the page in the meantime, devForge shows who and when, never overwrites, and lists your edits that would be lost on reload.
+- **Needs:** a valid Confluence URL, email and API token in **Settings → Atlassian**, and edit permission on the page or space (a 403 means the account or token is not allowed).
 
 ### Utilities
 
@@ -127,7 +150,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
 - **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST; Release Runbook reads and writes the storage format (REST v1) and edits only the runbook tables
 - **Markdown / capture** — `marked`, `html2canvas`
-- **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis and the Unused Assets review
+- **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis, the Unused Assets review and Ask Telemetry. Never the metered API. Calls that need no tools run lean (no tools, no plugins, hooks or MCP connectors, a short system prompt of their own), about 2k tokens of your plan instead of 50–70k
 - **Testing** — Vitest + happy-dom
 - **Auto-update** — `electron-updater` via GitHub Releases
 - **Release automation** — GitHub Actions (`deploy.yml`): conventional commits → version tag → release build
@@ -142,7 +165,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - Node.js 20 or newer
 - npm 10+
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login` — for App Health Check and the background monitor
-- Optional: [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH — for RCA, PageSpeed Claude Analysis and the Unused Assets review
+- Optional: [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH — for RCA, PageSpeed Claude Analysis, the Unused Assets review and Ask Telemetry
 
 ### Install
 
@@ -242,6 +265,7 @@ devforge/
 │       ├── azure-*.cjs               # SNAT, restarts, crash monitoring, page views, detectors, signals
 │       ├── background-monitor.cjs    # Tray icon, hidden worker window, desktop notifications
 │       ├── incident-report.cjs       # AI report + Claude RCA
+│       ├── telemetry-ask.cjs         # Ask Telemetry: Claude-written KQL, run read-only on App Insights
 │       ├── pagespeed-insight.cjs     # Google PageSpeed API + Markdown report / fix brief
 │       ├── unused-assets.cjs         # Unused CSS/JS scan + Claude review
 │       ├── confluence.cjs            # Release runbook fetch (session + REST)

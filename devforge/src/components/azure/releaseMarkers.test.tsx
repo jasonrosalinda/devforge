@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { snapToStamp, markerLines, releaseTitle, releaseStatus, LastReleaseLabel } from './releaseMarkers';
+import { snapToStamp, markerLines, releaseTitle, releaseStatus, LastReleaseLabel, SiteReleaseLabel } from './releaseMarkers';
 
 const HOURLY = ['2026-10-20T07:00:00Z', '2026-10-20T08:00:00Z', '2026-10-20T09:00:00Z', '2026-10-20T10:00:00Z'];
 const ms = (iso: string) => Date.parse(iso);
@@ -115,5 +115,28 @@ describe('LastReleaseLabel', () => {
 
   it('renders nothing when no result came back', () => {
     expect(renderToStaticMarkup(<LastReleaseLabel loading={false} fe={null} api={null} hasApi />)).toBe('');
+  });
+});
+
+describe('SiteReleaseLabel', () => {
+  const swap = { events: [], last: { at: '2026-10-20T09:11:56Z', source: 'swap' as const, build: '20261020.1' }, sources: { kudu: 'ok' as const } };
+  const html = (el: React.ReactElement) => renderToStaticMarkup(el).replace(/<[^>]+>/g, '');
+
+  it('reads loading while the fetch is in flight', () => {
+    expect(html(<SiteReleaseLabel loading result={null} />)).toBe('Last release …');
+  });
+
+  it('shows the site last release in SGT, with the details on hover', () => {
+    const markup = renderToStaticMarkup(<SiteReleaseLabel loading={false} result={swap} />);
+    expect(markup.replace(/<[^>]+>/g, '')).toBe('Last release 2026-10-20 17:11 SGT');
+    expect(markup).toContain('Build 20261020.1');
+  });
+
+  it('says when there was no release in the window', () => {
+    expect(html(<SiteReleaseLabel loading={false} result={{ ...swap, last: null }} />)).toBe('Last release none in 30 days');
+  });
+
+  it('renders nothing without a result', () => {
+    expect(renderToStaticMarkup(<SiteReleaseLabel loading={false} result={null} />)).toBe('');
   });
 });

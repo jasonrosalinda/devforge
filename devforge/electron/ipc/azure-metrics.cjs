@@ -2550,6 +2550,7 @@ handler._getGranularity = getGranularity;
 handler._summarize = summarize;
 handler._groupUrlSeries = groupUrlSeries;
 handler._createCachingCredential = createCachingCredential;
+handler._findAppInsightsAppId = findAppInsightsAppId;
 handler._setCached = setCached;
 handler._cacheSize = () => _fetchCache.size;
 handler._fetchMonitorMetrics = fetchMonitorMetrics;
