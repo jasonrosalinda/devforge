@@ -268,3 +268,78 @@ export function nextReauditRun(
     if (runIdx === undefined) return undefined;
     return { runIdx, keys: keys.filter(k => found[k]?.runs.has(runIdx)) };
 }
+
+// ─── re-audit outcomes ─────────────────────────────────────────────────────
+// A failed audit never throws — it comes back as a result carrying an errorResponse — so
+// "no closer" and "the audit errored" look identical on the table. Each attempt records
+// which one it was, so the notice can say why a run stayed as it was.
+
+// `repeat`: PSI answered with an audit whose fetchTime is already in the row — the same
+// Lighthouse run served again (cached), so it is neither new data nor an error.
+export type ReauditAttemptOutcome = 'improved' | 'no-closer' | 'errored' | 'repeat';
+
+export interface ReauditRunReport {
+    /** 0-based After run the attempts were spent on. */
+    runIdx: number;
+    outcomes: ReauditAttemptOutcome[];
+    /** The API's message from the last errored attempt. */
+    error?: string | undefined;
+    /** Wall-clock time spent on this run's audits. A real PSI audit takes seconds, not milliseconds. */
+    elapsedMs?: number | undefined;
+}
+
+// Runs whose attempts must all fail before the re-audit gives up: one bad run can be a
+// flaky page, two in a row is the API (quota, key, rate limit).
+const STALL_RUNS = 2;
+const MAX_ERROR_CHARS = 120;
+
+/** Readable text of an audit's error: an errorResponse, an Error, a string, or a thrown API body. */
+export function auditErrorText(error: unknown): string | undefined {
+    const raw = typeof error === 'string' ? error : (error as { message?: unknown } | null | undefined)?.message;
+    const text = (Array.isArray(raw) ? raw.join('; ') : typeof raw === 'string' ? raw : '').replace(/\s+/g, ' ').trim();
+    if (!text) return undefined;
+    return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text;
+}
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** One line per run: what its attempts did. */
+export function describeReauditRun(report: ReauditRunReport): string {
+    const { outcomes } = report;
+    const attempts = plural(outcomes.length, 'attempt');
+    const errored = outcomes.filter(o => o === 'errored').length;
+    const repeated = outcomes.filter(o => o === 'repeat').length;
+    const why = report.error ? ` (${report.error})` : '';
+    const label = `#${report.runIdx + 1}`;
+    const took = report.elapsedMs === undefined ? '' : ` — ${(report.elapsedMs / 1000).toFixed(1)}s`;
+    if (errored === outcomes.length) return `${label}: all ${attempts} errored${why}${took}`;
+    if (repeated === outcomes.length) return `${label}: all ${attempts} returned an audit PSI had already served (cached), so nothing new was measured${took}`;
+    const notes = `${errored ? `; ${errored} errored${why}` : ''}${repeated ? `; ${repeated} repeated an earlier audit (cached)` : ''}${took}`;
+    const improvedAt = outcomes.indexOf('improved');
+    if (improvedAt >= 0) return `${label}: closer to Before on attempt ${improvedAt + 1} of ${outcomes.length}${notes}`;
+    return `${label}: ${attempts}, none closer to Before${notes}`;
+}
+
+/** Runs that got at least one cached audit, with how many of their attempts it was — for marking them on the table. */
+export function cachedAttemptsByRun(reports: readonly ReauditRunReport[]): Record<number, { repeated: number; attempts: number }> {
+    const cached: Record<number, { repeated: number; attempts: number }> = {};
+    for (const r of reports) {
+        const repeated = r.outcomes.filter(o => o === 'repeat').length;
+        if (repeated) cached[r.runIdx] = { repeated, attempts: r.outcomes.length };
+    }
+    return cached;
+}
+
+const unusable = (r: ReauditRunReport): boolean =>
+    r.outcomes.length > 0 && r.outcomes.every(o => o === 'errored' || o === 'repeat');
+
+/** Whether the latest runs got nothing usable from any attempt — more attempts would only fail the same way. */
+export function reauditStalled(reports: readonly ReauditRunReport[]): boolean {
+    const tail = reports.slice(-STALL_RUNS);
+    return tail.length === STALL_RUNS && tail.every(unusable);
+}
+
+/** Why a stalled re-audit got nothing: PSI replaying stored audits, or the API refusing. */
+export function reauditStallCause(reports: readonly ReauditRunReport[]): 'cached' | 'errored' {
+    return reports.slice(-STALL_RUNS).some(r => r.outcomes.includes('repeat')) ? 'cached' : 'errored';
+}

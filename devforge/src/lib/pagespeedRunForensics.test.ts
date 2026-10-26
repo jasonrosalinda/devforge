@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedOpportunity } from '@shared/types/pageSpeedInsight.types';
-import { detectWarmUp, explainSpike, flaggedAfterRuns, isRunFlagged, metricVerdict, nextReauditRun, serverResponseMs } from './pagespeedRunForensics';
+import { auditErrorText, cachedAttemptsByRun, describeReauditRun, detectWarmUp, explainSpike, flaggedAfterRuns, isRunFlagged, metricVerdict, nextReauditRun, reauditStallCause, reauditStalled, serverResponseMs, type ReauditRunReport } from './pagespeedRunForensics';
 
 const m = (numericValue: number, displayValue: string): PageSpeedMetrics => ({ numericValue, displayValue, numericUnit: 'millisecond' });
 const si = (sec: number) => m(sec * 1000, `${sec.toFixed(1)} s`);
@@ -180,5 +180,127 @@ describe('nextReauditRun / isRunFlagged', () => {
 
     it('has nothing to do for a single-run row', () => {
         expect(nextReauditRun(BEFORE, [run(5)], [...SI], 'average', new Set())).toBeUndefined();
+    });
+});
+
+// A failed audit resolves instead of throwing, so the notice has to say which attempts
+// errored and which were merely no closer — the bug was both reading "0 cleared".
+describe('auditErrorText', () => {
+    it('reads an errorResponse, an Error, a string and a message list', () => {
+        expect(auditErrorText({ code: 429, message: 'Quota exceeded' })).toBe('Quota exceeded');
+        expect(auditErrorText(new Error('Failed to fetch'))).toBe('Failed to fetch');
+        expect(auditErrorText('boom')).toBe('boom');
+        expect(auditErrorText({ code: 500, message: ['first', 'second'] })).toBe('first; second');
+    });
+
+    it('is undefined when there is no message', () => {
+        expect(auditErrorText({ code: 0, message: '' })).toBeUndefined();
+        expect(auditErrorText(undefined)).toBeUndefined();
+        expect(auditErrorText({})).toBeUndefined();
+    });
+
+    it('collapses whitespace and truncates a long message', () => {
+        expect(auditErrorText({ message: 'a\n  b' })).toBe('a b');
+        const long = auditErrorText({ message: 'x'.repeat(500) })!;
+        expect(long).toHaveLength(120);
+        expect(long.endsWith('…')).toBe(true);
+    });
+});
+
+describe('describeReauditRun', () => {
+    const report = (runIdx: number, outcomes: ReauditRunReport['outcomes'], error?: string): ReauditRunReport => ({ runIdx, outcomes, error });
+
+    it('says when every attempt errored, with the API message', () => {
+        expect(describeReauditRun(report(1, ['errored', 'errored', 'errored'], 'Quota exceeded')))
+            .toBe('#2: all 3 attempts errored (Quota exceeded)');
+    });
+
+    it('says when the audits worked but never came closer', () => {
+        expect(describeReauditRun(report(2, ['no-closer', 'no-closer', 'no-closer']))).toBe('#3: 3 attempts, none closer to Before');
+    });
+
+    it('reports the attempt that came closer', () => {
+        expect(describeReauditRun(report(0, ['no-closer', 'improved']))).toBe('#1: closer to Before on attempt 2 of 2');
+    });
+
+    it('notes errors mixed in with working attempts', () => {
+        expect(describeReauditRun(report(3, ['errored', 'no-closer', 'no-closer'], 'Failed to fetch')))
+            .toBe('#4: 3 attempts, none closer to Before; 1 errored (Failed to fetch)');
+    });
+
+    it('flags audits PSI served from cache, and when every attempt was one', () => {
+        expect(describeReauditRun(report(0, ['repeat', 'repeat', 'repeat'])))
+            .toBe('#1: all 3 attempts returned an audit PSI had already served (cached), so nothing new was measured');
+        expect(describeReauditRun(report(1, ['repeat', 'no-closer', 'repeat'])))
+            .toBe('#2: 3 attempts, none closer to Before; 2 repeated an earlier audit (cached)');
+    });
+
+    it('appends the time spent so an instant "audit" is visible', () => {
+        expect(describeReauditRun({ runIdx: 0, outcomes: ['no-closer', 'no-closer'], elapsedMs: 1240 }))
+            .toBe('#1: 2 attempts, none closer to Before — 1.2s');
+    });
+
+    it('uses the singular for one attempt', () => {
+        expect(describeReauditRun(report(0, ['errored']))).toBe('#1: all 1 attempt errored');
+    });
+});
+
+describe('reauditStalled', () => {
+    const errored = (runIdx: number): ReauditRunReport => ({ runIdx, outcomes: ['errored', 'errored', 'errored'] });
+    const worked = (runIdx: number): ReauditRunReport => ({ runIdx, outcomes: ['no-closer', 'no-closer', 'no-closer'] });
+
+    it('waits for two runs before giving up', () => {
+        expect(reauditStalled([errored(0)])).toBe(false);
+        expect(reauditStalled([errored(0), errored(1)])).toBe(true);
+    });
+
+    it('keeps going while any attempt got a usable audit', () => {
+        expect(reauditStalled([errored(0), worked(1)])).toBe(false);
+        expect(reauditStalled([worked(0), worked(1)])).toBe(false);
+        expect(reauditStalled([errored(0), { runIdx: 1, outcomes: ['errored', 'errored', 'no-closer'] }])).toBe(false);
+    });
+
+    it('stalls when the latest runs only got repeats, even after earlier runs got a real audit', () => {
+        const repeats = (runIdx: number): ReauditRunReport => ({ runIdx, outcomes: ['repeat', 'repeat', 'repeat'] });
+        const mixed: ReauditRunReport = { runIdx: 0, outcomes: ['no-closer', 'repeat', 'repeat'] };
+        expect(reauditStalled([mixed, repeats(1)])).toBe(false);
+        expect(reauditStalled([mixed, repeats(1), repeats(2)])).toBe(true);
+        expect(reauditStalled([worked(0), repeats(1), errored(2)])).toBe(true);
+    });
+
+    it('ignores a run that never started an attempt', () => {
+        expect(reauditStalled([errored(0), { runIdx: 1, outcomes: [] }])).toBe(false);
+        expect(reauditStalled([])).toBe(false);
+    });
+});
+
+describe('reauditStallCause', () => {
+    it('blames the cache when any of the latest runs got a repeat, otherwise the API', () => {
+        const repeats: ReauditRunReport = { runIdx: 1, outcomes: ['repeat', 'repeat', 'repeat'] };
+        const errored: ReauditRunReport = { runIdx: 2, outcomes: ['errored', 'errored', 'errored'] };
+        expect(reauditStallCause([repeats, errored])).toBe('cached');
+        expect(reauditStallCause([errored, { ...errored, runIdx: 3 }])).toBe('errored');
+    });
+
+    it('only looks at the latest runs', () => {
+        const repeats: ReauditRunReport = { runIdx: 0, outcomes: ['repeat', 'repeat', 'repeat'] };
+        const errored = (runIdx: number): ReauditRunReport => ({ runIdx, outcomes: ['errored', 'errored', 'errored'] });
+        expect(reauditStallCause([repeats, errored(1), errored(2)])).toBe('errored');
+    });
+});
+
+describe('cachedAttemptsByRun', () => {
+    it('lists only the runs that got a cached audit, with the attempt counts', () => {
+        const reports: ReauditRunReport[] = [
+            { runIdx: 0, outcomes: ['no-closer', 'repeat', 'repeat'] },
+            { runIdx: 1, outcomes: ['no-closer', 'no-closer', 'improved'] },
+            { runIdx: 3, outcomes: ['repeat', 'repeat', 'repeat'] },
+        ];
+        expect(cachedAttemptsByRun(reports)).toEqual({ 0: { repeated: 2, attempts: 3 }, 3: { repeated: 3, attempts: 3 } });
+    });
+
+    it('is empty when nothing was cached', () => {
+        expect(cachedAttemptsByRun([{ runIdx: 0, outcomes: ['errored'] }])).toEqual({});
+        expect(cachedAttemptsByRun([])).toEqual({});
     });
 });

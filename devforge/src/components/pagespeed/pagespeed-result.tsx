@@ -12,7 +12,7 @@ import type { PageSpeedInsightResult, PageSpeedMetrics, PageSpeedConfiguration, 
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { displayPageSpeedAudit, getPageSpeedInsightResultMessages, aggregatePageSpeedInsightResults, allRunsFailed, improvementPercent, absoluteChange, zeroBaseline, zeroBaselineFloor, excessOverTargets, findDegradingRuns, mapUrlsToPreviousIndexes, describePageSpeedTestEnvironment, realignIndexSet, realignIndexedRecord, realignSlots, resultHasError, type ComparableMetricKey } from '@/lib/pageSpeedUtils';
 import { buildEvidenceDiffSection } from '@/lib/pagespeedEvidenceDiff';
-import { detectWarmUp, explainSpike, flaggedAfterRuns, isRunFlagged, metricVerdict, nextReauditRun, type MetricVerdict, type MetricVerdictResult } from '@/lib/pagespeedRunForensics';
+import { auditErrorText, cachedAttemptsByRun, describeReauditRun, detectWarmUp, explainSpike, flaggedAfterRuns, isRunFlagged, metricVerdict, nextReauditRun, reauditStallCause, reauditStalled, type MetricVerdict, type MetricVerdictResult, type ReauditRunReport } from '@/lib/pagespeedRunForensics';
 import { RunSpreadStrip } from './run-spread-strip';
 import { CopyForTeamsButton } from './copy-for-teams-button';
 import { breakableUrlLink } from '@/lib/teams-html';
@@ -131,7 +131,7 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
     const [reauditProgress, setReauditProgress] = useState<Record<string, { run: number; attempt: number }>>({});
     // Re-audit outcome, shown inside the After card until dismissed or the next audit —
     // a toast is too easy to miss once the user has scrolled to another row.
-    const [reauditNotice, setReauditNotice] = useState<Record<string, { tone: 'success' | 'info' | 'warning'; text: string }>>({});
+    const [reauditNotice, setReauditNotice] = useState<Record<string, { tone: 'success' | 'info' | 'warning'; text: string; details: string[]; cachedRuns: ReturnType<typeof cachedAttemptsByRun> }>>({});
     const dismissReauditNotice = (key: string) => setReauditNotice(prev => {
         const next = { ...prev };
         delete next[key];
@@ -492,6 +492,15 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 next[index] = result;
                 return next;
             });
+            // The run was just replaced, so a "cached" mark from the last re-audit no longer applies.
+            if (slotKey === '2') {
+                setReauditNotice(prev => {
+                    const notice = prev[`2-${index}`];
+                    if (!notice?.cachedRuns[runIdx]) return prev;
+                    const { [runIdx]: _replaced, ...cachedRuns } = notice.cachedRuns;
+                    return { ...prev, [`2-${index}`]: { ...notice, cachedRuns } };
+                });
+            }
         } catch (error) {
             console.error(`Re-run failed for ${url} (run ${runIdx + 1}):`, error);
         } finally {
@@ -650,6 +659,11 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
         // it is no longer flagged — even if it is still worse than Before on some metric it
         // was never flagged for — and the next still-flagged run takes over.
         const attempted = new Set<number>();
+        // What each attempt did. A failed audit resolves instead of throwing, so without
+        // this "the audit errored" and "the fresh run was no closer" look the same.
+        const reports: ReauditRunReport[] = [];
+        const seenFetchTimes = new Set(history.flatMap(r => (r.fetchTime ? [r.fetchTime] : [])));
+        let stalled = false;
         try {
             runs: for (;;) {
                 const next = nextReauditRun(before, history, keys, config.aggregation, attempted);
@@ -657,6 +671,8 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                 // Judge this run only on the metrics it is flagged for.
                 const { runIdx, keys: runKeys } = next;
                 attempted.add(runIdx);
+                const report: ReauditRunReport = { runIdx, outcomes: [], elapsedMs: 0 };
+                reports.push(report);
                 const runKey = `2-${index}-${runIdx}`;
                 setRerunningRuns(prev => new Set(prev).add(runKey));
                 let excess = excessOverTargets(history[runIdx]!, targets, runKeys);
@@ -666,19 +682,40 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         if (reauditCancelRef.current.has(key)) break runs;
                         setReauditProgress(prev => ({ ...prev, [key]: { run: runIdx + 1, attempt } }));
                         let fresh: PageSpeedInsightResult;
+                        const startedAt = performance.now();
                         try {
                             fresh = await auditWithRetry(url, undefined, 1, false);
                         } catch (error) {
+                            report.elapsedMs = (report.elapsedMs ?? 0) + performance.now() - startedAt;
                             console.error(`Re-audit of run ${runIdx + 1} (attempt ${attempt}) failed for ${url}:`, error);
+                            report.outcomes.push('errored');
+                            report.error = auditErrorText(error);
+                            continue;
+                        }
+                        report.elapsedMs = (report.elapsedMs ?? 0) + performance.now() - startedAt;
+                        // Same Lighthouse run served again: not new data, and it can never be closer.
+                        if (fresh.fetchTime && seenFetchTimes.has(fresh.fetchTime)) {
+                            console.warn(`Re-audit of run ${runIdx + 1} (attempt ${attempt}) got an audit already in the row (fetchTime ${fresh.fetchTime}) for ${url}`);
+                            report.outcomes.push('repeat');
+                            continue;
+                        }
+                        if (fresh.fetchTime) seenFetchTimes.add(fresh.fetchTime);
+                        if (resultHasError(fresh)) {
+                            console.error(`Re-audit of run ${runIdx + 1} (attempt ${attempt}) returned an error for ${url}:`, fresh.errorResponse);
+                            report.outcomes.push('errored');
+                            report.error = auditErrorText(fresh.errorResponse);
                             continue;
                         }
                         const freshExcess = excessOverTargets(fresh, targets, runKeys);
                         if (freshExcess < excess) {
                             history = history.map((r, i) => (i === runIdx ? fresh : r));
                             excess = freshExcess;
+                            report.outcomes.push('improved');
                             cleared = commit(history);
                             if (cleared) break runs;
                             stillFlagged = isRunFlagged(before, history, keys, config.aggregation, runIdx);
+                        } else {
+                            report.outcomes.push('no-closer');
                         }
                     }
                 } finally {
@@ -689,6 +726,12 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                     });
                 }
                 if (!stillFlagged) fixed++;
+                // Every attempt on the first runs errored: the API is refusing us, so the
+                // remaining runs would only burn more audits to fail the same way.
+                if (reauditStalled(reports)) {
+                    stalled = true;
+                    break;
+                }
             }
         } finally {
             const cancelled = reauditCancelRef.current.has(key);
@@ -704,12 +747,19 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
 
             if (cleared) fixed = attempted.size;
             const total = attempted.size;
+            const erroredAttempts = reports.reduce((sum, r) => sum + r.outcomes.filter(o => o === 'errored').length, 0);
+            const unusable = erroredAttempts + reports.reduce((sum, r) => sum + r.outcomes.filter(o => o === 'repeat').length, 0);
+            const details = reports.filter(r => r.outcomes.length > 0).map(describeReauditRun);
             const notice = cleared
                 ? { tone: 'success' as const, text: `${config.afterLabel} is no longer worse than ${config.beforeLabel} on any shown metric (${fixed} of ${total} flagged run${total === 1 ? '' : 's'} re-audited into range).` }
-                : cancelled
-                    ? { tone: 'info' as const, text: `Re-audit stopped. ${fixed} of ${total} flagged run${total === 1 ? '' : 's'} now no worse than the ${config.beforeLabel} score. Kept the best runs found.` }
-                    : { tone: 'warning' as const, text: `Still worse than ${config.beforeLabel} after re-auditing ${total} flagged run${total === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each). ${fixed} cleared; the rest stayed slow, which points to a real regression. Kept the best runs found.` };
-            setReauditNotice(prev => ({ ...prev, [key]: notice }));
+                : stalled
+                    ? { tone: 'warning' as const, text: reauditStallCause(reports) === 'cached'
+                        ? `Re-audit stopped after ${reports.length} of ${flagged.length} flagged runs: PageSpeed is replaying stored audits for this URL (instant, identical results), so re-running now cannot produce new runs. Wait a few minutes and re-audit again. Kept the best runs found.`
+                        : `Re-audit stopped after ${reports.length} of ${flagged.length} flagged runs: the audits keep failing, so no run could be replaced. Check the API key and quota, then try again. Kept the best runs found.` }
+                    : cancelled
+                        ? { tone: 'info' as const, text: `Re-audit stopped. ${fixed} of ${total} flagged run${total === 1 ? '' : 's'} now no worse than the ${config.beforeLabel} score. Kept the best runs found.` }
+                        : { tone: 'warning' as const, text: `Still worse than ${config.beforeLabel} after re-auditing ${total} flagged run${total === 1 ? '' : 's'} (up to ${REAUDIT_MAX_ATTEMPTS} attempts each). ${fixed} cleared; ${unusable ? `${unusable} audit${unusable === 1 ? '' : 's'} errored or repeated an earlier result, so this may not reflect the page. Details below.` : 'the rest stayed slow, which points to a real regression.'} Kept the best runs found.` };
+            setReauditNotice(prev => ({ ...prev, [key]: { ...notice, details, cachedRuns: cachedAttemptsByRun(reports) } }));
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [auditWithRetry, config.urls, config.aggregation, config.comparisonMode, config.beforeLabel, results1, results2, reauditProgress]);
@@ -1732,9 +1782,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                             <React.Fragment key={runIdx}>
                             <tr className={`border-b border-border/50 ${messagesOpen && runMessages.length > 0 ? '' : 'last:border-0'}${Object.values(degrading).some(d => d.runs.has(runIdx)) ? ' bg-error/10' : ''}`}>
                                 <td className="py-1 px-2 text-muted-foreground whitespace-nowrap w-px">
-                                    <Hint label={`Run #${runIdx + 1}${run.fetchTime ? ` - ${formatRunTime(run.fetchTime)}` : ''}`}>
-                                        <span>#{runIdx + 1}</span>
-                                    </Hint>
+                                    {(() => {
+                                        // After runs a re-audit could not replace because PSI replayed a stored audit.
+                                        const cached = slotKey === '2' ? reauditNotice[`2-${index}`]?.cachedRuns[runIdx] : undefined;
+                                        const when = run.fetchTime ? ` - ${formatRunTime(run.fetchTime)}` : '';
+                                        return (
+                                            <Hint label={cached
+                                                ? `Run #${runIdx + 1}${when}. PageSpeed returned a cached audit for ${cached.repeated} of ${cached.attempts} re-audit attempts, so this run was not freshly re-measured.`
+                                                : `Run #${runIdx + 1}${when}`}>
+                                                <span className={cached ? 'font-semibold text-warning' : ''}>#{runIdx + 1}</span>
+                                            </Hint>
+                                        );
+                                    })()}
                                     {(() => {
                                         const causes = spikeCauses(runIdx);
                                         if (!causes.length) return null;
@@ -2120,11 +2179,18 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                                                                     return (
                                                                         <div role="status" aria-live="polite" className={`mb-2 flex items-start gap-2 rounded-md border px-2 py-1.5 text-xs ${styles.box}`}>
                                                                             <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${styles.color} ${reauditing ? 'animate-pulse' : ''}`} />
-                                                                            <span className="flex-1">
-                                                                                {reauditing
-                                                                                    ? `Re-auditing flagged run #${progress.run}, attempt ${progress.attempt} of ${REAUDIT_MAX_ATTEMPTS}. Click the re-audit button again to stop.`
-                                                                                    : notice!.text}
-                                                                            </span>
+                                                                            <div className="flex-1">
+                                                                                <span>
+                                                                                    {reauditing
+                                                                                        ? `Re-auditing flagged run #${progress.run}, attempt ${progress.attempt} of ${REAUDIT_MAX_ATTEMPTS}. Click the re-audit button again to stop.`
+                                                                                        : notice!.text}
+                                                                                </span>
+                                                                                {!reauditing && notice!.details.length > 0 && (
+                                                                                    <ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted-foreground">
+                                                                                        {notice!.details.map(line => <li key={line}>{line}</li>)}
+                                                                                    </ul>
+                                                                                )}
+                                                                            </div>
                                                                             {!reauditing && !copying && (
                                                                                 <Hint label="Dismiss">
                                                                                     <button onClick={() => dismissReauditNotice(`2-${index}`)} className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Dismiss" data-html2canvas-ignore="true">

@@ -10,7 +10,10 @@ const MAX_RUNS = 10;
 
 class GoogleApiService {
   private async request<T>(endpoint: string, options?: RequestInit, signal?: AbortSignal): Promise<T> {
+    // An audit is a measurement, never a resource to reuse: a stored response would hand a
+    // re-run the same Lighthouse result it was meant to replace.
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      cache: 'no-store',
       ...options,
       ...(signal ? { signal } : {}),
       headers: {
