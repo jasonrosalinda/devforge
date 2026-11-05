@@ -8,6 +8,9 @@ import type { ITelemetryAPI } from './telemetry.types';
  * same options. Optional fields degrade the report to an explicit "not configured"
  * section rather than failing.
  */
+/** Where a background-monitor click lands. */
+export type MonitorOpenTarget = 'health-check' | 'telemetry';
+
 export interface IncidentPayload {
     startMs: number;
     endMs: number;
@@ -163,13 +166,14 @@ export interface IElectronAPI {
     backgroundMonitor: {
         /** Create (true) or tear down (false) the tray and worker. Idempotent. */
         setEnabled(enabled: boolean): Promise<void>;
-        /** Raise a desktop notification. Called by the worker. */
-        alert(opts: { title: string; body: string }): Promise<void>;
+        /** Raise a desktop notification. Called by the worker. `open` is where a click
+         *  lands; defaults to App Health Check. */
+        alert(opts: { title: string; body: string; open?: MonitorOpenTarget }): Promise<void>;
         /** Tray menu → Check now. Returns an unsubscribe. */
         onCheckNow(cb: () => void): () => void;
-        /** An alert was clicked: open App Health Check reloaded to now. Main window only.
+        /** An alert or tray item was clicked: open its page. Main window only.
          *  Returns an unsubscribe. */
-        onOpenHealthCheck(cb: () => void): () => void;
+        onOpenPage(cb: (target: MonitorOpenTarget) => void): () => void;
     };
 
     // ipapi.is — bot/crawler/datacenter reputation lookup (proxied through main)

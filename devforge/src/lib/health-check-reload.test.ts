@@ -23,6 +23,20 @@ describe('health-check reload handoff', () => {
     expect(second).not.toHaveBeenCalled();
   });
 
+  it('passes the requested window and apps through, live and when held', () => {
+    const req = { range: { startMs: 1, endMs: 2 }, appKeys: ['prdmeduapp'] };
+    const live = vi.fn();
+    const unsub = onHealthCheckReload(live);
+    requestHealthCheckReload(req);
+    expect(live).toHaveBeenCalledWith(req);
+    unsub();
+
+    requestHealthCheckReload(req);
+    const held = vi.fn();
+    unsubs.push(onHealthCheckReload(held));
+    expect(held).toHaveBeenCalledWith(req);
+  });
+
   it('stops delivering after unsubscribe', () => {
     const cb = vi.fn();
     onHealthCheckReload(cb)();

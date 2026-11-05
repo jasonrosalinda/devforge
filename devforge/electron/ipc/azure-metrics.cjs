@@ -522,9 +522,11 @@ async function getAvailabilityFromAppInsights(appId, credential, range, granular
 }
 
 /**
- * App Insights: failed requests per instance per minute.
+ * App Insights: 5xx requests per instance per minute.
  * Returns flat array {t, instance, count} — 1-min resolution.
- * Used as high-fidelity replacement for Azure Monitor Http5xx series.
+ * Used as high-fidelity replacement for Azure Monitor Http5xx series, so it counts what
+ * Http5xx counts — RC_5XX_EXPR — not `success == false`, which also takes in every 4xx
+ * and made a site with only 404s read as a 5xx spike (and an unhealthy instance).
  */
 async function getFailedRequestsByInstance(appId, credential, range, customStart, customEnd) {
   try {
@@ -532,7 +534,8 @@ async function getFailedRequestsByInstance(appId, credential, range, customStart
     const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
     const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
     const query = `requests
-| summarize total=count(), failedCount=countif(success==false) by cloud_RoleInstance, cloud_RoleName, bin(timestamp, 1m)
+| extend rc=toint(resultCode)
+| summarize total=count(), failedCount=countif(${RC_5XX_EXPR}) by cloud_RoleInstance, cloud_RoleName, bin(timestamp, 1m)
 | extend healthPct=iif(total>0, round(todouble(total-failedCount)/todouble(total)*100.0, 1), 100.0)
 | project timestamp, cloud_RoleInstance, cloud_RoleName, total, failedCount, healthPct
 | order by timestamp asc`;
@@ -780,6 +783,64 @@ const RC_5XX_EXPR = `rc >= 500 or (success == false and (isempty(resultCode) or 
 
 function kqlLit(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Cap on 5xx records returned for one window — the dialog pages through these. */
+const FIVE_XX_LIMIT = 1000;
+
+/** Individual 5xx request records for one window, newest first, plus the true total —
+ *  what a 5xx burst on the Incident Timeline opens. Same 5xx definition as every count
+ *  on the card (RC_5XX_EXPR), so the list and the burst agree. */
+async function fetchFiveXxRequests(appId, credential, startIso, endIso, limit = FIVE_XX_LIMIT) {
+  const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  const base = `requests | extend rc=toint(resultCode) | where ${RC_5XX_EXPR}`;
+  const query = [
+    `${base} | summarize total=sum(itemCount)`,
+    `${base} | top ${limit} by timestamp desc ` +
+      `| project timestamp, name, url, resultCode, duration, cloud_RoleInstance, operation_Id, itemCount`,
+  ].join(';\n');
+  const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${txt}`.slice(0, 300));
+  }
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  const [totalRows = [], rows = []] = (data.tables || []).map(t => t.rows ?? []);
+  const str = (v) => (v == null ? '' : String(v));
+  return {
+    total: Number(totalRows[0]?.[0]) || 0,
+    rows: rows.map(([t, name, url, code, duration, instance, opId, itemCount]) => ({
+      t: new Date(t).toISOString(),
+      name: str(name),
+      url: str(url),
+      // A request killed mid-flight has no code but still counts as a 5xx — see RC_5XX_EXPR.
+      resultCode: str(code) || '(none)',
+      durationMs: Math.round(Number(duration) || 0),
+      instance: str(instance),
+      operationId: str(opId),
+      // >1 when App Insights sampled: this one record stands for that many requests.
+      itemCount: Number(itemCount) || 1,
+    })),
+  };
+}
+
+/** The App Insights app id for one site of a configured app: the id from Settings, else
+ *  looked up through ARM (App Service only — a Container App has no linked resource). */
+async function resolveSiteAppId(app, site, token, subscriptionId) {
+  const isAppService = app.type === 'appservice';
+  if (site === 'api') {
+    return app.apiInsightsAppId
+      || ((app.apiType || 'appservice') === 'appservice' && isAppService
+           ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.apiName).catch(() => null)
+           : null);
+  }
+  return app.appInsightsAppId
+    || (isAppService ? await findAppInsightsAppId(token, subscriptionId, app.resourceGroup, app.name).catch(() => null) : null);
 }
 
 
@@ -1921,10 +1982,56 @@ async function queryMetricsByName(client, resId, names, timespan, granularity, a
  * the page. The series are built with the same helpers the page uses, so an alert
  * and the page agree on the numbers. Container Apps take the full fetch.
  */
+/** Requests and 5xx per minute from one App Insights app — any hosting type, and the same
+ *  5xx definition as every other count (RC_5XX_EXPR). Sample-weighted by itemCount. */
+async function getSite5xxSeries(appId, credential, customStart, customEnd) {
+  const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  const query = `requests | extend rc=toint(resultCode) ` +
+    `| summarize total=sum(itemCount), failed=sumif(itemCount, ${RC_5XX_EXPR}) by bin(timestamp, 1m) | order by timestamp asc`;
+  const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, timespan: `${new Date(customStart).toISOString()}/${new Date(customEnd).toISOString()}` }),
+  });
+  if (!res.ok) throw new Error(`App Insights ${res.status}`);
+  const rows = (await res.json()).tables?.[0]?.rows ?? [];
+  return {
+    requests: rows.map(([t, total]) => ({ t: new Date(t).toISOString(), count: Number(total) || 0 })),
+    failed: rows.map(([t, , failed]) => ({ t: new Date(t).toISOString(), count: Number(failed) || 0 })),
+  };
+}
+
+/**
+ * The API site's requests and 5xx per minute, so Home can pin a 5xx spike on FE or API.
+ * App Insights first — it works for a Container App API too, which has no Http5xx
+ * metric — then Azure Monitor's Http5xx for an App Service API without App Insights.
+ */
+async function fetchApiSiteSeries(client, token, credential, app, subscriptionId, customStart, customEnd) {
+  const none = { apiRequestsSeries: null, apiFailedRequestsSeries: null };
+  if (!app.apiName) return none;
+  const apiAiId = await cachedLookup(
+    `ai:api:${subscriptionId}/${app.resourceGroup}/${app.apiName}`,
+    () => resolveSiteAppId(app, 'api', token, subscriptionId),
+    { keepNull: true },
+  ).catch(() => null);
+  if (apiAiId) {
+    const s = await getSite5xxSeries(apiAiId, credential, customStart, customEnd).catch(() => null);
+    if (s) return { apiRequestsSeries: s.requests, apiFailedRequestsSeries: s.failed };
+  }
+  if ((app.apiType || 'appservice') !== 'appservice') return none;
+  const apiResId = resourceId(subscriptionId, { type: 'appservice', resourceGroup: app.resourceGroup, name: app.apiName });
+  const data = await queryMetricsByName(client, apiResId, ['Requests', 'Http5xx'], buildTimespan('custom', customStart, customEnd), 'PT1M', ['Total']).catch(() => null);
+  return data ? { apiRequestsSeries: toCountSeries(data.Requests), apiFailedRequestsSeries: toCountSeries(data.Http5xx) } : none;
+}
+
 async function fetchMonitorMetrics(client, token, credential, app, subscriptionId, customStart, customEnd) {
   const gran = 'PT1M';
   if (app.type !== 'appservice') {
-    return fetchAppMetrics(client, token, credential, app, subscriptionId, 'custom', customStart, customEnd, gran);
+    const [m, api] = await Promise.all([
+      fetchAppMetrics(client, token, credential, app, subscriptionId, 'custom', customStart, customEnd, gran),
+      fetchApiSiteSeries(client, token, credential, app, subscriptionId, customStart, customEnd),
+    ]);
+    return { ...m, ...api };
   }
   const resId = resourceId(subscriptionId, app);
   const hasDb = !!(app.dbName && app.dbServerName);
@@ -1937,7 +2044,7 @@ async function fetchMonitorMetrics(client, token, credential, app, subscriptionI
   ]);
   const metricsResId = plan?.farmId || resId;
 
-  const [planData, siteData, dbData, aiFailedByInstance] = await Promise.all([
+  const [planData, siteData, dbData, aiFailedByInstance, apiSeries] = await Promise.all([
     // No catch: without CPU there is nothing to check, so this fails the check.
     queryMetricsByName(client, metricsResId, ['CpuPercentage', 'MemoryPercentage'], timespan, gran, ['Average', 'Maximum']),
     queryMetricsByName(client, resId, ['Requests', 'Http5xx'], timespan, gran, ['Total']).catch(() => null),
@@ -1945,6 +2052,7 @@ async function fetchMonitorMetrics(client, token, credential, app, subscriptionI
       ? queryMetricsByName(client, sqlDbResourceId(subscriptionId, app), ['cpu_percent', 'sql_instance_memory_percent'], timespan, gran, ['Average', 'Maximum']).catch(() => null)
       : Promise.resolve(null),
     aiAppId ? getFailedRequestsByInstance(aiAppId, credential, 'custom', customStart, customEnd).catch(() => null) : Promise.resolve(null),
+    fetchApiSiteSeries(client, token, credential, app, subscriptionId, customStart, customEnd),
   ]);
 
   let memory = summarize(planData.MemoryPercentage);
@@ -1966,6 +2074,7 @@ async function fetchMonitorMetrics(client, token, credential, app, subscriptionI
     plan,
     requestsSeries: siteData ? toCountSeries(siteData.Requests) : null,
     failedRequestsSeries: sumFailedByMinute(aiFailedByInstance, siteData ? toCountSeries(siteData.Http5xx) : null),
+    ...apiSeries,
     appInsightsConfigured: !!aiAppId,
   };
 }
@@ -2161,7 +2270,10 @@ const handler = (_mainWindow) => {
     }
   });
 
-  ipcMain.handle('azure-metrics:fetch', async (_event, { appKeys, range, config, customStart, customEnd, granularity }) => {
+  ipcMain.handle('azure-metrics:fetch', async (_event, { appKeys, range, config, customStart, customEnd, granularity, silent }) => {
+    // `silent`: a side fetch (the Release Verdict) must not stream partials —
+    // useAzureMetrics applies every partial to the Health Check cards it is showing.
+    const sendPartial = (key, result) => { if (!silent) _event.sender.send('azure-metrics:partial', { key, result }); };
     if (!config?.subscriptionId || !config?.apps?.length) {
       return { _error: 'No Azure configuration. Open Settings and configure your subscription and apps.' };
     }
@@ -2178,7 +2290,7 @@ const handler = (_mainWindow) => {
         const cached = getCached(cacheKey);
         if (cached) {
           results[key] = cached;
-          _event.sender.send('azure-metrics:partial', { key, result: cached });
+          sendPartial(key, cached);
           return;
         }
 
@@ -2194,14 +2306,14 @@ const handler = (_mainWindow) => {
             error: `App "${key}" not found in configuration.`,
           };
           results[key] = errorResult;
-          _event.sender.send('azure-metrics:partial', { key, result: errorResult });
+          sendPartial(key, errorResult);
           return;
         }
         try {
           const result = await fetchAppMetrics(client, token, cred, app, config.subscriptionId, range, customStart, customEnd, granularity);
           setCached(cacheKey, result);
           results[key] = result;
-          _event.sender.send('azure-metrics:partial', { key, result });
+          sendPartial(key, result);
         } catch (err) {
           const errorResult = {
             label: app.name,
@@ -2213,7 +2325,7 @@ const handler = (_mainWindow) => {
             error: err.message || String(err),
           };
           results[key] = errorResult;
-          _event.sender.send('azure-metrics:partial', { key, result: errorResult });
+          sendPartial(key, errorResult);
         }
       })
     );
@@ -2289,16 +2401,7 @@ const handler = (_mainWindow) => {
     try {
       const { cred } = sharedAzure();
       const token = await getToken(cred);
-      const isAppService = app.type === 'appservice';
-      const appId = site === 'api'
-        ? (app.apiInsightsAppId
-            || ((app.apiType || 'appservice') === 'appservice' && isAppService
-                 ? await findAppInsightsAppId(token, config.subscriptionId, app.resourceGroup, app.apiName).catch(() => null)
-                 : null))
-        : (app.appInsightsAppId
-            || (isAppService
-                 ? await findAppInsightsAppId(token, config.subscriptionId, app.resourceGroup, app.name).catch(() => null)
-                 : null));
+      const appId = await resolveSiteAppId(app, site, token, config.subscriptionId);
       if (!appId) return { series: null, deps: null, error: 'No App Insights resource for this site' };
 
       const result = await fetchEndpointDetail(appId, cred, endpoint, range, customStart, customEnd);
@@ -2308,6 +2411,24 @@ const handler = (_mainWindow) => {
       return result;
     } catch (err) {
       return { series: null, deps: null, error: err.message || String(err) };
+    }
+  });
+
+  // The 5xx records behind a burst on the Incident Timeline. Not cached: it is opened
+  // on demand for one window, and a retry after a transient failure must really retry.
+  ipcMain.handle('azure-metrics:fetch-5xx-requests', async (_event, { appKey, site, config, startIso, endIso }) => {
+    if (!config?.subscriptionId || !config?.apps?.length) return { rows: [], total: 0, error: 'No Azure configuration' };
+    const app = config.apps.find(a => a.name === appKey);
+    if (!app) return { rows: [], total: 0, error: `App "${appKey}" not found` };
+    if (site === 'api' && !app.apiName) return { rows: [], total: 0, error: 'This app has no API configured' };
+    try {
+      const { cred } = sharedAzure();
+      const token = await getToken(cred);
+      const appId = await resolveSiteAppId(app, site, token, config.subscriptionId);
+      if (!appId) return { rows: [], total: 0, error: 'No App Insights resource for this site — add its Application ID in Settings → Azure' };
+      return await fetchFiveXxRequests(appId, cred, startIso, endIso);
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message || String(err) };
     }
   });
 
@@ -2556,5 +2677,6 @@ handler._cacheSize = () => _fetchCache.size;
 handler._fetchMonitorMetrics = fetchMonitorMetrics;
 handler._fetchAppMetrics = fetchAppMetrics;
 handler._clearLookups = () => _lookupCache.clear();
+handler._fetchFiveXxRequests = fetchFiveXxRequests;
 
 module.exports = handler;

@@ -241,6 +241,11 @@ export interface AppMetrics {
     error?: string
   } | null
   requestsSeries?: Array<{ t: string; count: number }> | null
+  /** The API site's requests and 5xx per minute (App Insights, else Azure Monitor's
+   *  Http5xx) — only the background monitor's fetch fills these, so Home can tell an API
+   *  5xx spike from a frontend one. */
+  apiRequestsSeries?: Array<{ t: string; count: number }> | null
+  apiFailedRequestsSeries?: Array<{ t: string; count: number }> | null
   availability?: {
     pct: number
     downtimeMins: number
@@ -732,9 +737,31 @@ export interface EndpointPerfPoint {
   p95: number
 }
 
+/** One 5xx request record from App Insights. */
+export interface FiveXxRequest {
+  t: string
+  name: string
+  url: string
+  /** '(none)' for a request that failed without a code (killed mid-flight). */
+  resultCode: string
+  durationMs: number
+  instance: string
+  operationId: string
+  /** >1 when sampled: this record stands for that many requests. */
+  itemCount: number
+}
+
+export interface FiveXxRequestsResult {
+  /** Newest first, capped (1,000); `total` is the true count in the window. */
+  rows: FiveXxRequest[]
+  total: number
+  error?: string
+}
+
 export interface IAzureMetricsAPI {
   checkCredential: () => Promise<{ ok: boolean; error?: string }>
-  fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Record<string, AppMetrics>>
+  /** `silent` skips the `onPartial` stream, for side fetches that must not repaint the Health Check cards. */
+  fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined; silent?: boolean | undefined }) => Promise<Record<string, AppMetrics>>
   fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'pageViews'>>
   /** The background monitor's check: only the fields its alerts read (CPU, memory, DB,
    *  requests + 5xx series), in a few batched queries. A failed app is `{ error }`. */
@@ -746,5 +773,7 @@ export interface IAzureMetricsAPI {
   fetchCrashes: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<CrashFetchResult>
   /** One endpoint's downstream calls. Per endpoint and on demand — see the handler. */
   fetchEndpointDetail: (opts: { appKey: string; endpoint: string; site: 'fe' | 'api'; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<EndpointDepsResult>
+  /** The 5xx request records behind an Incident Timeline burst. */
+  fetchFiveXxRequests: (opts: { appKey: string; site: 'fe' | 'api'; config?: unknown; startIso: string; endIso: string }) => Promise<FiveXxRequestsResult>
   onPartial?: (cb: (data: { key: string; result: AppMetrics }) => void) => (() => void)
 }

@@ -71,6 +71,8 @@ export type TelemetryStage = 'schema' | 'generating' | 'running' | 'repairing';
 export interface ITelemetryAPI {
     ask: (opts: TelemetryRequest & { question: string }) => Promise<TelemetryAskResponse>;
     run: (opts: TelemetryRequest & { kql: string }) => Promise<TelemetryRunResponse>;
+    /** Same as `run` for the background monitor: never cancels, or is cancelled by, the page's run. */
+    runMonitor: (opts: TelemetryRequest & { kql: string }) => Promise<TelemetryRunResponse>;
     cancel: () => Promise<{ success: boolean; running: boolean }>;
     onProgress: (cb: (data: { stage: TelemetryStage }) => void) => () => void;
 }

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-    MAX_RECENT, MAX_SAVED, deleteQuery, loadLibrary, loadRecent, pushRecent, renameQuery, saveQuery,
+    DEFAULT_ALERT_RULE, MAX_RECENT, MAX_SAVED, deleteQuery, loadLibrary, loadRecent, pushRecent, renameQuery, saveQuery, setQueryAlert,
 } from './telemetry-library';
 
 const entry = (over: Partial<Parameters<typeof saveQuery>[0]> = {}) => ({
@@ -77,6 +77,36 @@ describe('saved queries', () => {
         expect(loadLibrary()).toEqual([]);
         localStorage.setItem('telemetry:library', '{"a":1}');
         expect(loadLibrary()).toEqual([]);
+    });
+});
+
+describe('alert rules', () => {
+    it('sets, replaces and removes a rule on one query only', () => {
+        saveQuery(entry({ kql: 'a' }));
+        const { entries } = saveQuery(entry({ kql: 'b' }));
+        const id = entries[0]!.id;
+        expect(setQueryAlert(id, DEFAULT_ALERT_RULE).entries.find(e => e.id === id)!.alert).toEqual(DEFAULT_ALERT_RULE);
+        expect(loadLibrary().find(e => e.id !== id)!.alert).toBeUndefined();
+        const column = { ...DEFAULT_ALERT_RULE, kind: 'column' as const, column: 'p95', threshold: 2000 };
+        expect(setQueryAlert(id, column).entries[0]!.alert).toEqual(column);
+        const removed = setQueryAlert(id, undefined).entries[0]!;
+        expect(removed).not.toHaveProperty('alert');
+    });
+
+    it('keeps the rule when the same query is saved again', () => {
+        const { entries } = saveQuery(entry());
+        setQueryAlert(entries[0]!.id, DEFAULT_ALERT_RULE);
+        const resaved = saveQuery(entry({ name: 'Renamed' })).entries;
+        expect(resaved).toHaveLength(1);
+        expect(resaved[0]).toMatchObject({ name: 'Renamed', alert: DEFAULT_ALERT_RULE });
+    });
+
+    it('reports a failed write and keeps the old entries', () => {
+        const { entries } = saveQuery(entry());
+        stubFailingStorage(new Error('nope'));
+        const out = setQueryAlert(entries[0]!.id, DEFAULT_ALERT_RULE);
+        expect(out.error).toBe('Could not save.');
+        expect(out.entries[0]!.alert).toBeUndefined();
     });
 });
 

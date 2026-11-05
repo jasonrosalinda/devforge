@@ -1,25 +1,16 @@
-// "Reload App Health Check to now", raised when a tray alert is clicked. App opens
-// the tab and calls requestHealthCheckReload(); the page may not be mounted yet (the
-// tab was closed), so a request with no listener is held and handed to the next page
-// that subscribes, instead of being lost.
+// "Reload App Health Check", raised when a tray alert is clicked (to now) or when the
+// Release Verdict / Home's Fleet Pulse asks for a specific window. App opens the tab and
+// calls requestHealthCheckReload(); a request made before the page mounts is held.
+import { createHandoff } from './handoff';
 
-let pending = false;
-const listeners = new Set<() => void>();
+/** Absent = today 00:00 → now. */
+export interface HealthCheckRange { startMs: number; endMs: number }
+/** Which apps to show; absent = keep the current selection. */
+export interface HealthCheckReload { range?: HealthCheckRange | undefined; appKeys?: string[] | undefined }
 
-export function requestHealthCheckReload(): void {
-  if (!listeners.size) {
-    pending = true;
-    return;
-  }
-  listeners.forEach(cb => cb());
-}
+const handoff = createHandoff<HealthCheckReload>();
+
+export const requestHealthCheckReload = (req: HealthCheckReload = {}): void => handoff.request(req);
 
 /** Returns an unsubscribe. A held request is delivered to `cb` straight away. */
-export function onHealthCheckReload(cb: () => void): () => void {
-  listeners.add(cb);
-  if (pending) {
-    pending = false;
-    cb();
-  }
-  return () => { listeners.delete(cb); };
-}
+export const onHealthCheckReload = (cb: (req: HealthCheckReload) => void): (() => void) => handoff.subscribe(cb);

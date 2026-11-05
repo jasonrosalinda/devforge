@@ -1,5 +1,5 @@
 import { useRef } from "react"
-import { Anvil, ChevronDown, Laptop, Moon, ScrollText, Search, Settings, Sun, X } from "lucide-react"
+import { Anvil, ChevronDown, Search, Settings, X } from "lucide-react"
 
 import {
     Sidebar,
@@ -17,13 +17,6 @@ import {
     SidebarRail,
     useSidebar,
 } from "@/components/ui/sidebar"
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { useTheme } from "@/components/provider/theme-provider"
 import { useSettingsUi } from "@/context/settings-ui-context"
 import { HOME_PAGE, PAGE_GROUPS, matchesPageSearch } from "@/routes/page-routes"
 import { useCollapsedGroups } from "@/hooks/useCollapsedGroups"
@@ -39,7 +32,6 @@ interface AppSidebarProps {
     onOpen: (title: string) => void;
     search: string;
     onSearchChange: (value: string) => void;
-    onOpenReleaseNotes: () => void;
 }
 
 // Active item: tinted fill + a brand bar on the left edge, so the state isn't carried by colour alone.
@@ -76,30 +68,7 @@ function NavItem({ page, isActive, isOpen, onOpen }: { page: Page; isActive: boo
     );
 }
 
-function ThemeMenu() {
-    const { theme, setTheme } = useTheme();
-    const Icon = theme === "light" ? Sun : theme === "dark" ? Moon : Laptop;
-    // No `tooltip` here: with one, SidebarMenuButton returns a Tooltip root, and
-    // DropdownMenuTrigger's asChild would then attach to that instead of the button.
-    return (
-        <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <SidebarMenuButton aria-label={`Theme: ${theme}`}>
-                    <Icon strokeWidth={1.75} />
-                    <span>Theme</span>
-                    <span className="ml-auto text-xs capitalize text-sidebar-foreground/60 group-data-[collapsible=icon]:hidden">{theme}</span>
-                </SidebarMenuButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent side="right" align="end">
-                <DropdownMenuItem onClick={() => setTheme("light")}><Sun className="mr-2 size-4" />Light</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setTheme("dark")}><Moon className="mr-2 size-4" />Dark</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setTheme("system")}><Laptop className="mr-2 size-4" />System</DropdownMenuItem>
-            </DropdownMenuContent>
-        </DropdownMenu>
-    );
-}
-
-export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearchChange, onOpenReleaseNotes }: AppSidebarProps) {
+export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearchChange }: AppSidebarProps) {
     const { openSettings } = useSettingsUi();
     const { state, setOpen } = useSidebar();
     const searchRef = useRef<HTMLInputElement>(null);
@@ -230,15 +199,6 @@ export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearc
                             <Settings strokeWidth={1.75} />
                             <span>Settings</span>
                         </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                        <SidebarMenuButton tooltip="Release notes" onClick={onOpenReleaseNotes}>
-                            <ScrollText strokeWidth={1.75} />
-                            <span>Release notes</span>
-                        </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                        <ThemeMenu />
                     </SidebarMenuItem>
                 </SidebarMenu>
                 <div className="border-t border-sidebar-border pt-2 group-data-[collapsible=icon]:hidden">

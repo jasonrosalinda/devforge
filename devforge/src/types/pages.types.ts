@@ -7,7 +7,7 @@ export type Page = {
     url?: string;
     icon: LucideIcon;
     component: React.FC;
-    /** One line shown on the home cards and in the collapsed-sidebar tooltip. */
+    /** One line shown in the sidebar tooltip. */
     description?: string;
     /** Sidebar section the page is listed under. Home has none and is pinned first. */
     group?: PageGroup;

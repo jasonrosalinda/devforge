@@ -4,11 +4,12 @@ import type { TelemetryTarget } from '@shared/types/telemetry.types';
 import useTelemetryAsk from '@/hooks/useTelemetryAsk';
 import { useCopyElementAsImage } from '@/hooks/useCopyElementAsImage';
 import { useSettings } from '@/context/settings-context';
+import { useSettingsUi } from '@/context/settings-ui-context';
 import { isElectron } from '@/lib/environment';
 import { cn } from '@/lib/utils';
 import { toChartData, toTsv } from '@/lib/telemetry-chart';
 import {
-    deleteQuery, loadLibrary, loadRecent, pushRecent, renameQuery, saveQuery, type SavedTelemetryQuery,
+    deleteQuery, loadLibrary, loadRecent, pushRecent, renameQuery, saveQuery, setQueryAlert, type SavedTelemetryQuery,
 } from '@/lib/telemetry-library';
 import { toDatetimeLocal } from '@/components/app-health-check/styles';
 import { Button } from '@/components/ui/button';
@@ -49,6 +50,7 @@ const STAGE_LABEL = {
 export default function TelemetryAsk() {
     const toast = Toast();
     const { settings } = useSettings();
+    const { openSettings } = useSettingsUi();
     const apps = settings.azure.apps;
     const { state, ask, run, cancel, load } = useTelemetryAsk();
     const { elementRef, copyAsImage, isCopying } = useCopyElementAsImage<HTMLDivElement>({ fileNamePrefix: 'telemetry' });
@@ -321,6 +323,15 @@ export default function TelemetryAsk() {
                     onRun={runSaved}
                     onRename={(id, name) => setLibrary(renameQuery(id, name))}
                     onDelete={(id) => setLibrary(deleteQuery(id))}
+                    onAlertChange={(id, rule) => {
+                        const { entries, error } = setQueryAlert(id, rule);
+                        setLibrary(entries);
+                        if (error) toast.error(error);
+                        else toast.success(rule ? (rule.enabled ? 'Alert saved' : 'Alert saved (off)') : 'Alert removed');
+                    }}
+                    columns={result?.columns?.map(c => c.name) ?? []}
+                    monitorOn={settings.backgroundMonitor.enabled}
+                    onOpenMonitorSettings={() => openSettings('monitor')}
                     disabled={running || rangeInvalid}
                 />
             </div>

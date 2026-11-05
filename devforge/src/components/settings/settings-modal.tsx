@@ -12,7 +12,9 @@ import { isElectron } from '@/lib/environment';
 import { useSettings } from '@/context/settings-context';
 import type { AppSettings, AzureAppEntry } from '@/types/settings.types';
 import { DEFAULT_SLO_MS } from '@/types/settings.types';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, Laptop, Moon, Sun } from 'lucide-react';
+import { useTheme } from '@/components/provider/theme-provider';
+import { ReleaseNotesList } from '@/components/release-notes/release-notes-list';
 
 interface SettingsModalProps {
   open: boolean;
@@ -27,10 +29,17 @@ const EMPTY_APP: AzureAppEntry = {
   name: '',
 };
 
-export type SettingsTab = 'azure' | 'apikeys' | 'atlassian' | 'monitor';
+export type SettingsTab = 'azure' | 'apikeys' | 'atlassian' | 'monitor' | 'appearance' | 'releases';
+
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light', Icon: Sun },
+  { value: 'dark', label: 'Dark', Icon: Moon },
+  { value: 'system', label: 'System', Icon: Laptop },
+] as const;
 
 export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
   const { settings, updateSettings } = useSettings();
+  const { theme, setTheme } = useTheme();
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? 'azure');
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [editingApp, setEditingApp] = useState<AzureAppEntry | null>(null);
@@ -151,6 +160,8 @@ const [newMonitorId, setNewMonitorId] = useState('');
           <button style={tabStyle('apikeys')} onClick={() => setTab('apikeys')}>API Keys</button>
           <button style={tabStyle('atlassian')} onClick={() => setTab('atlassian')}>Atlassian</button>
           <button style={tabStyle('monitor')} onClick={() => setTab('monitor')}>Background monitor</button>
+          <button style={tabStyle('appearance')} onClick={() => setTab('appearance')}>Appearance</button>
+          <button style={tabStyle('releases')} onClick={() => setTab('releases')}>Release notes</button>
         </div>
 
         {/* Azure Tab */}
@@ -734,15 +745,48 @@ const [newMonitorId, setNewMonitorId] = useState('');
           </div>
         )}
 
+        {/* Appearance Tab — applies instantly, so nothing here goes through Save. */}
+        {tab === 'appearance' && (
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">Theme</Label>
+            <div className="flex gap-2" role="radiogroup" aria-label="Theme">
+              {THEME_OPTIONS.map(({ value, label, Icon }) => (
+                <Button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === value}
+                  variant={theme === value ? 'secondary' : 'outline'}
+                  size="sm"
+                  onClick={() => setTheme(value)}
+                  className="gap-1.5"
+                >
+                  <Icon className="size-4" /> {label}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">System follows your operating system's light or dark setting.</p>
+          </div>
+        )}
+
+        {/* Release notes Tab — read-only list fetched from GitHub Releases. */}
+        {tab === 'releases' && <ReleaseNotesList />}
+
         <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
-          <Hint label="Close without saving — unsaved edits are lost">
-            <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
-          </Hint>
-          <Hint label="Write these settings to disk and close">
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
-          </Hint>
+          {tab === 'appearance' || tab === 'releases' ? (
+            <Button variant="ghost" onClick={onClose}>Close</Button>
+          ) : (
+            <>
+              <Hint label="Close without saving — unsaved edits are lost">
+                <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+              </Hint>
+              <Hint label="Write these settings to disk and close">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
+                </Button>
+              </Hint>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>

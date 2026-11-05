@@ -6,11 +6,17 @@ Developer toolkit built with Electron, React, and TypeScript. Bundles Azure App 
 
 ## Pages
 
-Every page opens as its own tab from the sidebar or the Home cards. The sidebar groups them as below. The page list lives in [src/routes/page-routes.tsx](src/routes/page-routes.tsx) and the Toolbox tools in [src/components/toolbox/toolbox-registry.ts](src/components/toolbox/toolbox-registry.ts). **When you add, remove or change a page, update this section in the same PR.**
+Every page opens as its own tab from the sidebar. The sidebar groups them as below. The page list lives in [src/routes/page-routes.tsx](src/routes/page-routes.tsx) and the Toolbox tools in [src/components/toolbox/toolbox-registry.ts](src/components/toolbox/toolbox-registry.ts). **When you add, remove or change a page, update this section in the same PR.**
 
 ### Home
 
-**Use it to** find and open a tool. It shows a card for every page, in sidebar order, and the sidebar search filters them by title, description and keywords.
+**Use it to** see whether any app needs you, the moment devForge opens: a live summary of App Health Check for every configured app over the last 6 hours. Tools open from the sidebar, and its search filters them.
+
+- **One card per app**, laid out as a grid. While it loads, each app shows a placeholder card under its name. Under the name, a card says "Healthy — nothing in the last 6 hours", or what needs attention, worst first: an UptimeRobot monitor reporting down, active downtime, FE or API 5xx above 5% (judged from the same value the card shows), a warning or critical status (with the CPU and memory averages behind it), and the latest anomaly episode.
+- **On each card:** status dot, CPU and memory sparklines for the 6 hours, and 5xx-rate sparklines split into **FE 5xx** and **API 5xx** whenever the app has an API, so you can see which side is failing. Each 5xx value is the latest minute: exactly `0%` when there were none, `<0.1%` when there were a few, and a smaller **peak** figure underneath whenever the 6 hours had any 5xx. The API side is read from its App Insights, which works for Container Apps too, or from Azure Monitor's Http5xx for an App Service API without App Insights (with current values; dashed lines are releases, and the red line on 5xx is the 5% alert threshold), how long ago it was last released (hover for the build and who), and UptimeRobot's live Up / Down when monitors are set.
+- **Click a card** to open App Health Check on that app for the same 6 hours.
+- It loads by itself and refreshes every 5 minutes, but only while Home is the visible tab, so a hidden window or another tab costs no Azure calls. If a check fails, **Retry** runs it again. It judges each app by the same rules as the tray monitor, through the monitor's own lightweight fetch, so it never changes an open App Health Check tab.
+- **Needs:** `az login` and apps in **Settings → Azure** (Home links there when none are set). UptimeRobot status needs the key in **Settings → API Keys**.
 
 ### Monitoring
 
@@ -19,7 +25,16 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 **Use it to** see how Azure apps behaved over a time window, and to explain an outage or a spike: during an incident, for a daily check, when a tray alert fires, or after a release to compare before and after.
 
 - Pick one or more apps and a From / To range (defaults to today 00:00 → now) at 1m–6h granularity. You can turn on **Auto reload** to keep the end at "now".
-- Each app gets a card with a status (healthy / warning / critical). **Blocks** choose what the card shows: Remarks, CPU, Memory, Database, Users, Page Load, Performance, Exceptions, Instances, UptimeRobot, SNAT Ports, Restarts, Crash Monitoring, Anomaly Detection, and Frontend / API.
+- **Remarks** tell the story of the range, one line per finding with an icon for its severity:
+  - **Right now:** what is active in the latest bucket, or "all clear".
+  - **Incidents, in the order they happened:** downtime; 5xx bursts per site (FE / API); critical spikes; warning-level spikes folded into one line; and restarts with their causes, alongside captured crashes. Many bursts on one site become one line with the count, total time, peak, and a **recurring roughly every N min** note when they come at a regular rhythm.
+  - **Connections:** an incident that began within an hour of a release says so ("began 6 min after the 16:54 FE swap"), and restarts within 10 minutes of a crash are called out.
+  - **One-click actions** on each line: **List requests** opens the 5xx requests behind a burst, and **Verdict** opens the Release Verdict for the release it lines up with.
+  - A last line lists the releases in range.
+  - Remarks are written only after the card's metrics, App Insights details and UptimeRobot logs have all loaded (until then the block reads "Waiting for all data to load…"), so they never flip as late data arrives. **Copy for Teams** and the AI remarks still use the one-sentence "right now" summary.
+- Each app gets a card with a status (healthy / warning / critical). **Blocks** choose what the card shows: Remarks, CPU, Memory, Database, Users, Page Load, Performance, Exceptions, Instances, UptimeRobot, SNAT Ports, Restarts, Crash Monitoring, Anomaly Detection, Incident Timeline, and Frontend / API.
+- **Incident Timeline** puts one lane per event source on a shared axis for the range: releases, restarts, crashes, downtime (UptimeRobot, else Azure availability), anomaly episodes (Warning and Critical), and 5xx bursts (buckets above 5% merged into one bar). For an app with an API, the bursts are split into **FE 5xx** and **API 5xx** lanes, each drawn from that site's own App Insights request timeline. Hover any mark for its details, so "release → restart → downtime" reads at a glance. **Click a 5xx burst** to list the 5xx requests behind it from App Insights. The list opens on the burst's own site, and you can switch between Frontend and API: time (SGT), result code, request, URL, duration, instance and operation ID (click to copy), newest first, 25 per page. The 1,000 newest records are listed, alongside the true total. A record marked ×N stands for N sampled requests. Like Remarks, it waits until all the card's data has loaded.
+- **Release Verdict** ("did this release hurt?"): click a release mark in the timeline, or a section's **Last release** label. The dialog compares the hours before the release with the hours after it (1h / 2h / 6h; the after side stops at now and needs at least 15 min). It covers CPU avg / p99, memory, requests per minute (context only), response p95, 5xx and 4xx rates, exceptions per 1k requests, dependency failures, and restarts and crashes per hour. A row counts as worse or better only when it moves at least 20% and past a per-metric floor. Exception types with 5+ hits in the after window's top 10 that weren't in the before window's top 10 are flagged as new. The verdict is **Regressed**, **Improved** or **No change**. **Copy for Teams** pastes the table, and **Open range in Health Check** loads that window for the app. Its fetches never repaint the cards behind it.
 - **Release markers:** every time chart on the card draws a dashed line where a release reached production (FE darker, API fainter; the CPU / Memory chart labels each one with its SGT time), so a change in CPU, restarts or errors reads as before vs after the release. The **Frontend** and **API** section headers each show that site's **Last release**, even when it falls outside the range (30-day look-back); hover it for the build, commit and who released. The card header shows it instead for a site whose section is not on screen: the card is collapsed or the block is hidden. Releases come from the Activity Log (slot swaps, including manual ones) and the Kudu deployment history (pipeline deploys and swaps); Container Apps use their revisions.
 - **Anomaly Detection** flags correlated spikes across CPU, memory, DB CPU and DB memory (plus FE/API error rates when App Insights is available).
 - **Copy for Teams** puts the status header, chart image and metrics table on the clipboard in one paste.
@@ -31,11 +46,13 @@ Every page opens as its own tab from the sidebar or the Home cards. The sidebar 
 
 **Use it to** answer a question about an app's Application Insights that App Health Check has no block for, without writing KQL or opening the Azure Portal. For example: "which endpoints got slower today?", "top exception types on the API this week" or "failed dependency calls by target".
 
+- The header shows your Azure CLI sign-in state (**Authenticated** / **Not authenticated**), same as App Health Check. Click it to re-check, or copy `az login` when signed out.
 - Pick an app, **Frontend** or **API**, and a range (1h / 24h / 7d / custom), then type the question (Ctrl+Enter). Starter questions and your recent ones sit under the box.
 - Claude writes one KQL query from the app's real table schema. devForge runs it read-only and shows the query, a one-line explanation, a chart (a line over time, split by category up to 8 lines, or bars for a breakdown) and the full table.
 - If App Insights rejects the query, Claude gets the error and fixes it once by itself. The query shows a **repaired** badge when that happens.
 - The query stays editable. **Run** (Ctrl+Enter) runs your edit directly, with no Claude call. Results are capped at 5,000 rows.
 - **Save** keeps a query in the library on the right. Running a saved query reuses its KQL on the current range, so it costs no Claude call. **Copy rows** (paste into Excel or Teams) and **Copy chart** (image) share the answer.
+- **Alerts:** the bell on a saved query turns it into a tray alert. It can fire when the query returns any rows, or when a column's largest value goes above a threshold (column names are suggested from the result on screen). Each check queries the last N minutes (default 15) every M minutes (default 5). It alerts once when the condition starts, and again only after it has cleared. Three failed checks in a row give one "keeps failing" alert. Clicking an alert opens Ask Telemetry. Needs **Settings → Background monitor** on (the editor links there when it is off). Checks run on their own path, so they never cancel a query you are running on the page.
 - **Privacy:** only the question, the table and column names, and (on a repair) the query error go to Claude. Telemetry rows never leave the machine. The query is written by Claude through your Claude Code login, never the metered API, so there is no per-question charge. Claude runs without tools or the coding-agent prompt, so a question uses about 2k tokens of your plan; each answer shows the tokens it used (hover for the API-equivalent figure).
 - **Needs:** `az login`, the app in **Settings → Azure** (the App Insights ID is looked up when not set), and the Claude CLI on PATH. Desktop app only.
 
@@ -116,11 +133,12 @@ Offline utilities, each on its own page. Nothing you paste leaves the machine.
 - It alerts when:
   - the status gets worse;
   - 2 or more of CPU, memory, DB CPU and DB memory spike together;
-  - 5xx errors go above 5% of requests;
+  - 5xx errors (status 500+, or a request that failed with no status code; 4xx never count) go above 5% of requests;
   - UptimeRobot reports downtime;
   - Azure is unreachable for 3 checks in a row (and again when it recovers).
 - Each alert carries its numbers (peak values, time, averages). The Settings tab lists the exact thresholds.
-- Clicking an alert opens App Health Check reloaded to today. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu.
+- It also runs the **saved-query alerts** set up on Ask Telemetry (see there).
+- Clicking an alert opens App Health Check reloaded to today, or Ask Telemetry for a saved-query alert. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu.
 
 Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-monitor.cjs), [src/monitor/](src/monitor/)
 
@@ -246,9 +264,11 @@ Implementation: [electron/main.cjs](electron/main.cjs), [src/hooks/useAppUpdater
 
 ## Release Notes Viewer
 
-Click the scroll icon in the header to open the in-app release notes modal. It fetches releases from the GitHub API and renders the changelog inline — same content as the GitHub Releases page.
+Open **Settings → Release notes** (Settings is at the foot of the sidebar) to read the in-app release notes. It fetches releases from the GitHub API and renders the changelog inline — same content as the GitHub Releases page.
 
-Implementation: [src/components/release-notes/release-notes-modal.tsx](src/components/release-notes/release-notes-modal.tsx)
+The theme (Light / Dark / System) is in **Settings → Appearance** and applies immediately, with no Save.
+
+Implementation: [src/components/release-notes/release-notes-list.tsx](src/components/release-notes/release-notes-list.tsx)
 
 ---
 

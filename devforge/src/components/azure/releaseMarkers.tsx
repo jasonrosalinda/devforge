@@ -150,13 +150,28 @@ export function releaseStatus(r: ReleaseResult | null | undefined): { text: stri
 }
 
 /** One site's "Last release", in the header of its own Frontend / API section. */
-export function SiteReleaseLabel({ loading, result }: {
+export function SiteReleaseLabel({ loading, result, onClick }: {
   loading: boolean;
   result: ReleaseResult | null | undefined;
+  /** Opens the Release Verdict for the last release; only offered when there is one. */
+  onClick?: ((event: ReleaseEvent) => void) | undefined;
 }) {
   if (loading) return <span className="text-xs font-normal text-muted-foreground">Last release …</span>;
   const st = releaseStatus(result);
   if (!st) return null;
+  const last = result?.last;
+  if (last && onClick) {
+    return (
+      <button
+        type="button"
+        onClick={e => { e.stopPropagation(); onClick(last); }}
+        title={`${st.title}\n\nClick for the release verdict`}
+        className="text-xs font-normal text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+      >
+        Last release <span className="text-foreground">{st.text}</span>
+      </button>
+    );
+  }
   return (
     <span className="text-xs font-normal text-muted-foreground" title={st.title}>
       Last release <span className="text-foreground">{st.text}</span>

@@ -13,6 +13,24 @@ const RECENT_KEY = 'telemetry:recent';
 export const MAX_SAVED = 100;
 export const MAX_RECENT = 20;
 
+/**
+ * Turns a saved query into a background-monitor alert. The monitor worker reads it from
+ * this same localStorage (same origin), so deleting the query deletes the rule too.
+ */
+export interface TelemetryAlertRule {
+    enabled: boolean;
+    /** 'rows': any row at all. 'column': the largest value in `column` above `threshold`. */
+    kind: 'rows' | 'column';
+    column?: string | undefined;
+    threshold?: number | undefined;
+    /** Each check queries the last `windowMin` minutes. */
+    windowMin: number;
+    /** How often the rule is checked. */
+    everyMin: number;
+}
+
+export const DEFAULT_ALERT_RULE: TelemetryAlertRule = { enabled: true, kind: 'rows', windowMin: 15, everyMin: 5 };
+
 export interface SavedTelemetryQuery {
     id: string;
     name: string;
@@ -22,6 +40,7 @@ export interface SavedTelemetryQuery {
     target: TelemetryTarget;
     chart?: TelemetryChartSpec | undefined;
     savedAt: string; // ISO
+    alert?: TelemetryAlertRule | undefined;
 }
 
 function read<T>(key: string): T[] {
@@ -63,6 +82,8 @@ export function saveQuery(
         ...entry,
         id: prior?.id ?? `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         savedAt: now.toISOString(),
+        // Re-saving the same query must not silently switch off its alert.
+        ...(prior?.alert && !entry.alert ? { alert: prior.alert } : {}),
     };
     const entries = [saved, ...existing.filter(e => e !== prior)].slice(0, MAX_SAVED);
     const error = write(LIBRARY_KEY, entries);
@@ -73,6 +94,18 @@ export function renameQuery(id: string, name: string): SavedTelemetryQuery[] {
     const entries = loadLibrary().map(e => (e.id === id ? { ...e, name: name.trim() || e.name } : e));
     write(LIBRARY_KEY, entries);
     return entries;
+}
+
+/** Set (or with `undefined`, remove) a query's alert rule. */
+export function setQueryAlert(id: string, alert: TelemetryAlertRule | undefined): { entries: SavedTelemetryQuery[]; error?: string } {
+    const existing = loadLibrary();
+    const entries = existing.map(e => {
+        if (e.id !== id) return e;
+        const { alert: _old, ...rest } = e;
+        return alert ? { ...rest, alert } : rest;
+    });
+    const error = write(LIBRARY_KEY, entries);
+    return error ? { entries: existing, error } : { entries };
 }
 
 export function deleteQuery(id: string): SavedTelemetryQuery[] {

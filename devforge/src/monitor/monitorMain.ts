@@ -10,6 +10,9 @@ import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import { loadSettings } from '@/lib/settings-store';
 import { fetchUptimeRobotMonitors, type UptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { snapshotApp, diffApp, trackFetch, type AppSnapshot, type FetchHealth } from './healthAlerts';
+import { loadLibrary } from '@/lib/telemetry-library';
+import type { AzureSettings } from '@/types/settings.types';
+import { evaluateQueryRule, isDue, queryAlertBody, shouldAlert } from './queryAlerts';
 
 const WINDOW_MS = 6 * 3_600_000;
 const TICK_MS = 60_000;
@@ -17,6 +20,10 @@ const TICK_MS = 60_000;
 const previous: Record<string, AppSnapshot> = {};
 const fetchHealth: Record<string, FetchHealth> = {};
 let running = false;
+// Saved-query alerts (Ask Telemetry), keyed by query id.
+const queryLastRun: Record<string, number> = {};
+const queryFiring: Record<string, boolean> = {};
+const queryHealth: Record<string, FetchHealth> = {};
 
 /** An IPC rejection arrives as "Error invoking remote method '…': Error: <message>". */
 function ipcErrorMessage(e: unknown): string {
@@ -32,6 +39,7 @@ async function tick() {
     const settings = await loadSettings();
     const { azure, apiKeys, backgroundMonitor } = settings;
     if (!azure.subscriptionId || !azure.apps.length) return;
+    await checkSavedQueries(azure);
 
     const keys = (backgroundMonitor.apps.length ? backgroundMonitor.apps : azure.apps.map(a => a.name))
       .filter(k => azure.apps.some(a => a.name === k));
@@ -101,3 +109,50 @@ setTimeout(() => {
 }, TICK_MS - (Date.now() % TICK_MS));
 
 window.electronAPI.backgroundMonitor.onCheckNow(() => void tick());
+
+/** Saved Ask Telemetry queries with an alert rule. Read from the same localStorage the
+ *  page writes (same origin), every tick, so a rule switched on applies within a minute. */
+async function checkSavedQueries(azure: AzureSettings): Promise<void> {
+  const nowMs = Date.now();
+  const rules = loadLibrary().filter(q => q.alert?.enabled && azure.apps.some(a => a.name === q.appKey));
+  for (const q of rules) {
+    const rule = q.alert!;
+    if (!isDue(rule, queryLastRun[q.id], nowMs)) continue;
+    queryLastRun[q.id] = nowMs;
+
+    const appDef = azure.apps.find(a => a.name === q.appKey);
+    const label = `${appDef?.platformName || appDef?.resourceGroup || q.appKey}${q.target === 'api' ? ' API' : ''}`;
+    let error: string | null = null;
+    let result;
+    try {
+      const res = await window.electronAPI.telemetry.runMonitor({
+        config: azure, appKey: q.appKey, target: q.target, kql: q.kql,
+        startIso: new Date(nowMs - rule.windowMin * 60_000).toISOString(), endIso: new Date(nowMs).toISOString(),
+      });
+      result = res.result;
+      error = res.success ? (res.result?.error ?? null) : (res.error ?? 'Query failed');
+    } catch (e) {
+      error = ipcErrorMessage(e);
+    }
+    const outcome = error ? null : evaluateQueryRule(rule, result);
+    error ??= outcome?.error ?? null;
+
+    // Same rule as an app fetch: one alert after 3 failures in a row, one when it recovers.
+    const health = trackFetch(queryHealth[q.id], error);
+    queryHealth[q.id] = health.next;
+    if (health.line) {
+      // trackFetch's own wording blames Azure; a query can also fail on its own (a renamed column).
+      const body = error ? `"${q.name}" keeps failing: ${error}` : `"${q.name}" is running again`;
+      await window.electronAPI.backgroundMonitor.alert({ title: `${label} — saved query`, body, open: 'telemetry' });
+    }
+    if (!outcome || outcome.error) {
+      console.warn(`[monitor] saved query ${q.name}: ${error}`);
+      continue;
+    }
+    if (shouldAlert(queryFiring[q.id], outcome)) {
+      await window.electronAPI.backgroundMonitor.alert({ title: `${label} — query alert`, body: queryAlertBody(q.name, rule, outcome, result?.truncated), open: 'telemetry' });
+    }
+    queryFiring[q.id] = outcome.firing;
+  }
+}
+

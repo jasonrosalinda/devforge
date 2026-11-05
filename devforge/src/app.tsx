@@ -7,13 +7,12 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { SettingsProvider } from "@/context/settings-context";
 import { SettingsUiProvider } from "@/context/settings-ui-context";
-import { ReleaseNotesModal } from "@/components/release-notes/release-notes-modal";
 import { UpdateIndicator } from "@/components/updater/update-indicator";
 import { cn } from "@/lib/utils";
 
 import { requestHealthCheckReload } from "@/lib/health-check-reload";
 
-import { HEALTH_CHECK_PAGE, HOME_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
+import { HEALTH_CHECK_PAGE, HOME_PAGE, TELEMETRY_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
 import { AppHeader } from "./components/layout/app-header";
 import { AppSidebar } from "./components/layout/app-sidebar";
 import { PageTabs, panelId, tabId } from "./components/layout/page-tabs";
@@ -27,8 +26,7 @@ export default function App() {
   const { info: updateInfo, install: installUpdate } = useAppUpdater();
   const { openTabs, activeTab, open, close, cycle, activateAt, move } = usePageTabs(PAGE_TITLES, HOME_PAGE);
   const [search, setSearch] = useState<string>("");
-  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
-  // Set when a page is opened from the sidebar or a home card, so focus moves to
+  // Set when a page is opened from the sidebar or Home, so focus moves to
   // the page for keyboard/screen-reader users. Tab-strip navigation keeps focus
   // on the strip instead.
   const focusPanelRef = useRef(false);
@@ -38,11 +36,15 @@ export default function App() {
     open(title);
   }, [open]);
 
-  // A clicked tray alert: show App Health Check reloaded to now. The request goes
-  // first so a tab that mounts from this open still picks it up.
-  useEffect(() => window.electronAPI?.backgroundMonitor?.onOpenHealthCheck(() => {
-    requestHealthCheckReload();
-    openPage(HEALTH_CHECK_PAGE);
+  // A clicked tray alert or tray item. The request goes first so a tab that mounts
+  // from this open still picks it up.
+  useEffect(() => window.electronAPI?.backgroundMonitor?.onOpenPage(target => {
+    if (target === 'telemetry') {
+      openPage(TELEMETRY_PAGE);
+    } else {
+      requestHealthCheckReload();
+      openPage(HEALTH_CHECK_PAGE);
+    }
   }), [openPage]);
 
   useEffect(() => {
@@ -90,7 +92,6 @@ export default function App() {
           onOpen={openPage}
           search={search}
           onSearchChange={setSearch}
-          onOpenReleaseNotes={() => setReleaseNotesOpen(true)}
         />
 
         <SidebarInset className="min-w-0 overflow-hidden">
@@ -129,7 +130,7 @@ export default function App() {
                 >
                   <div className="w-full flex flex-1 flex-col gap-2 px-5 container-fluid mx-auto py-5">
                     {page.title === HOME_PAGE
-                      ? <HomePage onNavigate={openPage} search={search} openTabs={openTabs} />
+                      ? <HomePage onNavigate={openPage} active={isActive} />
                       : (
                         <TabErrorBoundary title={page.title} onClose={() => close(page.title)}>
                           {renderPage(page.title)}
@@ -144,7 +145,6 @@ export default function App() {
         </SidebarInset>
 
         <Toaster />
-        <ReleaseNotesModal open={releaseNotesOpen} onClose={() => setReleaseNotesOpen(false)} />
 
         <UpdateIndicator
           info={updateInfo}

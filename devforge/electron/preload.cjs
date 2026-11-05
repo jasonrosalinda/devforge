@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetchReleases: (opts) => ipcRenderer.invoke('azure-metrics:fetch-releases', opts),
         fetchCrashes: (opts) => ipcRenderer.invoke('azure-metrics:fetch-crashes', opts),
         fetchEndpointDetail: (opts) => ipcRenderer.invoke('azure-metrics:fetch-endpoint-detail', opts),
+        fetchFiveXxRequests: (opts) => ipcRenderer.invoke('azure-metrics:fetch-5xx-requests', opts),
         onPartial: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('azure-metrics:partial', fn);
@@ -23,6 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     telemetry: {
         ask: (opts) => ipcRenderer.invoke('telemetry:ask', opts),
         run: (opts) => ipcRenderer.invoke('telemetry:run', opts),
+        runMonitor: (opts) => ipcRenderer.invoke('telemetry:run-monitor', opts),
         cancel: () => ipcRenderer.invoke('telemetry:cancel'),
         onProgress: (cb) => {
             const fn = (_e, data) => cb(data);
@@ -107,10 +109,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.on('monitor:check-now', fn);
             return () => ipcRenderer.removeListener('monitor:check-now', fn);
         },
-        onOpenHealthCheck: (cb) => {
-            const fn = () => cb();
-            ipcRenderer.on('monitor:open-health-check', fn);
-            return () => ipcRenderer.removeListener('monitor:open-health-check', fn);
+        onOpenPage: (cb) => {
+            const fn = (_e, target) => cb(target);
+            ipcRenderer.on('monitor:open-page', fn);
+            return () => ipcRenderer.removeListener('monitor:open-page', fn);
         },
     },
 

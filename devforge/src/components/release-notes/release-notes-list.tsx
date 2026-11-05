@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2 } from 'lucide-react';
 
@@ -9,11 +8,6 @@ interface Release {
     published_at: string;
     body: string;
     html_url: string;
-}
-
-interface Props {
-    open: boolean;
-    onClose: () => void;
 }
 
 const REPO = 'jasonrosalinda/devforge';
@@ -80,13 +74,13 @@ function renderMarkdown(md: string): ReactNode[] {
     return nodes;
 }
 
-export function ReleaseNotesModal({ open, onClose }: Props) {
+/** Rendered inside Settings → Release notes; mounts only while that tab is open, so it fetches on open. */
+export function ReleaseNotesList() {
     const [releases, setReleases] = useState<Release[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!open) return;
         const controller = new AbortController();
         setLoading(true);
         setError(null);
@@ -96,51 +90,44 @@ export function ReleaseNotesModal({ open, onClose }: Props) {
             .catch(e => { if (e.name !== 'AbortError') setError(e.message); })
             .finally(() => setLoading(false));
         return () => controller.abort();
-    }, [open]);
+    }, []);
 
     return (
-        <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-            <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
-                <DialogHeader className="flex-shrink-0">
-                    <DialogTitle>Release Notes</DialogTitle>
-                </DialogHeader>
-                <ScrollArea className="h-[calc(80vh-80px)] pr-4 -mr-4">
-                    {loading && (
-                        <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-                            <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading releases...
-                        </div>
-                    )}
-                    {error && (
-                        <div className="text-sm text-destructive py-2">
-                            Failed to load releases: {error}
-                        </div>
-                    )}
-                    {!loading && !error && releases.length === 0 && (
-                        <div className="text-sm text-muted-foreground py-12 text-center">
-                            No releases published yet.
-                        </div>
-                    )}
-                    {!loading && !error && releases.map(r => (
-                        <div key={r.tag_name} className="border-b border-border last:border-0 py-4">
-                            <div className="flex items-baseline justify-between gap-2 mb-2">
-                                <h2 className="text-lg font-semibold text-foreground">{r.name || r.tag_name}</h2>
-                                <span className="text-xs text-muted-foreground tabular-nums">
-                                    {new Date(r.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                                </span>
-                            </div>
-                            <div className="leading-relaxed">{renderMarkdown(r.body || '_No notes provided._')}</div>
-                            <a
-                                href={r.html_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline mt-3 inline-block"
-                            >
-                                View on GitHub →
-                            </a>
-                        </div>
-                    ))}
-                </ScrollArea>
-            </DialogContent>
-        </Dialog>
+        <ScrollArea className="h-[50vh] pr-4 -mr-4">
+            {loading && (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading releases...
+                </div>
+            )}
+            {error && (
+                <div className="text-sm text-destructive py-2">
+                    Failed to load releases: {error}
+                </div>
+            )}
+            {!loading && !error && releases.length === 0 && (
+                <div className="text-sm text-muted-foreground py-12 text-center">
+                    No releases published yet.
+                </div>
+            )}
+            {!loading && !error && releases.map(r => (
+                <div key={r.tag_name} className="border-b border-border last:border-0 py-4">
+                    <div className="flex items-baseline justify-between gap-2 mb-2">
+                        <h2 className="text-lg font-semibold text-foreground">{r.name || r.tag_name}</h2>
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                            {new Date(r.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                        </span>
+                    </div>
+                    <div className="leading-relaxed">{renderMarkdown(r.body || '_No notes provided._')}</div>
+                    <a
+                        href={r.html_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline mt-3 inline-block"
+                    >
+                        View on GitHub →
+                    </a>
+                </div>
+            ))}
+        </ScrollArea>
     );
 }

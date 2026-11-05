@@ -1,6 +1,5 @@
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import type { UptimeRobotMonitor, UptimeRobotLog } from '@/hooks/useUptimeRobotMonitor';
-import { UI } from '@/lib/chart-colors';
 
 export type RemarkKind =
   | 'CPU spike'
@@ -47,7 +46,7 @@ const CPU_SPIKE = 80;
 const MEM_SPIKE_PCT = 85;
 const RESP_SLOW_SEC = 5;
 const HTTP_4XX_RATE = 0.05;
-const HTTP_5XX_RATE = 0.05;
+export const HTTP_5XX_RATE = 0.05;
 const GROUP_WINDOW_MS = 15 * 60 * 1000;
 
 function findLastBadIso<T extends { t: string }>(
@@ -168,16 +167,15 @@ function severityFromLastBad(
  * is instead summed into whichever requests bucket its timestamp falls within,
  * which is a no-op (and thus still correct) when the two already share a grain.
  */
-function httpRateStats(
+export function httpRateBuckets(
   errSeries: Array<{ t: string; count: number }> | null | undefined,
   requestsSeries: AppMetrics['requestsSeries'],
-  thresholdRate: number,
-): { lastBadAt: string | null; peakRate: number | null } {
-  if (!Array.isArray(errSeries) || errSeries.length === 0) return { lastBadAt: null, peakRate: null };
+): Array<{ t: string; rate: number }> {
+  if (!Array.isArray(errSeries) || errSeries.length === 0) return [];
   const buckets = (requestsSeries ?? [])
     .map((r) => ({ t: r.t, tMs: new Date(r.t).getTime(), total: r.count }))
     .sort((a, b) => a.tMs - b.tMs);
-  if (!buckets.length) return { lastBadAt: null, peakRate: null };
+  if (!buckets.length) return [];
 
   const errByBucket = new Map<string, number>();
   for (const pt of errSeries) {
@@ -191,18 +189,28 @@ function httpRateStats(
     errByBucket.set(bucket.t, (errByBucket.get(bucket.t) ?? 0) + pt.count);
   }
 
-  let peakRate = 0;
-  let lastBadAt: string | null = null;
-  let anyAligned = false;
+  const rates: Array<{ t: string; rate: number }> = [];
   for (const b of buckets) {
     const errCount = errByBucket.get(b.t);
     if (errCount == null || b.total <= 0) continue;
-    anyAligned = true;
-    const rate = errCount / b.total;
-    if (rate > peakRate) peakRate = rate;
-    if (rate > thresholdRate) lastBadAt = b.t;
+    rates.push({ t: b.t, rate: errCount / b.total });
   }
-  return { lastBadAt, peakRate: anyAligned ? peakRate : null };
+  return rates;
+}
+
+function httpRateStats(
+  errSeries: Array<{ t: string; count: number }> | null | undefined,
+  requestsSeries: AppMetrics['requestsSeries'],
+  thresholdRate: number,
+): { lastBadAt: string | null; peakRate: number | null } {
+  const rates = httpRateBuckets(errSeries, requestsSeries);
+  let peakRate = 0;
+  let lastBadAt: string | null = null;
+  for (const { t, rate } of rates) {
+    if (rate > peakRate) peakRate = rate;
+    if (rate > thresholdRate) lastBadAt = t;
+  }
+  return { lastBadAt, peakRate: rates.length ? peakRate : null };
 }
 
 function urDowntimeStats(urMonitors: UptimeRobotMonitor[] | undefined): {
@@ -373,6 +381,19 @@ export function collectRemarks(
   return remarks;
 }
 
+/** The remarks active in the trailing bucket — "right now" — as display text, minus the
+ *  kinds whose block is hidden. The remark story's opening line. */
+export function activeRemarks(
+  m: AppMetrics,
+  rangeEnd?: string,
+  visibleBlocks?: VisibleBlocks,
+  urMonitors?: UptimeRobotMonitor[],
+): string[] {
+  return collectRemarks(m, rangeEnd, urMonitors)
+    .filter(r => r.severity === 'critical' && visibleBlocks?.[KIND_TO_BLOCK[r.kind]] !== false)
+    .map(r => r.display ?? r.kind);
+}
+
 export function buildRemarks(
   m: AppMetrics,
   rangeStart?: string,
@@ -414,31 +435,4 @@ export function buildRemarks(
   }
 
   return { text: sentences.join(' '), severity: overallSeverity };
-}
-
-const SEVERITY_COLORS: Record<RemarkSeverity, string> = {
-  ok: UI.success,
-  warning: UI.warning,
-  critical: 'hsl(var(--destructive))',
-};
-
-interface AppRemarksProps {
-  metrics: AppMetrics;
-  rangeStart?: string | undefined;
-  rangeEnd?: string | undefined;
-  visibleBlocks?: VisibleBlocks;
-  urMonitors?: UptimeRobotMonitor[];
-  /** Drop the inline "Remarks:" prefix when a surrounding card header already says it. */
-  hideLabel?: boolean;
-}
-
-export function AppRemarks({ metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors, hideLabel = false }: AppRemarksProps) {
-  const { text, severity } = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
-  if (!text) return null;
-  return (
-    <div className="text-xs">
-      {!hideLabel && <span className="text-muted-foreground font-bold">Remarks: </span>}
-      <span style={{ color: SEVERITY_COLORS[severity], fontWeight: 600 }}>{text}</span>
-    </div>
-  );
 }

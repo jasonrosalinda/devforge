@@ -9,7 +9,7 @@ import { LazyMount } from '@/components/azure/lazyMount';
 import { ControlBar } from '@/components/app-health-check/controlBar';
 import { NotConfiguredBanner, StatusLegend } from '@/components/app-health-check/banners';
 import { C, granularityMs, nowDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
-import { onHealthCheckReload } from '@/lib/health-check-reload';
+import { onHealthCheckReload, type HealthCheckReload } from '@/lib/health-check-reload';
 import { AzureStatusPill } from '@/components/azure/azureStatusPill';
 
 /** One shared empty map, so a card with no dependency lookups yet keeps prop identity. */
@@ -112,17 +112,26 @@ export default function AppHealthCheckPage() {
 
   // A clicked tray alert asks for today up to now. On a freshly opened tab the request
   // waits here until the credential check and settings let a fetch through.
-  const [reloadRequested, setReloadRequested] = useState(false);
-  useEffect(() => onHealthCheckReload(() => setReloadRequested(true)), []);
+  // A Release Verdict or Home's Fleet Pulse asks for its own window (and apps) instead.
+  const [reloadRequested, setReloadRequested] = useState<HealthCheckReload | null>(null);
+  useEffect(() => onHealthCheckReload(req => {
+    if (req.appKeys?.length) setSelectedApps(req.appKeys);
+    if (req.range) setAutoReload(false); // auto reload would immediately pull the end back to now
+    setReloadRequested(req);
+  }), []);
   useEffect(() => {
+    // Waits a render after setSelectedApps, so runFetch closes over the new selection.
     if (!reloadRequested || fetchDisabled) return;
-    setReloadRequested(false);
-    const start = toDatetimeLocal(todayMidnight());
-    const end = nowDt();
+    // Keys no longer in settings are ignored, or the request would wait for them forever.
+    if (reloadRequested.appKeys?.some(k => allAppKeys.includes(k) && !effectiveSelected.includes(k))) return;
+    const { range } = reloadRequested;
+    setReloadRequested(null);
+    const start = range ? toDatetimeLocal(new Date(range.startMs)) : toDatetimeLocal(todayMidnight());
+    const end = range ? toDatetimeLocal(new Date(range.endMs)) : nowDt();
     setStartDt(start);
     setEndDt(end);
     runFetch(start, end);
-  }, [reloadRequested, fetchDisabled, runFetch]);
+  }, [reloadRequested, fetchDisabled, runFetch, effectiveSelected, allAppKeys]);
 
   // Refs so the timer reads the latest apps / start / credentials without being
   // restarted by them — only turning it on or changing the interval resets the clock.

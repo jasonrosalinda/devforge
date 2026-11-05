@@ -429,18 +429,34 @@ const handler = (_mainWindow) => {
     }
   });
 
-  ipcMain.handle('telemetry:run', async (_event, { config, appKey, target, kql, startIso, endIso }) => {
+  // Run a KQL as-is (no Claude call), guarded to read-only.
+  const runQuery = async ({ config, appKey, target, kql, startIso, endIso }, signal) => {
+    const appId = await resolveAppId(config, appKey, target);
+    const token = await getToken(AI_SCOPE);
+    const result = await runKql({ appId, token, kql: guardKql(kql), startIso, endIso, signal });
+    if (result.cancelled) return { success: false, cancelled: true };
+    return { success: true, kql, result };
+  };
+
+  ipcMain.handle('telemetry:run', async (_event, req) => {
     const run = begin();
     try {
-      const appId = await resolveAppId(config, appKey, target);
-      const token = await getToken(AI_SCOPE);
-      const result = await runKql({ appId, token, kql: guardKql(kql), startIso, endIso, signal: run.abort.signal });
-      if (result.cancelled) return { success: false, cancelled: true };
-      return { success: true, kql, result };
+      return await runQuery(req, run.abort.signal);
     } catch (e) {
       return { success: false, error: e.message };
     } finally {
       end(run);
+    }
+  });
+
+  // The background monitor's saved-query alerts. Deliberately outside begin()/end():
+  // those share one slot, so a monitor check would cancel the user's query on the Ask
+  // Telemetry page (and a user query would cancel the check). runKql's own timeout still applies.
+  ipcMain.handle('telemetry:run-monitor', async (_event, req) => {
+    try {
+      return await runQuery(req, new AbortController().signal);
+    } catch (e) {
+      return { success: false, error: e.message };
     }
   });
 

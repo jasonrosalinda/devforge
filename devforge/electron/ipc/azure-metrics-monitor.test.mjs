@@ -150,6 +150,59 @@ describe('fetchMonitorMetrics', () => {
     expect(m).toMatchObject({ label: 'medu-web', type: 'appservice', cpuUnit: '%' });
   });
 
+  it('adds the API site\'s own requests and Http5xx when the app has an App Service API', async () => {
+    const client = fakeClient(series);
+    const m = await _fetchMonitorMetrics(client, 'arm-token', credential, { ...APP, apiName: 'medu-api' }, SUB, T0, T1);
+    expect(client.queryResource.mock.calls.map(([resId, names]) => [resId.split('/').pop(), names]))
+      .toContainEqual(['medu-api', ['Requests', 'Http5xx']]);
+    expect(m.apiRequestsSeries).toEqual([{ t: T0, count: 100 }, { t: T1, count: 120 }]);
+    expect(m.apiFailedRequestsSeries).toEqual([{ t: T0, count: 5 }, { t: T1, count: 0 }]);
+  });
+
+  it('leaves the API series out with no API, or a Container App API without App Insights', async () => {
+    const none = await _fetchMonitorMetrics(fakeClient(series), 'arm-token', credential, APP, SUB, T0, T1);
+    expect(none.apiRequestsSeries).toBeNull();
+    const client = fakeClient(series);
+    const ca = await _fetchMonitorMetrics(client, 'arm-token', credential, { ...APP, apiName: 'api', apiType: 'containerapp' }, SUB, T0, T1);
+    expect(ca.apiFailedRequestsSeries).toBeNull();
+    expect(client.queryResource).toHaveBeenCalledTimes(3);
+  });
+
+  /** App Insights answers the API's per-minute query; everything else as before. */
+  const withApiInsights = () => {
+    const inner = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, init) => (String(init?.body ?? '').includes('sumif(itemCount')
+      ? { ok: true, json: async () => ({ tables: [{ rows: [[T0, 200, 4], [T1, 100, 0]] }] }) }
+      : inner(url, init)));
+  };
+
+  it('reads the API 5xx from its App Insights when it has one, ahead of Azure Monitor', async () => {
+    withApiInsights();
+    const client = fakeClient(series);
+    const m = await _fetchMonitorMetrics(client, 'arm-token', credential, { ...APP, apiName: 'medu-api', apiInsightsAppId: 'ai-api' }, SUB, T0, T1);
+    expect(m.apiRequestsSeries).toEqual([{ t: T0, count: 200 }, { t: T1, count: 100 }]);
+    expect(m.apiFailedRequestsSeries).toEqual([{ t: T0, count: 4 }, { t: T1, count: 0 }]);
+    // No Azure Monitor query for the API site.
+    expect(client.queryResource.mock.calls.some(([resId]) => resId.endsWith('/medu-api'))).toBe(false);
+    const body = JSON.parse(fetchMock.mock.calls.find(([u, i]) => String(u).includes('/apps/ai-api/') && i)[1].body);
+    expect(body.query).toContain('rc >= 500 or (success == false');
+  });
+
+  it('gives a Container App API its 5xx split too, through App Insights', async () => {
+    withApiInsights();
+    const app = { ...APP, type: 'containerapp', apiName: 'msp-api', apiType: 'containerapp', apiInsightsAppId: 'ai-api' };
+    const m = await _fetchMonitorMetrics(fakeClient(series), 'arm-token', credential, app, SUB, T0, T1);
+    expect(m.apiFailedRequestsSeries).toEqual([{ t: T0, count: 4 }, { t: T1, count: 0 }]);
+  });
+
+  it('counts only true 5xx from App Insights, never every failed request (which takes in 4xx)', async () => {
+    await _fetchMonitorMetrics(fakeClient(series), 'arm-token', credential, APP, SUB, T0, T1);
+    const [, init] = fetchMock.mock.calls.find(([u]) => String(u).includes('/apps/ai-1/query'));
+    const { query } = JSON.parse(init.body);
+    expect(query).toContain('failedCount=countif(rc >= 500 or (success == false');
+    expect(query).not.toMatch(/countif\(success\s*==\s*false\)/);
+  });
+
   it('falls back to Azure Monitor Http5xx when App Insights is not configured', async () => {
     const app = { ...APP, appInsightsAppId: undefined };
     // No App Insights component found by discovery either.

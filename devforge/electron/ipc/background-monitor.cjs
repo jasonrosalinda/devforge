@@ -19,6 +19,8 @@ let enabled = false;
 let quitting = false;
 let tray = null;
 let worker = null;
+// The balloon fallback has one click event for whichever balloon was shown last.
+let lastBalloonTarget = 'health-check';
 
 // A garbage-collected Notification loses its click handler, and one sitting in
 // Action Center can be clicked long after it left the screen, so recent ones are
@@ -33,22 +35,28 @@ function showMain(mainWindow) {
   mainWindow.focus();
 }
 
-/** A clicked alert: bring the window up on App Health Check, reloaded to now. */
-function openHealthCheck(mainWindow) {
+// Where a click lands. Main names a target, not a page title — the renderer owns the
+// page list. 'health-check' reloads it to now; 'telemetry' opens Ask Telemetry (a
+// saved-query alert).
+const OPEN_TARGETS = new Set(['health-check', 'telemetry']);
+
+/** Bring the window up on `target`. */
+function openPage(mainWindow, target = 'health-check') {
   showMain(mainWindow);
-  if (!mainWindow.isDestroyed()) mainWindow.webContents.send('monitor:open-health-check');
+  if (!mainWindow.isDestroyed()) mainWindow.webContents.send('monitor:open-page', OPEN_TARGETS.has(target) ? target : 'health-check');
 }
 
-function notify(mainWindow, title, body) {
+function notify(mainWindow, title, body, target) {
   // A tray balloon is the legacy notify-icon path, which Windows 10+ turns into a
   // toast whose click is easily lost; a Notification is a toast with its own click
   // event. The balloon stays as the fallback.
   if (!Notification.isSupported()) {
+    lastBalloonTarget = target;
     tray.displayBalloon({ title, content: body, iconType: 'warning', respectQuietTime: true });
     return;
   }
   const n = new Notification({ title, body, icon: ICON });
-  n.on('click', () => openHealthCheck(mainWindow));
+  n.on('click', () => openPage(mainWindow, target));
   heldNotifications.push(n);
   if (heldNotifications.length > MAX_HELD_NOTIFICATIONS) heldNotifications.shift();
   n.show();
@@ -88,7 +96,7 @@ function createTray(mainWindow) {
     { label: 'Quit', click: () => { quitting = true; app.quit(); } },
   ]));
   tray.on('click', () => showMain(mainWindow));
-  tray.on('balloon-click', () => openHealthCheck(mainWindow));
+  tray.on('balloon-click', () => openPage(mainWindow, lastBalloonTarget));
 }
 
 function start(mainWindow) {
@@ -110,9 +118,9 @@ module.exports = function registerBackgroundMonitor(mainWindow) {
     else stop();
   });
 
-  ipcMain.handle('monitor:alert', (_event, { title, body }) => {
+  ipcMain.handle('monitor:alert', (_event, { title, body, open }) => {
     if (!tray) return;
-    notify(mainWindow, title, body);
+    notify(mainWindow, title, body, OPEN_TARGETS.has(open) ? open : 'health-check');
     // Tooltips are capped at 127 characters on Windows.
     tray.setToolTip(`devForge — ${title}`.slice(0, 127));
     if (!mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isFocused()) mainWindow.flashFrame(true);

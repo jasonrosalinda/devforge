@@ -15,11 +15,16 @@ import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
-import { AppRemarks, buildRemarks } from './azureAppRemarks';
+import { activeRemarks, buildRemarks } from './azureAppRemarks';
+import { buildRemarkStory } from './remarkStory';
+import { RemarkStoryView } from './remarkStoryView';
 import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows } from './restartSection';
 import { CrashMonitoringRows } from './crashMonitoringSection';
+import { IncidentTimeline, buildTimelineLanes } from './incidentTimeline';
+import { ReleaseVerdictDialog, type ReleaseVerdictTarget } from './releaseVerdictDialog';
+import { FiveXxRequestsDialog, type FiveXxTarget } from './fiveXxRequestsDialog';
 import { ReleaseMarkersContext, LastReleaseLabel, SiteReleaseLabel, type ReleaseMarkerSet } from './releaseMarkers';
 import { PerformanceRows } from './performanceSection';
 import { perfSummary, hasPerfData } from './performance';
@@ -973,13 +978,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   // Whole-card collapse. Open by default — a single app should still land fully
   // expanded; this exists so a multi-app fetch can be folded down to one line each.
   const [cardCollapsed, setCardCollapsed] = useState(false);
+  const [verdictTarget, setVerdictTarget] = useState<ReleaseVerdictTarget | null>(null);
+  const [fiveXxTarget, setFiveXxTarget] = useState<FiveXxTarget | null>(null);
   const [rcaSectionOpen, setRcaSectionOpen] = useState(false);
   const [rcaDraft, setRcaDraft] = useState('');
   const [visibleBlocks, setVisibleBlocks] = useState({
     remarks: true, cpu: true, memory: true, database: true, users: true, pageload: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
     restarts: true, crashes: true, performance: true, anomaly: true,
-    frontend: true, api: true,
+    frontend: true, api: true, timeline: true,
   });
   const toggleBlock = (key: keyof typeof visibleBlocks) =>
     setVisibleBlocks(prev => ({ ...prev, [key]: !prev[key] }));
@@ -1244,8 +1251,13 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [aiRemark, setAiRemark] = useState<{ status: 'healthy' | 'warning' | 'critical'; remarks: string } | null>(null);
   const [aiRemarkLoading, setAiRemarkLoading] = useState(false);
 
+  // Remarks read the main metrics, the App Insights details (response times) and the
+  // UptimeRobot logs. Built from a half-loaded card they read "No slow response" until
+  // the details land and flip, so hold them until all three are in.
+  const remarksReady = !loading && !detailsLoading && !urLoading;
+
   const generateAiRemarks = async () => {
-    if (aiRemarkLoading) return;
+    if (aiRemarkLoading || !remarksReady) return;
     setAiRemarkLoading(true);
     try {
       const downLogs = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1));
@@ -1578,6 +1590,23 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     hasApi: !!releaseApiName,
   }), [releases, apiReleases, releaseApiName]);
 
+  // Same window the cards' own downtime lookups use: the committed range, else the last 24h.
+  const timelineStartMs = rangeStart ? Date.parse(rangeStart) : Date.now() - 24 * 3600 * 1000;
+  const timelineEndMs = rangeEnd ? Date.parse(rangeEnd) : Date.now();
+  // Skipped while both blocks that read it are hidden: it re-runs anomaly detection.
+  const timelineLanes = useMemo(() => (visibleBlocks.timeline || visibleBlocks.remarks ? buildTimelineLanes({
+    startMs: timelineStartMs, endMs: timelineEndMs, metrics, hasApi: !!releaseApiName,
+    releases, apiReleases, restarts, apiRestarts, crashes, apiCrashes, urMonitors,
+  }) : []),
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the ms values derive from rangeStart/rangeEnd
+  [visibleBlocks.timeline, visibleBlocks.remarks, rangeStart, rangeEnd, metrics, releaseApiName, releases, apiReleases, restarts, apiRestarts, crashes, apiCrashes, urMonitors]);
+  // The remark story reads those same lanes, plus what is active in the trailing bucket.
+  const remarkStory = useMemo(() => buildRemarkStory({
+    lanes: timelineLanes,
+    nowActive: activeRemarks(metrics, rangeEnd, visibleBlocks, urMonitors),
+    hasApi: !!releaseApiName,
+  }), [timelineLanes, metrics, rangeEnd, visibleBlocks, urMonitors, releaseApiName]);
+
   if (loading) {
     return (
       <Card className="overflow-hidden">
@@ -1869,6 +1898,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 { key: 'restarts',     label: 'Restarts' },
                 { key: 'crashes',      label: 'Crash Monitoring' },
                 { key: 'anomaly',      label: 'Anomaly Detection' },
+                { key: 'timeline',     label: 'Incident Timeline' },
                 { key: 'frontend',     label: 'Frontend' },
                 { key: 'api',          label: 'API' },
               ] as const).map(({ key, label }) => (
@@ -2470,7 +2500,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </span>
-                    <SiteReleaseLabel loading={releasesLoading} result={releases} />
+                    <SiteReleaseLabel loading={releasesLoading} result={releases} onClick={event => setVerdictTarget({ site: 'fe', event })} />
                   </div>
                 </td>
               </tr>
@@ -2640,7 +2670,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </span>
-                    <SiteReleaseLabel loading={releasesLoading} result={apiReleases} />
+                    <SiteReleaseLabel loading={releasesLoading} result={apiReleases} onClick={event => setVerdictTarget({ site: 'api', event })} />
                   </div>
                 </td>
               </tr>
@@ -2774,6 +2804,19 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
 
       </div>
 
+      {visibleBlocks.timeline && (
+        <div className="px-4 pb-3" data-timeline>
+          <div className="rounded-md border border-border overflow-hidden">
+            <div className="px-3 py-1.5 text-xs font-bold text-muted-foreground">Incident Timeline</div>
+            <div className="border-t border-border px-3 py-2">
+              {remarksReady
+                ? <IncidentTimeline lanes={timelineLanes} startMs={timelineStartMs} endMs={timelineEndMs} onReleaseClick={(site, event) => setVerdictTarget({ site, event })} onBurstClick={(startMs, endMs, site) => setFiveXxTarget({ startMs, endMs, site })} />
+                : <div className="text-xs text-muted-foreground">Waiting for all data to load…</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
       {visibleBlocks.remarks && (
         <div className="px-4 pb-3" data-remarks>
           {/* Same bordered card as the DB / FE / API / RCA blocks: the header carries
@@ -2786,9 +2829,9 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               <span>Remarks{aiRemark ? ' (AI)' : ''}</span>
               <button
                 onClick={() => generateAiRemarks()}
-                disabled={aiRemarkLoading}
+                disabled={aiRemarkLoading || !remarksReady}
                 className="ml-auto p-0.5 rounded hover:bg-muted flex-shrink-0 disabled:opacity-50"
-                title={aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
+                title={!remarksReady ? 'Available once all data has loaded' : aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
                 data-html2canvas-ignore="true"
               >
                 <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-info' : 'text-muted-foreground'}`} />
@@ -2799,8 +2842,15 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 <div className="text-xs" style={{ color: AI_STATUS_COLORS[aiRemark.status], fontWeight: 600 }}>
                   {aiRemark.remarks}
                 </div>
+              ) : !remarksReady ? (
+                <div className="text-xs text-muted-foreground">Waiting for all data to load…</div>
               ) : (
-                <AppRemarks metrics={metrics} rangeStart={rangeStart} rangeEnd={rangeEnd} visibleBlocks={visibleBlocks} urMonitors={urMonitors} hideLabel />
+                <RemarkStoryView
+                  lines={remarkStory}
+                  onAction={a => (a.kind === '5xx'
+                    ? setFiveXxTarget({ startMs: a.startMs, endMs: a.endMs, site: a.site })
+                    : setVerdictTarget({ site: a.site, event: a.event }))}
+                />
               )}
             </div>
           </div>
@@ -2844,6 +2894,25 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       onCopyTeams={copyRcaForTeams}
       onCopySummary={copySummaryForTeams}
       onGenerate={handleRunRca}
+    />
+
+    <ReleaseVerdictDialog
+      target={verdictTarget}
+      onClose={() => setVerdictTarget(null)}
+      appKey={appKey}
+      appName={platformName}
+      hasApi={!!releaseApiName}
+      config={azureSettings}
+    />
+
+    <FiveXxRequestsDialog
+      key={fiveXxTarget ? `${fiveXxTarget.startMs}-${fiveXxTarget.site ?? 'fe'}` : 'closed'}
+      target={fiveXxTarget}
+      onClose={() => setFiveXxTarget(null)}
+      appKey={appKey}
+      appName={platformName}
+      hasApi={!!releaseApiName}
+      config={azureSettings}
     />
 
     </ReleaseMarkersContext.Provider>

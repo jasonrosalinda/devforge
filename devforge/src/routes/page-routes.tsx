@@ -14,6 +14,7 @@ import { TOOLBOX_TOOLS } from "@/components/toolbox/toolbox-registry";
 
 export const HOME_PAGE = "Home";
 export const HEALTH_CHECK_PAGE = "App Health Check";
+export const TELEMETRY_PAGE = "Ask Telemetry";
 
 /** Sidebar section order. */
 export const PAGE_GROUPS: PageGroup[] = ["Monitoring", "Web quality", "Release", "Utilities"];
@@ -34,7 +35,7 @@ export const pages: Page[] = [
         group: "Monitoring"
     },
     {
-        title: "Ask Telemetry",
+        title: TELEMETRY_PAGE,
         url: "#",
         icon: Telescope,
         component: TelemetryPage,
@@ -99,7 +100,7 @@ export function findPage(pageTitle: string): Page | undefined {
     return pages.find((page) => page.title === pageTitle);
 }
 
-/** Title/keyword match used by the sidebar search and the home cards. */
+/** Title/keyword match used by the sidebar search. */
 export function matchesPageSearch(page: Page, query: string): boolean {
     const q = query.trim().toLowerCase();
     if (!q) return true;
