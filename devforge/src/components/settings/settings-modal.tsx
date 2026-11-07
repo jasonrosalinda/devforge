@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Trash2, Plus, Pencil, Check, X } from 'lucide-react';
+import { Trash2, Plus, Pencil, Check, X, FolderOpen } from 'lucide-react';
+import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
@@ -29,7 +30,13 @@ const EMPTY_APP: AzureAppEntry = {
   name: '',
 };
 
-export type SettingsTab = 'azure' | 'apikeys' | 'atlassian' | 'monitor' | 'appearance' | 'releases';
+type SourceKey = 'sourcePath' | 'apiSourcePath';
+const SOURCE_FIELDS: { key: SourceKey; label: string }[] = [
+  { key: 'sourcePath', label: 'App repository' },
+  { key: 'apiSourcePath', label: 'API repository' },
+];
+
+export type SettingsTab ='azure' | 'apikeys' | 'atlassian' | 'monitor' | 'appearance' | 'releases';
 
 const THEME_OPTIONS = [
   { value: 'light', label: 'Light', Icon: Sun },
@@ -129,6 +136,21 @@ const [newMonitorId, setNewMonitorId] = useState('');
     setEditingIndex(null);
     setNewPlatformUrl('');
     setNewMonitorId('');
+  }
+
+  function setSourcePath(key: SourceKey, value: string) {
+    setEditingApp(a => {
+      if (!a) return null;
+      const n = { ...a };
+      if (value.trim()) n[key] = value.trim(); else delete n[key];
+      return n;
+    });
+  }
+
+  async function browseSourcePath(key: SourceKey) {
+    const res = await window.electronAPI.appInvestigation.pickRepo();
+    if (res.success && res.path) setSourcePath(key, res.path);
+    else if (!res.canceled && res.error) toast.error('Not a repository', { description: res.error });
   }
 
   function removeApp(idx: number) {
@@ -379,6 +401,34 @@ const [newMonitorId, setNewMonitorId] = useState('');
                     />
                     <span className="text-[10px] text-muted-foreground">Resource → Properties → Resource ID. Edge logs require diagnostic settings sending to the workspace above.</span>
                   </div>
+                </div>
+
+                <Separator />
+
+                {/* Source code — App Investigation reads these repositories, never writes */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Source code <span className="normal-case font-normal">(optional, for App Investigation)</span></span>
+                  {SOURCE_FIELDS.map(({ key, label }) => (
+                    <div key={key} className="flex flex-col gap-1">
+                      <Label className="text-xs">{label}</Label>
+                      <div className="flex gap-1">
+                        <Input
+                          value={editingApp[key] ?? ''}
+                          onChange={e => setSourcePath(key, e.target.value)}
+                          placeholder="C:\GitProjects\my-app"
+                          className="text-xs font-mono h-7"
+                        />
+                        {isElectron() && (
+                          <Hint label="Pick the local git repository">
+                            <Button size="sm" variant="outline" className="h-7 text-xs px-2 flex-shrink-0 gap-1" onClick={() => void browseSourcePath(key)}>
+                              <FolderOpen className="w-3 h-3" /> Browse
+                            </Button>
+                          </Hint>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <span className="text-[10px] text-muted-foreground">Local clone of each repository. App Investigation lets Claude read it (never write) to tie an incident to code and commits.</span>
                 </div>
 
                 <Separator />

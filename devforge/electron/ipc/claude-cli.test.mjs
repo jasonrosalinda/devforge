@@ -7,6 +7,8 @@ const incidentReport = require('./incident-report.cjs');
 const unusedAssets = require('./unused-assets.cjs');
 const pagespeed = require('./pagespeed-insight.cjs');
 const telemetry = require('./telemetry-ask.cjs');
+const investigation = require('./app-investigation.cjs').__test__;
+const { GIT_READ_AGENT_FLAGS, FILE_READ_AGENT_FLAGS } = require('./claude-cli.cjs');
 
 const LEAN = ['--tools ""', '--safe-mode', '--strict-mcp-config', '--no-session-persistence', '--permission-prompts none'];
 
@@ -36,6 +38,7 @@ describe('no-tool Claude commands', () => {
     'Unused Assets review': unusedAssets._reviewCommand(),
     'PageSpeed analysis': `claude -p "x" ${pagespeed._ANALYSIS_FLAGS.join(' ')}`,
     'Ask Telemetry': `claude -p "x" ${telemetry.CLAUDE_FLAGS.join(' ')}`,
+    'App Investigation interpreter': `claude -p "x" ${investigation.INTERPRET_FLAGS.join(' ')}`,
   };
 
   it.each(Object.entries(commands))('%s runs lean', (_name, command) => {
@@ -52,5 +55,32 @@ describe('no-tool Claude commands', () => {
     expect(commands['AI remarks']).toContain('--model sonnet');
     expect(commands['AI remarks']).toContain('health analyst');
     expect(commands['Unused Assets review']).toContain('--model sonnet');
+  });
+});
+
+// Runs that use tools inside a user's repository cannot be lean, so they are held to
+// a different bar: read-only, dontAsk, no Azure CLI, and still never API billing.
+describe('agentic Claude commands', () => {
+  const commands = {
+    'PageSpeed attribution': GIT_READ_AGENT_FLAGS.join(' '),
+    'App Investigation': FILE_READ_AGENT_FLAGS.join(' '),
+  };
+
+  it.each(Object.entries(commands))('%s is read-only', (_name, flags) => {
+    for (const f of ['--permission-mode dontAsk', '--permission-prompts none', '--safe-mode', '--strict-mcp-config', '--no-session-persistence']) {
+      expect(flags).toContain(f);
+    }
+    const deny = /--disallowedTools "([^"]+)"/.exec(flags)[1].split(',');
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'PowerShell', 'WebFetch']) expect(deny).toContain(tool);
+    expect(flags).not.toMatch(/Bash\(az/);
+  });
+
+  it.each(Object.entries(commands))('%s never uses --bare or an API key', (_name, flags) => {
+    expect(flags).not.toMatch(/--bare|api-key|ANTHROPIC/i);
+  });
+
+  it('gives App Investigation no shell at all', () => {
+    expect(commands['App Investigation']).toContain('--allowedTools "Read,Glob,Grep"');
+    expect(/--disallowedTools "([^"]+)"/.exec(commands['App Investigation'])[1].split(',')).toContain('Bash');
   });
 });

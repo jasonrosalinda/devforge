@@ -339,7 +339,7 @@ export default function TelemetryAsk() {
     );
 }
 
-function Segmented({
+export function Segmented({
     value, onChange, options,
 }: {
     value: string;

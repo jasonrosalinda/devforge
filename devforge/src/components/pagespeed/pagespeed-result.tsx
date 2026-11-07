@@ -2285,22 +2285,6 @@ export const PageSpeedResults = React.forwardRef<PageSpeedResultsHandle, PageSpe
                         </TableBody>
                     </Table>
                 </div>
-                <style>{`
-                    .ps-analysis-content { font-size: 12px; line-height: 1.6; color: hsl(var(--foreground)); }
-                    .ps-analysis-content > *:first-child { margin-top: 0; }
-                    .ps-analysis-content h1 { font-size: 1.1rem; font-weight: 700; margin: 0 0 .5rem; }
-                    .ps-analysis-content h2 { font-size: 1rem; font-weight: 700; margin: 1rem 0 .4rem; padding-bottom: .2rem; border-bottom: 1px solid hsl(var(--border)); }
-                    .ps-analysis-content h3 { font-size: .9rem; font-weight: 600; margin: .8rem 0 .3rem; }
-                    .ps-analysis-content p { margin: .4rem 0; }
-                    .ps-analysis-content ul, .ps-analysis-content ol { margin: .4rem 0; padding-left: 1.25rem; }
-                    .ps-analysis-content li { margin: .15rem 0; }
-                    .ps-analysis-content code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .85em; background: hsl(var(--muted)); padding: .1em .35em; border-radius: 4px; }
-                    .ps-analysis-content table { width: 100%; border-collapse: collapse; margin: .4rem 0; font-size: 11px; }
-                    .ps-analysis-content th, .ps-analysis-content td { border: 1px solid hsl(var(--border)); padding: 4px 7px; text-align: left; vertical-align: top; }
-                    .ps-analysis-content th { background: hsl(var(--muted)); font-weight: 600; }
-                    .ps-analysis-content a { color: hsl(var(--primary)); }
-                    .ps-analysis-content blockquote { border-left: 3px solid hsl(var(--border)); padding-left: .6rem; color: hsl(var(--muted-foreground)); margin: .4rem 0; }
-                `}</style>
             </CardContent>
         </Card>
     );

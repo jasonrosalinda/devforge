@@ -3,12 +3,10 @@ import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSea
 import { marked } from 'marked';
 import { Hint } from '@/components/ui/hint';
 import { toast } from 'sonner';
-import { RcaDialog, type RcaStatus } from './rcaDialog';
+import { RcaDialog } from './rcaDialog';
 import { RcaSection } from './rcaSection';
-import {
-  buildRcaPrintHtml, buildRcaWordHtml, formatSgt, formatSgtRange, splitQuickSummary,
-  buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
-} from './rcaHtml';
+import { formatSgtRange } from './rcaHtml';
+import { useRcaReport } from '@/hooks/useRcaReport';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
 import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ReleaseResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
@@ -981,7 +979,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [verdictTarget, setVerdictTarget] = useState<ReleaseVerdictTarget | null>(null);
   const [fiveXxTarget, setFiveXxTarget] = useState<FiveXxTarget | null>(null);
   const [rcaSectionOpen, setRcaSectionOpen] = useState(false);
-  const [rcaDraft, setRcaDraft] = useState('');
   const [visibleBlocks, setVisibleBlocks] = useState({
     remarks: true, cpu: true, memory: true, database: true, users: true, pageload: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
@@ -996,10 +993,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [incidentReportLoading, setIncidentReportLoading] = useState(false);
   const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
   const [rcaOpen, setRcaOpen] = useState(false);
-  const [rcaStatus, setRcaStatus] = useState<RcaStatus>('idle');
-  const [rcaText, setRcaText] = useState('');
-  const [rcaError, setRcaError] = useState<string | null>(null);
-  const [rcaStages, setRcaStages] = useState<string[]>([]);
 
   useEffect(() => {
     setUrExpanded(false);
@@ -1075,6 +1068,10 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     }
   }, [buildIncidentPayload]);
 
+  // The RCA run and its exports live in useRcaReport, shared with App Investigation.
+  const rca = useRcaReport({ appKey, getPayload: buildIncidentPayload });
+  const { status: rcaStatus, reset: resetRca } = rca;
+
   // Opens the dialog on its input step — the analysis only starts when the user
   // presses Generate, so they can supply their own findings first.
   const openRcaDialog = useCallback(() => {
@@ -1082,145 +1079,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     // A run keeps going when the dialog is dismissed — reopening shows its progress
     // rather than resetting state out from under the in-flight analysis.
     if (rcaStatus === 'running') return;
-    setRcaStatus('idle');
-    setRcaText('');
-    setRcaError(null);
-    setRcaStages([]);
-  }, [rcaStatus]);
-
-  const handleRunRca = useCallback(async (
-    investigationNotes: string,
-    // The dialog keeps the engineering report it has always produced; the card's
-    // RCA section asks for the seven-section business layout it renders as a form.
-    format: 'engineering' | 'business' = 'engineering',
-    // Facts the card already measured or has configured, so the model reproduces
-    // them instead of deriving its own (a wider window, a guessed platform name).
-    given: {
-      incidentName?: string;
-      incidentPeriod?: string;
-      servicesAffected?: string;
-      reportTitle?: string;
-    } = {},
-  ) => {
-    setRcaStatus('running');
-    setRcaText('');
-    setRcaError(null);
-    setRcaStages([]);
-    const offChunk = window.electronAPI.incidentReport.onRcaChunk(({ appKey: k, chunk }) => {
-      if (k === appKey) setRcaText(prev => prev + chunk);
-    });
-    const offProgress = window.electronAPI.incidentReport.onRcaProgress(({ appKey: k, stage, reset }) => {
-      if (k !== appKey) return;
-      setRcaStages(prev => [...prev, stage]);
-      // Model fallback restarts the stream — drop the aborted partial so the two
-      // attempts don't render as one stitched-together analysis.
-      if (reset) setRcaText('');
-    });
-    try {
-      const result = await window.electronAPI.incidentReport.rca({
-        ...buildIncidentPayload(), investigationNotes, format, ...given,
-      });
-      if (result.success && result.rca) {
-        setRcaText(result.rca);
-        setRcaStatus('done');
-      } else {
-        setRcaError(result.error ?? 'Unknown error');
-        setRcaStatus('error');
-      }
-    } catch (e: any) {
-      setRcaError(e?.message ?? 'Unknown error');
-      setRcaStatus('error');
-    } finally {
-      offChunk();
-      offProgress();
-    }
-  }, [appKey, buildIncidentPayload]);
-
-  // The card's RCA section is an editable form; its composed markdown is what the
-  // exports and the Teams copy must carry, so edits are never silently dropped.
-  const rcaOutput = rcaDraft.trim() ? rcaDraft : rcaText;
-
-  const exportRca = useCallback(async () => {
-    try {
-      const { startMs, endMs } = buildIncidentPayload();
-      const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown: rcaOutput });
-      if (!result.success) throw new Error(result.error ?? 'Save failed');
-      await navigator.clipboard.writeText(rcaOutput);
-      toast.success('RCA saved & markdown copied');
-    } catch (e: any) {
-      toast.error('Export failed', { description: e?.message });
-    }
-  }, [appKey, buildIncidentPayload, rcaOutput]);
-
-  const exportRcaPdf = useCallback(async () => {
-    try {
-      const { startMs, endMs } = buildIncidentPayload();
-      // HTML is built here rather than in main: `marked` and the print stylesheet
-      // both live on the renderer side, and this keeps the printed report in step
-      // with what the dialog shows.
-      const html = buildRcaPrintHtml(rcaOutput, {
-        appName: appKey,
-        window: formatSgtRange(startMs, endMs),
-        generated: formatSgt(Date.now()),
-      });
-      const result = await window.electronAPI.incidentReport.exportRcaPdf({ appName: appKey, startMs, endMs, html });
-      if (!result.success) throw new Error(result.error ?? 'PDF export failed');
-      toast.success('RCA PDF saved');
-    } catch (e: any) {
-      toast.error('PDF export failed', { description: e?.message });
-    }
-  }, [appKey, buildIncidentPayload, rcaOutput]);
-
-  const exportRcaWord = useCallback(async () => {
-    try {
-      const { startMs, endMs } = buildIncidentPayload();
-      const html = buildRcaWordHtml(rcaOutput, {
-        appName: appKey,
-        window: formatSgtRange(startMs, endMs),
-        generated: formatSgt(Date.now()),
-      });
-      const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html });
-      if (!result.success) throw new Error(result.error ?? 'Word export failed');
-      toast.success('RCA Word document saved');
-    } catch (e: any) {
-      toast.error('Word export failed', { description: e?.message });
-    }
-  }, [appKey, buildIncidentPayload, rcaOutput]);
-
-  // Just the plain-English summary, formatted for a Teams chat — the part that
-  // gets shared with non-engineers, without the full report attached.
-  const copySummaryForTeams = useCallback(async () => {
-    try {
-      const { summary } = splitQuickSummary(rcaOutput);
-      if (!summary) throw new Error('This report has no Quick Summary section.');
-      const { startMs, endMs } = buildIncidentPayload();
-      const meta = { appName: appKey, window: formatSgtRange(startMs, endMs) };
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/html': new Blob([buildQuickSummaryTeamsHtml(summary, meta)], { type: 'text/html' }),
-          'text/plain': new Blob([buildQuickSummaryTeamsText(summary, meta)], { type: 'text/plain' }),
-        }),
-      ]);
-      toast.success('Quick Summary copied for Teams');
-    } catch (e: any) {
-      toast.error('Copy failed', { description: e?.message });
-    }
-  }, [appKey, buildIncidentPayload, rcaOutput]);
-
-  const copyRcaForTeams = useCallback(async () => {
-    try {
-      const htmlBody = marked.parse(rcaOutput, { async: false }) as string;
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/html':  new Blob([htmlBody], { type: 'text/html' }),
-          'text/plain': new Blob([rcaOutput], { type: 'text/plain' }),
-        }),
-      ]);
-      toast.success('Copied for Teams');
-    } catch (e: any) {
-      toast.error('Copy failed', { description: e?.message });
-    }
-  }, [rcaOutput]);
+    resetRca();
+  }, [rcaStatus, resetRca]);
 
   // Eagerly fetch details when the request insights are available (top dependency % needs them)
   useEffect(() => {
@@ -2861,19 +2721,19 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         open={rcaSectionOpen}
         onToggle={() => setRcaSectionOpen(v => !v)}
         status={rcaStatus}
-        markdown={rcaText}
-        stages={rcaStages}
-        error={rcaError}
-        onGenerate={(notes, given) => void handleRunRca(notes, 'business', given)}
-        onDraftChange={setRcaDraft}
+        markdown={rca.text}
+        stages={rca.stages}
+        error={rca.error}
+        onGenerate={(notes, given) => void rca.run(notes, 'business', given)}
+        onDraftChange={rca.setDraft}
         defaultTitle={`${platformName} Downtime`}
         defaultServices={(platformUrls.length ? platformUrls : [platformName, appConfig?.apiName].filter(Boolean)).join(', ')}
         period={incidentPeriod}
         periodSource={urDowntimeIntervals.length > 0 ? 'uptimerobot' : downtimeIntervals.length > 0 ? 'azure' : 'none'}
-        onExportPdf={exportRcaPdf}
-        onExportWord={exportRcaWord}
-        onCopyTeams={copyRcaForTeams}
-        onCopySummary={copySummaryForTeams}
+        onExportPdf={() => void rca.exportPdf()}
+        onExportWord={() => void rca.exportWord()}
+        onCopyTeams={() => void rca.copyTeams()}
+        onCopySummary={() => void rca.copySummary()}
       />
       </>
       )}
@@ -2886,14 +2746,14 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       onOpenChange={setRcaOpen}
       title={platformName}
       status={rcaStatus}
-      markdown={rcaText}
-      stages={rcaStages}
-      error={rcaError}
-      onExport={exportRca}
-      onExportPdf={exportRcaPdf}
-      onCopyTeams={copyRcaForTeams}
-      onCopySummary={copySummaryForTeams}
-      onGenerate={handleRunRca}
+      markdown={rca.text}
+      stages={rca.stages}
+      error={rca.error}
+      onExport={() => void rca.exportMd()}
+      onExportPdf={() => void rca.exportPdf()}
+      onCopyTeams={() => void rca.copyTeams()}
+      onCopySummary={() => void rca.copySummary()}
+      onGenerate={(notes) => void rca.run(notes)}
     />
 
     <ReleaseVerdictDialog

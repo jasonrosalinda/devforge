@@ -1,4 +1,4 @@
-// Shared Confluence access UI for the runbook pages: the token / session pills
+// Shared Confluence access UI for the runbook pages: the session pill
 // in the page header, and the banner shown until credentials exist.
 
 import { Loader2, LogIn, RefreshCw, Settings as SettingsIcon } from 'lucide-react';
@@ -8,12 +8,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useSettingsUi } from '@/context/settings-ui-context';
 import type { ConfluenceConnection } from '@/hooks/useConfluenceConnection';
-import { TokenStatusPill } from './tokenStatusPill';
 
 export function ConfluenceConnectionPills({ conn }: { conn: ConfluenceConnection }) {
   return (
     <div className="flex items-center gap-2">
-      <TokenStatusPill status={conn.tokenStatus} onRecheck={() => void conn.checkToken()} />
       {conn.connecting ? (
         <span className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 animate-spin" />

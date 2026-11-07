@@ -1,5 +1,5 @@
 import type { Page, PageGroup } from "@/types/pages.types";
-import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, Telescope } from "lucide-react";
+import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, SearchCode, Telescope } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -7,6 +7,7 @@ import PageSpeedResultPage from "@/pages/pagespeedResultPage";
 import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import TelemetryPage from "@/pages/telemetryPage";
+import AppInvestigationPage from "@/pages/appInvestigationPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
 import ReleaseRunbookPage from "@/pages/releaseRunbookPage";
 import { createToolboxToolPage } from "@/pages/toolboxToolPage";
@@ -15,6 +16,7 @@ import { TOOLBOX_TOOLS } from "@/components/toolbox/toolbox-registry";
 export const HOME_PAGE = "Home";
 export const HEALTH_CHECK_PAGE = "App Health Check";
 export const TELEMETRY_PAGE = "Ask Telemetry";
+export const APP_INVESTIGATION_PAGE = "App Investigation";
 
 /** Sidebar section order. */
 export const PAGE_GROUPS: PageGroup[] = ["Monitoring", "Web quality", "Release", "Utilities"];
@@ -42,6 +44,15 @@ export const pages: Page[] = [
         description: "Ask about App Insights in plain English; Claude writes the KQL, devForge charts the answer",
         group: "Monitoring",
         keywords: ["kql", "app insights", "application insights", "query", "logs", "ai", "claude"]
+    },
+    {
+        title: APP_INVESTIGATION_PAGE,
+        url: "#",
+        icon: SearchCode,
+        component: AppInvestigationPage,
+        description: "Describe an incident; Claude reads the app's Azure telemetry and source code (read-only) and reports the root cause, with an RCA",
+        group: "Monitoring",
+        keywords: ["incident", "rca", "root cause", "investigate", "source", "code", "claude", "azure", "outage"]
     },
     {
         title: "PageSpeed",

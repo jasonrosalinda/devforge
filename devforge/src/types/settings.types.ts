@@ -31,6 +31,9 @@ export interface AzureAppEntry {
   appGatewayResourceId?: string;      // /subscriptions/.../providers/Microsoft.Network/applicationGateways/<name>
   frontDoorResourceId?: string;       // AFD (Microsoft.Cdn/profiles) or classic frontDoors resource id
   loadBalancerResourceId?: string;    // /subscriptions/.../providers/Microsoft.Network/loadBalancers/<name>
+  // Source code (App Investigation reads it, never writes)
+  sourcePath?: string;      // local git repository of the app
+  apiSourcePath?: string;   // local git repository of the API, when separate
 }
 
 /** Used wherever an app has no explicit `sloMs`. One second is the common
