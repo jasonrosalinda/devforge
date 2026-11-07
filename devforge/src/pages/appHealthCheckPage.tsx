@@ -10,14 +10,13 @@ import { ControlBar } from '@/components/app-health-check/controlBar';
 import { NotConfiguredBanner, StatusLegend } from '@/components/app-health-check/banners';
 import { C, granularityMs, nowDt, toDatetimeLocal, todayMidnight } from '@/components/app-health-check/styles';
 import { onHealthCheckReload, type HealthCheckReload } from '@/lib/health-check-reload';
-import { AzureStatusPill } from '@/components/azure/azureStatusPill';
 
 /** One shared empty map, so a card with no dependency lookups yet keeps prop identity. */
 const EMPTY_DEPS: Record<string, EndpointDepsState> = {};
 
 export default function AppHealthCheckPage() {
   const { settings, loading: settingsLoading } = useSettings();
-  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, releasesLoading, releases, endpointDeps, fetchEndpointDeps, recheckCredential } = useAzureMetrics();
+  const { credStatus, credError, metrics, loading, detailsLoading, detailsLoaded, fetchMetrics, fetchAppDetails, snatLoading, fetchAppSnat, restartsLoading, restarts, fetchAppRestarts, crashesLoading, crashes, fetchAppCrashes, releasesLoading, releases, endpointDeps, fetchEndpointDeps } = useAzureMetrics();
   const allAppKeys = settings.azure.apps.map(a => a.name);
   // The picker reads by platform name; the app key stays the identity used to fetch.
   const appLabels = Object.fromEntries(
@@ -158,7 +157,6 @@ export default function AppHealthCheckPage() {
         icon={Activity}
         title="App Health Check"
         subtitle="Pull Azure App Service metrics for selected apps and time range — CPU, memory, requests, and downtime detection."
-        actions={<AzureStatusPill credStatus={credStatus} credError={credError} onRecheck={() => void recheckCredential()} />}
       />
 
       {notConfigured && <NotConfiguredBanner />}

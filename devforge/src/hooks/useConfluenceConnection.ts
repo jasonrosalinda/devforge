@@ -17,12 +17,17 @@ export function useConfluenceConnection({ confluenceBaseUrl, email, apiToken }: 
   const [tokenStatus, setTokenStatus] = useState<TokenStatus>({ state: 'checking' });
 
   // Check Confluence session status on mount / when base URL changes.
-  useEffect(() => {
+  const checkSession = useCallback(async () => {
     if (!confluenceBaseUrl) { setConnected(false); return; }
-    window.electronAPI?.confluence?.authStatus({ baseUrl: confluenceBaseUrl })
-      .then(s => setConnected(!!s?.connected))
-      .catch(() => setConnected(false));
+    try {
+      const s = await window.electronAPI?.confluence?.authStatus({ baseUrl: confluenceBaseUrl });
+      setConnected(!!s?.connected);
+    } catch {
+      setConnected(false);
+    }
   }, [confluenceBaseUrl]);
+
+  useEffect(() => { void checkSession(); }, [checkSession]);
 
   // Validate the API token itself (separate from the browser session — the page
   // fetch uses the token, so an expired one fails every load).
@@ -64,6 +69,7 @@ export function useConfluenceConnection({ confluenceBaseUrl, email, apiToken }: 
     // may work where the probe didn't. A rejected token never will.
     tokenDead: tokenBlocked(tokenStatus.state) && tokenStatus.state !== 'error',
     checkToken,
+    checkSession,
     connect,
     disconnect,
   };

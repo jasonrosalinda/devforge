@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { marked } from 'marked';
+import { renderSafeMarkdown } from '@/lib/safe-markdown';
 import { Loader2, Download, Share2, RotateCw, AlertTriangle, ScanSearch, Check, FileText, Sparkles } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -41,8 +41,8 @@ export function RcaDialog({
   // Lift the plain-English summary out of the body so it renders as a callout —
   // it is the part non-engineers read, and it is easy to miss inline.
   const { summary, body } = status === 'done' ? splitQuickSummary(markdown) : { summary: '', body: '' };
-  const html = status === 'done' ? (marked.parse(body, { async: false }) as string) : '';
-  const summaryHtml = summary ? (marked.parse(summary, { async: false }) as string) : '';
+  const html = status === 'done' ? renderSafeMarkdown(body) : '';
+  const summaryHtml = summary ? renderSafeMarkdown(summary) : '';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

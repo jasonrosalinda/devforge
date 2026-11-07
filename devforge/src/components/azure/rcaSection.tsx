@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { marked } from 'marked';
+import { renderSafeMarkdown } from '@/lib/safe-markdown';
 import { Loader2, Share2, AlertTriangle, ScanSearch, Check, FileText, FileType2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
@@ -76,7 +76,7 @@ export function RcaSection({
     setTrackerFields(prev => ({ ...prev, [key]: value }));
 
   const { summary } = status === 'done' ? splitQuickSummary(markdown) : { summary: '' };
-  const summaryHtml = summary ? (marked.parse(summary, { async: false }) as string) : '';
+  const summaryHtml = summary ? renderSafeMarkdown(summary) : '';
 
   // A finished run fills only the fields left blank, so nothing typed here is ever
   // overwritten by the model. Guarded by a ref: the effect must run once per run,

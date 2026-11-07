@@ -30,6 +30,7 @@ import { AlertTriangle, ChevronDown, Download, Gauge, Loader2, RotateCw, Save, S
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { marked } from "marked";
+import { AnalysisCard, type AnalysisState } from "@/components/shared/analysis-card";
 
 type ResultsBundle = ReturnType<PageSpeedResultsHandle["getResults"]>;
 type AuditSlot = ResultsBundle["results1"][number];
@@ -53,8 +54,6 @@ const toStrategySnapshot = (r: ResultsBundle): StrategySnapshot => ({
     analyses: r.analyses,
 });
 
-type AnalysisState = { status: 'running' | 'done' | 'error'; markdown: string; error: string | null };
-
 // What to call a compared side: the branch or tag it resolved to ("release/v3.14.1"),
 // falling back to the label the user typed, then to the commit as a last resort.
 const formatTokens = (n: number): string =>
@@ -62,86 +61,6 @@ const formatTokens = (n: number): string =>
 
 const refName = (r: GitRefResolution | undefined, fallback: string): string =>
     r?.ref ?? r?.label ?? (r?.short ? r.short : fallback);
-
-// Shared shell for both assessments: the quick Desktop+Mobile read and the repository
-// investigation. Same four states, same streaming pane — only the labels differ.
-function AnalysisCard({
-    state, heading, icon, open, onToggle, onRetry, retryHint, runningLabel, writingLabel, progress, onCancel, footer,
-}: {
-    state: AnalysisState;
-    heading: string;
-    icon: React.ReactNode;
-    open: boolean;
-    onToggle: () => void;
-    onRetry: () => void;
-    retryHint: string;
-    runningLabel: string;
-    writingLabel: string;
-    progress?: string | undefined;
-    onCancel?: (() => void) | undefined;
-    footer?: React.ReactNode;
-}) {
-    return (
-        <Card className="my-4 mx-6 shadow-none">
-            <CardHeader>
-                <CardTitle>
-                    <Hint label={open ? 'Collapse the analysis' : 'Expand the analysis'} className="w-full">
-                        <button
-                            onClick={onToggle}
-                            className="flex w-full items-center gap-2 text-sm text-left hover:opacity-80 transition-opacity"
-                        >
-                            {icon}
-                            {heading}
-                            <ChevronDown className={`ml-auto h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
-                        </button>
-                    </Hint>
-                </CardTitle>
-            </CardHeader>
-            {open && (
-                <CardContent className="text-xs">
-                    {state.status === 'running' && (
-                        <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-2 text-muted-foreground">
-                                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                                {state.markdown ? writingLabel : runningLabel}
-                                {onCancel && (
-                                    <Hint label="Stop the investigation">
-                                        <Button variant="ghost" size="sm" className="ml-auto h-6 px-2" onClick={onCancel}>Cancel</Button>
-                                    </Hint>
-                                )}
-                            </div>
-                            {/* Tool activity, kept out of the report text so the finished
-                                answer isn't interleaved with investigation noise. */}
-                            {progress && (
-                                <div className="truncate font-mono text-[11px] text-muted-foreground/80">{progress}</div>
-                            )}
-                            {state.markdown && (
-                                <pre className="whitespace-pre-wrap border-t border-border pt-2 font-mono text-[11px] leading-relaxed text-foreground/80">{state.markdown}</pre>
-                            )}
-                        </div>
-                    )}
-                    {state.status === 'error' && (
-                        <div className="flex flex-col items-start gap-2">
-                            <div className="flex items-center gap-2 text-destructive">
-                                <AlertTriangle className="h-4 w-4" />
-                                <span>{state.error || 'Something went wrong.'}</span>
-                            </div>
-                            <Hint label={retryHint}>
-                                <Button variant="outline" size="sm" onClick={onRetry}>
-                                    <RotateCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-                                </Button>
-                            </Hint>
-                        </div>
-                    )}
-                    {state.status === 'done' && (
-                        <div className="ps-analysis-content" dangerouslySetInnerHTML={{ __html: marked.parse(state.markdown, { async: false }) as string }} />
-                    )}
-                    {footer}
-                </CardContent>
-            )}
-        </Card>
-    );
-}
 
 export default function PageSpeedResultPage() {
     const { settings, loading: settingsLoading } = useSettings();

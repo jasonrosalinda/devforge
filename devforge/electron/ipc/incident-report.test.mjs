@@ -778,3 +778,46 @@ describe('buildRcaPrompt - tracker section', () => {
     expect(buildRcaPrompt(render(makeData()), '')).not.toContain('## Tracker');
   });
 });
+
+describe('reportFilename', () => {
+  const start = Date.UTC(2026, 10, 6, 5, 0); // 13:00 SGT
+  const end = Date.UTC(2026, 10, 6, 7, 0);   // 15:00 SGT
+
+  it('defaults to the rca- prefix', () => {
+    expect(handler._reportFilename(undefined, 'prdmeduapp', start, end, 'md')).toBe('rca-prdmeduapp-202611061300-202611061500.md');
+  });
+
+  it('keeps an investigation report apart from the RCA for the same window', () => {
+    expect(handler._reportFilename('investigation', 'prdmeduapp', start, end, 'pdf')).toBe('investigation-prdmeduapp-202611061300-202611061500.pdf');
+  });
+
+  it('never lets kind or appName steer the path', () => {
+    expect(handler._reportFilename('../../x', 'a', start, end, 'md')).toMatch(/^rca-a-/);
+    const name = handler._reportFilename('rca', '..\\..\\evil/../x', start, end, 'md');
+    expect(name).not.toMatch(/[\\/]/);
+    expect(name.startsWith('rca-.')).toBe(false);
+  });
+});
+
+describe('rcaReportMarkdown', () => {
+  const stages = [];
+  const stage = (s) => stages.push(s);
+
+  it('uses a report App Investigation already collected, without touching Azure', async () => {
+    stages.length = 0;
+    const collect = () => { throw new Error('must not collect'); };
+    const md = await handler._rcaReportMarkdown({ reportMarkdown: '## Already here' }, stage, collect);
+    expect(md).toBe('## Already here');
+    expect(stages.join(' ')).not.toMatch(/Authenticating/);
+  });
+
+  it('collects as before when no report is supplied', async () => {
+    stages.length = 0;
+    let called = 0;
+    const collect = async () => { called++; return { data: {}, anomaly: null, hasAppInsights: false, apiData: null, apiName: null }; };
+    const md = await handler._rcaReportMarkdown({ appName: 'a', resourceGroup: 'rg', startMs: 0, endMs: 3600000, reportMarkdown: '   ' }, stage, collect).catch(e => e);
+    expect(called).toBe(1);
+    expect(stages[0]).toMatch(/Authenticating/);
+    void md;
+  });
+});

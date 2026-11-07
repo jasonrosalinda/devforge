@@ -43,6 +43,15 @@ function msToSGT(ms) {
   };
 }
 
+// The prefix keeps an App Investigation report from overwriting the RCA for the same
+// window. Both values arrive from the renderer, so neither may steer the path.
+const REPORT_KINDS = new Set(['rca', 'investigation']);
+function reportFilename(kind, appName, startMs, endMs, ext) {
+  const prefix = REPORT_KINDS.has(kind) ? kind : 'rca';
+  const app = String(appName ?? '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'app';
+  return `${prefix}-${app}-${msToSGT(startMs).file}-${msToSGT(endMs).file}.${ext}`;
+}
+
 const INCIDENT_NUMBERS_FILE = path.join(REPORTS_DIR, 'incident-numbers.json');
 
 /** Stable `INC-YYYYMM-NNN` for an incident, keyed by app + window so re-running the
@@ -2656,6 +2665,32 @@ METRICS SUMMARY
 ${JSON.stringify(summary, null, 2)}`;
 }
 
+/**
+ * The telemetry report an RCA is built from. App Investigation already pulled and
+ * rendered it for the same app and window, and passes it as `reportMarkdown` so the
+ * RCA does not repeat a multi-minute Azure collection. It only ever reaches the
+ * prompt on stdin, the same path as the analyst notes.
+ */
+async function rcaReportMarkdown(opts, stage, collect = collectIncident) {
+  if (typeof opts.reportMarkdown === 'string' && opts.reportMarkdown.trim()) {
+    stage('Using the telemetry report App Investigation already collected for this window');
+    return opts.reportMarkdown;
+  }
+  stage('Authenticating with Azure & pulling telemetry (CPU, memory, requests, 5xx, exceptions, dependencies, SQL + DB server, socket/TCP counters, per-instance health, OOM, user traffic) for app + API');
+  const { data, anomaly, hasAppInsights, apiData, apiName } = await collect(opts);
+
+  stage('Assembling 16-category incident report' + (hasAppInsights ? '' : ' (App Insights not configured — ARM metrics only)'));
+  return generateMarkdown({
+    appName: opts.appName,
+    resourceGroup: opts.resourceGroup,
+    startMs: opts.startMs,
+    endMs: opts.endMs,
+    data, anomaly, hasAppInsights,
+    uptimeRobotIncidents: opts.uptimeRobotIncidents,
+    apiData, apiName,
+  });
+}
+
 const handler = (_mainWindow) => {
   const { ipcMain, shell, BrowserWindow } = require('electron');
 
@@ -2719,24 +2754,14 @@ const handler = (_mainWindow) => {
   // Collect telemetry → build report markdown → run Claude RCA, streaming chunks
   // back to the renderer as they arrive.
   ipcMain.handle('incident-report:rca', async (event, opts) => {
+    // runId lets two RCAs for the same app (the card and App Investigation) keep
+    // their streams apart; callers that send none behave exactly as before.
     const emit = (channel, payload) => {
-      if (!event.sender.isDestroyed()) event.sender.send(channel, { appKey: opts.appName, ...payload });
+      if (!event.sender.isDestroyed()) event.sender.send(channel, { appKey: opts.appName, runId: opts.runId, ...payload });
     };
     const stage = (text) => emit('incident-report:rca-progress', { stage: text });
     try {
-      stage('Authenticating with Azure & pulling telemetry (CPU, memory, requests, 5xx, exceptions, dependencies, SQL + DB server, socket/TCP counters, per-instance health, OOM, user traffic) for app + API');
-      const { data, anomaly, hasAppInsights, apiData, apiName } = await collectIncident(opts);
-
-      stage('Assembling 16-category incident report' + (hasAppInsights ? '' : ' (App Insights not configured — ARM metrics only)'));
-      const reportMarkdown = generateMarkdown({
-        appName: opts.appName,
-        resourceGroup: opts.resourceGroup,
-        startMs: opts.startMs,
-        endMs: opts.endMs,
-        data, anomaly, hasAppInsights,
-        uptimeRobotIncidents: opts.uptimeRobotIncidents,
-        apiData, apiName,
-      });
+      const reportMarkdown = await rcaReportMarkdown(opts, stage);
 
       // Only the business layout carries an incident number, so an engineering run
       // does not burn one from the monthly sequence.
@@ -2787,13 +2812,10 @@ const handler = (_mainWindow) => {
   });
 
   // Save an RCA markdown to the incident-reports folder and open it.
-  ipcMain.handle('incident-report:saveRca', async (_event, { appName, startMs, endMs, markdown }) => {
+  ipcMain.handle('incident-report:saveRca', async (_event, { appName, startMs, endMs, markdown, kind }) => {
     try {
       if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-      const startSGT = msToSGT(startMs);
-      const endSGT = msToSGT(endMs);
-      const filename = `rca-${appName}-${startSGT.file}-${endSGT.file}.md`;
-      const filepath = path.join(REPORTS_DIR, filename);
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'md'));
       fs.writeFileSync(filepath, markdown, 'utf8');
       shell.openPath(filepath);
       return { success: true, path: filepath };
@@ -2805,7 +2827,7 @@ const handler = (_mainWindow) => {
   // Render the RCA to PDF via Chromium's own print pipeline. The renderer supplies
   // a complete standalone document (see rcaHtml.ts) because it already has `marked`
   // and the print stylesheet.
-  ipcMain.handle('incident-report:exportRcaPdf', async (_event, { appName, startMs, endMs, html }) => {
+  ipcMain.handle('incident-report:exportRcaPdf', async (_event, { appName, startMs, endMs, html, kind }) => {
     let win = null;
     let tmpFile = null;
     try {
@@ -2836,9 +2858,7 @@ const handler = (_mainWindow) => {
         generateDocumentOutline: true,
       });
 
-      const startSGT = msToSGT(startMs);
-      const endSGT = msToSGT(endMs);
-      const filepath = path.join(REPORTS_DIR, `rca-${appName}-${startSGT.file}-${endSGT.file}.pdf`);
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'pdf'));
       fs.writeFileSync(filepath, pdf);
       shell.openPath(filepath);
       return { success: true, path: filepath };
@@ -2854,13 +2874,11 @@ const handler = (_mainWindow) => {
   // Word export. Written as a Word-flavoured HTML document with a .doc extension —
   // Word opens it as an editable document, headings, tables and all. A real .docx
   // would need a zip/OOXML dependency for no gain the reader would notice.
-  ipcMain.handle('incident-report:exportRcaDoc', async (_event, { appName, startMs, endMs, html }) => {
+  ipcMain.handle('incident-report:exportRcaDoc', async (_event, { appName, startMs, endMs, html, kind }) => {
     try {
       if (!html || typeof html !== 'string') throw new Error('No HTML supplied for the Word document.');
       if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-      const startSGT = msToSGT(startMs);
-      const endSGT = msToSGT(endMs);
-      const filepath = path.join(REPORTS_DIR, `rca-${appName}-${startSGT.file}-${endSGT.file}.doc`);
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'doc'));
       // BOM: Word reads a UTF-8 HTML document as the system codepage without it,
       // which mangles the SGT arrows and every non-ASCII character in the report.
       fs.writeFileSync(filepath, '﻿' + html, 'utf8');
@@ -2875,6 +2893,9 @@ const handler = (_mainWindow) => {
 // Pure helpers exposed for tests — same pattern as azure-metrics.cjs. The
 // timestamp formatters and the timeline/burst/downtime logic carry the report's
 // correctness, so they are worth pinning without booting Electron.
+handler._reportFilename = reportFilename;
+handler._rcaReportMarkdown = rcaReportMarkdown;
+handler._collectIncident = collectIncident;
 handler._sgt = sgt;
 handler._sgtTime = sgtTime;
 handler._durFormat = durFormat;

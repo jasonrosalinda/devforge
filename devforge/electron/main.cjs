@@ -111,6 +111,13 @@ app.whenReady().then(() => {
     }
 
     try {
+        require('./ipc/app-investigation.cjs')(mainWindow);
+        console.log('✅ app-investigation handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load app-investigation.cjs:', err);
+    }
+
+    try {
         require('./ipc/commands.cjs')();
         console.log('✅ commands handlers registered');
     } catch (err) {

@@ -15,9 +15,11 @@
 //      classified as a safe read and runs unless explicitly denied).
 
 const { ipcMain, dialog } = require('electron');
-const { execFile } = require('child_process');
 const path = require('path');
-const { runClaudeCli, killTree, tagged, stripReportPreamble } = require('./claude-cli.cjs');
+const {
+    runClaudeCli, killTree, tagged, stripReportPreamble,
+    GIT_ENV, git, capLines, GIT_READ_AGENT_FLAGS: AGENT_FLAGS, repoFingerprint, agentProgressMapper,
+} = require('./claude-cli.cjs');
 
 // The report opens at Findings; an agentic run's investigation narration must not.
 const REPORT_HEADINGS = ['Findings', 'Assessment', 'Conclusion', 'Justification'];
@@ -28,33 +30,6 @@ const REPORT_HEADINGS = ['Findings', 'Assessment', 'Conclusion', 'Justification'
 // metacharacters. Belt and braces: refs never touch a shell anyway.
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@^~{}+-]{0,180}$/;
 const isSafeRef = (r) => typeof r === 'string' && REF_RE.test(r) && !r.includes('..');
-
-const GIT_ENV = {
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_TERMINAL_PROMPT: '0',   // windowsHide means a credential prompt would hang invisibly
-    GIT_PAGER: 'cat',
-    PAGER: 'cat',
-};
-
-// Never throws — callers degrade instead of failing the whole run.
-function git(cwd, args, { maxBuffer = 8 * 1024 * 1024, timeout = 20000 } = {}) {
-    return new Promise((resolve) => {
-        execFile('git', args, { cwd, maxBuffer, timeout, windowsHide: true, env: { ...process.env, ...GIT_ENV } },
-            (err, stdout, stderr) => resolve({
-                ok: !err,
-                code: err?.code ?? 0,
-                out: (stdout || '').trim(),
-                err: (stderr || '').trim(),
-            }));
-    });
-}
-
-const capLines = (text, max, note) => {
-    if (!text) return '';
-    const lines = text.split('\n');
-    if (lines.length <= max) return text;
-    return `${lines.slice(0, max).join('\n')}\n… ${lines.length - max} more line(s) omitted${note ? ` — ${note}` : ''}.`;
-};
 
 /** Resolve a label like "v3.14.1" to a commit, trying the shapes a release label
  *  usually takes. On failure returns fuzzy candidates for the manual override. */
@@ -227,47 +202,10 @@ async function gatherSeed(root, beforeSha, afterSha) {
     };
 }
 
-/** Fingerprint of everything the agent must not change. */
-async function repoFingerprint(root) {
-    const head = (await git(root, ['rev-parse', 'HEAD'])).out;
-    const status = (await git(root, ['status', '--porcelain=v1'])).out;
-    const stash = (await git(root, ['stash', 'list'])).out;
-    return `${head}|${status}|${stash}`;
-}
-
 // ─── the agent ────────────────────────────────────────────────────────────────
-
-// VERIFIED BEHAVIOUR (Claude Code 2.1.270), do not "simplify" this list:
-//  - `--permission-mode manual` does NOT restrict anything in print mode; only
-//    `dontAsk` denies what is not explicitly allowed.
-//  - Even under dontAsk, a built-in classifier waves through commands it considers
-//    read-only — `git checkout -- <file>` among them, which DESTROYS uncommitted
-//    work. The allowlist cannot express that; only an explicit deny rule stops it.
-//  - `--permission-prompts none` makes an unmatched tool an automatic denial
-//    instead of a silent wait for a host that does not exist here.
-//  - `--safe-mode` keeps the user's CLAUDE.md, hooks, plugins and skills out of the
-//    run (~14k → ~5k ambient tokens), which is what makes a non-neutral cwd safe.
-const AGENT_FLAGS = [
-    '--output-format stream-json',
-    '--verbose',
-    '--model sonnet',
-    '--safe-mode',
-    '--strict-mcp-config',
-    '--permission-mode dontAsk',
-    '--permission-prompts none',
-    '--no-session-persistence',
-    '--max-budget-usd 2.00',
-    '--allowedTools "Read,Glob,Grep,'
-    + 'Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),'
-    + 'Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git cat-file:*),'
-    + 'Bash(git shortlog:*),Bash(git name-rev:*),Bash(git describe:*)"',
-    '--disallowedTools "Write,Edit,MultiEdit,NotebookEdit,PowerShell,Task,TodoWrite,SlashCommand,WebFetch,WebSearch,'
-    + 'Bash(git checkout:*),Bash(git restore:*),Bash(git reset:*),Bash(git clean:*),Bash(git stash:*),'
-    + 'Bash(git switch:*),Bash(git rebase:*),Bash(git merge:*),Bash(git cherry-pick:*),Bash(git am:*),'
-    + 'Bash(git apply:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git fetch:*),'
-    + 'Bash(git remote:*),Bash(git config:*),Bash(git worktree:*),Bash(git branch:*),Bash(git tag:*),'
-    + 'Bash(git gc:*),Bash(git filter-branch:*),Bash(git update-ref:*),Bash(git rm:*),Bash(git mv:*)"',
-];
+// AGENT_FLAGS (GIT_READ_AGENT_FLAGS) and repoFingerprint live in claude-cli.cjs,
+// shared with App Investigation. Read the verified-behaviour note there before
+// changing either.
 
 function buildAttributionPrompt({ before, after, repoRoot, remote, urls, seed, evidence, warnings }) {
     const caveats = warnings.length ? warnings.map(w => `- ${w.code}: ${w.message}`).join('\n') : '- none';
@@ -435,33 +373,7 @@ module.exports = function (mainWindow) {
                 idleMs: 240000,
                 handle: current,
                 onText: (chunk) => send('attribution-chunk', { chunk }),
-                onEvent: (evt) => {
-                    // Narration and tool calls go to a separate channel — folding them
-                    // into the report text would paint the answer with investigation noise.
-                    if (evt.type === 'system' && evt.subtype === 'init') {
-                        send('attribution-progress', { phase: 'init', detail: `${evt.model} · ${evt.permissionMode ?? 'default'} · ${evt.cwd ?? ''}` });
-                        return;
-                    }
-                    if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
-                        for (const c of evt.message.content) {
-                            if (c?.type !== 'tool_use') continue;
-                            const detail = c.name === 'Bash'
-                                ? String(c.input?.command ?? '').slice(0, 120)
-                                : String(c.input?.file_path ?? c.input?.pattern ?? c.input?.path ?? '').slice(0, 120);
-                            send('attribution-progress', { phase: 'tool', tool: c.name, detail });
-                        }
-                    }
-                    if (evt.type === 'user' && Array.isArray(evt.message?.content)) {
-                        for (const c of evt.message.content) {
-                            if (c?.type !== 'tool_result' || !c.is_error) continue;
-                            const body = typeof c.content === 'string' ? c.content : JSON.stringify(c.content);
-                            if (/permission|not allowed|denied/i.test(body)) {
-                                denied.push(body.slice(0, 200));
-                                send('attribution-progress', { phase: 'denied', detail: body.slice(0, 160) });
-                            }
-                        }
-                    }
-                },
+                onEvent: agentProgressMapper((data) => send('attribution-progress', data), denied),
             });
 
             // Detection, not prevention — but it is the only guard that would catch a

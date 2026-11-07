@@ -261,4 +261,130 @@ function stripReportPreamble(markdown, headings) {
     return lines.slice(start, end).join('\n').trim();
 }
 
-module.exports = { runClaudeCli, killTree, tagged, stripReportPreamble, subscriptionEnv, leanFlags, BILLING_OVERRIDE_VARS };
+// ─── read-only repository agent ───────────────────────────────────────────────
+// Shared by every feature that runs Claude INSIDE a user's repository (PageSpeed
+// attribution, App Investigation). Moved here from pagespeed-attribution.cjs so the
+// deny list is defined once — a second copy would drift, and a drifted deny list is
+// a destroyed working tree.
+
+const GIT_ENV = {
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_TERMINAL_PROMPT: '0',   // windowsHide means a credential prompt would hang invisibly
+    GIT_PAGER: 'cat',
+    PAGER: 'cat',
+};
+
+// Never throws — callers degrade instead of failing the whole run.
+function git(cwd, args, { maxBuffer = 8 * 1024 * 1024, timeout = 20000 } = {}) {
+    return new Promise((resolve) => {
+        execFile('git', args, { cwd, maxBuffer, timeout, windowsHide: true, env: { ...process.env, ...GIT_ENV } },
+            (err, stdout, stderr) => resolve({
+                ok: !err,
+                code: err?.code ?? 0,
+                out: (stdout || '').trim(),
+                err: (stderr || '').trim(),
+            }));
+    });
+}
+
+const capLines = (text, max, note) => {
+    if (!text) return '';
+    const lines = text.split('\n');
+    if (lines.length <= max) return text;
+    return `${lines.slice(0, max).join('\n')}\n… ${lines.length - max} more line(s) omitted${note ? ` — ${note}` : ''}.`;
+};
+
+// VERIFIED BEHAVIOUR (Claude Code 2.1.270), do not "simplify" this list:
+//  - `--permission-mode manual` does NOT restrict anything in print mode; only
+//    `dontAsk` denies what is not explicitly allowed.
+//  - Even under dontAsk, a built-in classifier waves through commands it considers
+//    read-only — `git checkout -- <file>` among them, which DESTROYS uncommitted
+//    work. The allowlist cannot express that; only an explicit deny rule stops it.
+//  - `--permission-prompts none` makes an unmatched tool an automatic denial
+//    instead of a silent wait for a host that does not exist here.
+//  - `--safe-mode` keeps the user's CLAUDE.md, hooks, plugins and skills out of the
+//    run (~14k → ~5k ambient tokens), which is what makes a non-neutral cwd safe.
+const AGENT_BASE_FLAGS = [
+    '--output-format stream-json',
+    '--verbose',
+    '--model sonnet',
+    '--safe-mode',
+    '--strict-mcp-config',
+    '--permission-mode dontAsk',
+    '--permission-prompts none',
+    '--no-session-persistence',
+    '--max-budget-usd 2.00',
+];
+
+// Read files plus read-only git through Bash (PageSpeed attribution).
+const GIT_READ_AGENT_FLAGS = [
+    ...AGENT_BASE_FLAGS,
+    '--allowedTools "Read,Glob,Grep,'
+    + 'Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),'
+    + 'Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git cat-file:*),'
+    + 'Bash(git shortlog:*),Bash(git name-rev:*),Bash(git describe:*)"',
+    '--disallowedTools "Write,Edit,MultiEdit,NotebookEdit,PowerShell,Task,TodoWrite,SlashCommand,WebFetch,WebSearch,'
+    + 'Bash(git checkout:*),Bash(git restore:*),Bash(git reset:*),Bash(git clean:*),Bash(git stash:*),'
+    + 'Bash(git switch:*),Bash(git rebase:*),Bash(git merge:*),Bash(git cherry-pick:*),Bash(git am:*),'
+    + 'Bash(git apply:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git fetch:*),'
+    + 'Bash(git remote:*),Bash(git config:*),Bash(git worktree:*),Bash(git branch:*),Bash(git tag:*),'
+    + 'Bash(git gc:*),Bash(git filter-branch:*),Bash(git update-ref:*),Bash(git rm:*),Bash(git mv:*)"',
+];
+
+// Read files only — no shell of any kind, so the agent cannot run a command at all
+// (App Investigation: "Claude only reads, never acts"). Git history the agent needs
+// is gathered by main with fixed argv and passed on stdin instead.
+const FILE_READ_AGENT_FLAGS = [
+    ...AGENT_BASE_FLAGS,
+    '--allowedTools "Read,Glob,Grep"',
+    '--disallowedTools "Bash,PowerShell,Write,Edit,MultiEdit,NotebookEdit,Task,TodoWrite,SlashCommand,WebFetch,WebSearch"',
+];
+
+/** Fingerprint of everything the agent must not change. */
+async function repoFingerprint(root) {
+    const head = (await git(root, ['rev-parse', 'HEAD'])).out;
+    const status = (await git(root, ['status', '--porcelain=v1'])).out;
+    const stash = (await git(root, ['stash', 'list'])).out;
+    return `${head}|${status}|${stash}`;
+}
+
+/**
+ * onEvent handler that turns an agentic run's stream into progress events.
+ * Narration and tool calls go to a separate channel — folding them into the report
+ * text would paint the answer with investigation noise.
+ *
+ * @param {(data: object) => void} sendProgress
+ * @param {string[]} denied  collects denied tool results for the run's meta
+ */
+function agentProgressMapper(sendProgress, denied) {
+    return (evt) => {
+        if (evt.type === 'system' && evt.subtype === 'init') {
+            sendProgress({ phase: 'init', detail: `${evt.model} · ${evt.permissionMode ?? 'default'} · ${evt.cwd ?? ''}` });
+            return;
+        }
+        if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
+            for (const c of evt.message.content) {
+                if (c?.type !== 'tool_use') continue;
+                const detail = c.name === 'Bash'
+                    ? String(c.input?.command ?? '').slice(0, 120)
+                    : String(c.input?.file_path ?? c.input?.pattern ?? c.input?.path ?? '').slice(0, 120);
+                sendProgress({ phase: 'tool', tool: c.name, detail });
+            }
+        }
+        if (evt.type === 'user' && Array.isArray(evt.message?.content)) {
+            for (const c of evt.message.content) {
+                if (c?.type !== 'tool_result' || !c.is_error) continue;
+                const body = typeof c.content === 'string' ? c.content : JSON.stringify(c.content);
+                if (/permission|not allowed|denied/i.test(body)) {
+                    denied.push(body.slice(0, 200));
+                    sendProgress({ phase: 'denied', detail: body.slice(0, 160) });
+                }
+            }
+        }
+    };
+}
+
+module.exports = {
+    runClaudeCli, killTree, tagged, stripReportPreamble, subscriptionEnv, leanFlags, BILLING_OVERRIDE_VARS,
+    GIT_ENV, git, capLines, GIT_READ_AGENT_FLAGS, FILE_READ_AGENT_FLAGS, repoFingerprint, agentProgressMapper,
+};

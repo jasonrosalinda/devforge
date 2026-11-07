@@ -1,6 +1,9 @@
 import type { IAzureAPI } from './azureCapture.types';
 import type { IAzureMetricsAPI } from './azureMetrics.types';
 import type { ITelemetryAPI } from './telemetry.types';
+import type { IAppInvestigationAPI } from './app-investigation.types';
+
+export type ReportKind = 'rca' | 'investigation';
 
 /**
  * Shared shape for the three incident-report entry points (generate / fetchData /
@@ -114,6 +117,9 @@ export interface IElectronAPI {
 
     // Ask Telemetry — Claude-written KQL against App Insights
     telemetry: ITelemetryAPI;
+
+    // App Investigation — read-only incident investigation across Azure + source code
+    appInvestigation: IAppInvestigationAPI;
 
     // PageSpeed AI Insights
     pagespeedInsight: {
@@ -314,6 +320,10 @@ export interface IElectronAPI {
             incidentPeriod?: string;
             servicesAffected?: string;
             reportTitle?: string;
+            /** Telemetry report already collected for this window (App Investigation) — skips the Azure pull. */
+            reportMarkdown?: string;
+            /** Echoed on rca-chunk / rca-progress so two runs for the same app keep their streams apart. */
+            runId?: string;
         }) => Promise<{ success: boolean; rca?: string; error?: string }>;
         aiRemarks: (opts: {
             summary: unknown;
@@ -323,12 +333,15 @@ export interface IElectronAPI {
             startMs: number;
             endMs: number;
             markdown: string;
+            /** File-name prefix; 'investigation' keeps App Investigation reports apart from RCAs. */
+            kind?: ReportKind;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         exportRcaPdf: (opts: {
             appName: string;
             startMs: number;
             endMs: number;
             html: string;
+            kind?: ReportKind;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         /** Word export — the same document written as Word-flavoured HTML with a .doc name. */
         exportRcaDoc: (opts: {
@@ -336,10 +349,11 @@ export interface IElectronAPI {
             startMs: number;
             endMs: number;
             html: string;
+            kind?: ReportKind;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
-        onRcaChunk: (cb: (data: { appKey: string; chunk: string }) => void) => () => void;
+        onRcaChunk: (cb: (data: { appKey: string; runId?: string; chunk: string }) => void) => () => void;
         /** `reset` is set when the model falls back mid-run: clear any streamed text. */
-        onRcaProgress: (cb: (data: { appKey: string; stage: string; reset?: boolean }) => void) => () => void;
+        onRcaProgress: (cb: (data: { appKey: string; runId?: string; stage: string; reset?: boolean }) => void) => () => void;
     };
 
     // Unused Assets — Claude review pass

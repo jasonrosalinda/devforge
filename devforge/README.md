@@ -56,6 +56,18 @@ Every page opens as its own tab from the sidebar. The sidebar groups them as bel
 - **Privacy:** only the question, the table and column names, and (on a repair) the query error go to Claude. Telemetry rows never leave the machine. The query is written by Claude through your Claude Code login, never the metered API, so there is no per-question charge. Claude runs without tools or the coding-agent prompt, so a question uses about 2k tokens of your plan; each answer shows the tokens it used (hover for the API-equivalent figure).
 - **Needs:** `az login`, the app in **Settings → Azure** (the App Insights ID is looked up when not set), and the Claude CLI on PATH. Desktop app only.
 
+#### App Investigation
+
+**Use it to** find the likely root cause of a production incident from a plain-English description, with the code and commit behind it, then turn the findings into an RCA. For example: "MEDU users got 500s around 2pm yesterday", "the API has been slow since this morning's deploy" or "SQL timeouts spiked in the last hour".
+
+- **Understand.** Describe the incident (Ctrl+Enter). Claude reads it and fills in an **Understood as** card: the app, the window in SGT, the category (errors, slowness, restarts, deployment…), the symptoms and a one-line investigation question. Every field can be edited before anything runs. When the description gives no app or time, the app picker and the 1h / 6h / 24h / 3d window on the page are used.
+- **Scope guardrail.** Only incident investigation of an app configured in Settings is accepted. Requests to act (restart, deploy, roll back, scale, delete, edit or fix code), requests for secrets or connection strings, unrelated questions and attempts to change Claude's instructions are refused with the reason. Obvious action and secret requests are refused by devForge itself, before Claude is called. devForge re-checks everything when you press Investigate, so an edited card can't widen the scope.
+- **Investigate.** devForge pulls the same Azure telemetry the App Health Check AI report uses (CPU, memory, 5xx, exceptions, dependencies, SQL, restarts, deployments, per-instance health) for the app and its API. It also reads the git history around the window from the app's repository. Claude then reads the repository with **Read, Glob and Grep only**. It has no shell, no git, no network and no write or edit tools, so it can read and report but never act. A live **investigation trail** shows every file it opens or searches. Cancel stops it.
+- **Report.** The report has seven sections: Summary, Timeline, Azure Evidence, Code Suspects, Root Cause (ranked hypotheses with confidence), Recommended Fix, and Gaps & Next Checks. `file:line` citations open in VS Code. Every SHA and path must be real, and where the code can't explain a signal the report says **Insufficient evidence in this repository.** You can save it as `.md` or PDF (`investigation-…` in `~/.claude/agents/incident-reports/`) or copy it for Teams. Finished reports are kept under **Recent investigations** (last 20, on this machine).
+- **RCA.** Below a finished report sits App Health Check's RCA section: the same seven-section business report with an incident number, the same editable form and the same PDF, Word and Teams exports. The investigation findings go in as analyst notes, and the telemetry already collected is reused, so it doesn't pull Azure again.
+- **Safety and cost.** If the repository changes during a run, a warning says so. Report text is rendered with raw HTML removed and only web links kept. Runs use your Claude Code login, never the metered API. Each report shows the tokens it used (hover for the API-equivalent figure). Understanding a description is a lean call of about 3–4k tokens. An investigation is a full agent run, capped at an API-equivalent of $2.
+- **Needs:** `az login`, the app in **Settings → Azure** with its **App repository** (and **API repository** if separate) set to a local git clone, and the Claude CLI on PATH. Desktop app only.
+
 ### Web quality
 
 #### PageSpeed
@@ -147,7 +159,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 ## App shell
 
 - **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search. Click a group heading to collapse or expand it. Every group starts expanded and the choice is remembered; searching shows all matches regardless.
-- **Claude Code usage** at the foot of the sidebar: how much of your plan's session (5-hour) and weekly limits is used, and when each resets, the same numbers `/usage` shows in the CLI. It reads the Claude Code login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) and only reads usage, so nothing is billed. It refreshes every 5 minutes, when the window regains focus, or on click. If the login has expired, run any `claude` command to refresh it. Implementation: [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs)
+- **Authentication badges** at the foot of the sidebar: one badge each for Azure (CLI sign-in), Atlassian (Confluence API token and browser session, green only when both work) and Claude (Claude Code login), colored by connection: green when signed in, amber when it can't be verified, red when it needs fixing, grey while checking or not set up. Hover for the exact state. They re-check every 5 minutes. Click a badge for a Re-check; when one isn't signed in, the menu also shows the step-by-step sign-in guide and the fix (copy `az login` / `claude`, open Settings → Atlassian, create an API token). These badges replace the per-page Azure and Atlassian token pills, so every page shows them in one place. The Claude Code check reads the login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) through [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs) and bills nothing. Implementation: [src/components/layout/sidebar-auth-status.tsx](src/components/layout/sidebar-auth-status.tsx)
 - **Browser-style tabs.** Open tabs are restored on the next launch and stay mounted, so switching back keeps your inputs and results. Shortcuts: **Ctrl+Tab** / **Ctrl+Shift+Tab** to cycle, **Ctrl+W** to close, **Ctrl+1–8** to jump to a tab and **Ctrl+9** for the last one.
 - **Settings**, **Release notes** and **auto-update** are covered in their sections below.
 
@@ -169,7 +181,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - **Azure** — `@azure/identity`, `@azure/monitor-query` (App Service + Container Apps, Log Analytics)
 - **Confluence** — runbook fetch via persisted browser session + Confluence Cloud REST; Release Runbook reads and writes the storage format (REST v1) and edits only the runbook tables
 - **Markdown / capture** — `marked`, `html2canvas`
-- **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis, the Unused Assets review and Ask Telemetry. Never the metered API. Calls that need no tools run lean (no tools, no plugins, hooks or MCP connectors, a short system prompt of their own), about 2k tokens of your plan instead of 50–70k
+- **AI** — the [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`, your existing login) for RCA, PageSpeed analysis, the Unused Assets review, Ask Telemetry and App Investigation. Never the metered API. Calls that need no tools run lean (no tools, no plugins, hooks or MCP connectors, a short system prompt of their own), about 2k tokens of your plan instead of 50–70k
 - **Testing** — Vitest + happy-dom
 - **Auto-update** — `electron-updater` via GitHub Releases
 - **Release automation** — GitHub Actions (`deploy.yml`): conventional commits → version tag → release build
@@ -184,7 +196,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 - Node.js 20 or newer
 - npm 10+
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login` — for App Health Check and the background monitor
-- Optional: [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH — for RCA, PageSpeed Claude Analysis, the Unused Assets review and Ask Telemetry
+- Optional: [Claude CLI](https://docs.claude.com/en/docs/claude-code) on PATH — for RCA, PageSpeed Claude Analysis, the Unused Assets review, Ask Telemetry and App Investigation
 
 ### Install
 
@@ -287,10 +299,11 @@ devforge/
 │       ├── background-monitor.cjs    # Tray icon, hidden worker window, desktop notifications
 │       ├── incident-report.cjs       # AI report + Claude RCA
 │       ├── telemetry-ask.cjs         # Ask Telemetry: Claude-written KQL, run read-only on App Insights
+│       ├── app-investigation.cjs     # App Investigation: scope guard, query interpreter, read-only repo agent
 │       ├── pagespeed-insight.cjs     # Google PageSpeed API + Markdown report / fix brief
 │       ├── unused-assets.cjs         # Unused CSS/JS scan + Claude review
 │       ├── confluence.cjs            # Release runbook fetch (session + REST)
-│       ├── claude-cli.cjs            # Shared Claude CLI spawning
+│       ├── claude-cli.cjs            # Shared Claude CLI spawning, read-only agent flags, git helpers
 │       └── commands.cjs, ipapi.cjs, …
 ├── src/
 │   ├── app.tsx              # App shell: sidebar, tabs, providers, modals
@@ -313,7 +326,7 @@ devforge/
 
 Open the in-app **Settings** modal to configure:
 
-- **Azure** — subscription ID + per-app entries (App Service or Container App, optional API + DB, optional network/edge diagnostics: Log Analytics workspace, App Gateway, Front Door, Load Balancer)
+- **Azure** — subscription ID + per-app entries (App Service or Container App, optional API + DB, optional network/edge diagnostics: Log Analytics workspace, App Gateway, Front Door, Load Balancer; optional **App repository** / **API repository** — local git clones that App Investigation reads, never writes)
 - **API Keys** — Google PageSpeed, UptimeRobot
 - **Atlassian** — Confluence base URL, account email, API token (for Release Pilot)
 - **Background monitor** — turn the tray monitor on and pick the apps to watch; lists what it watches and when it alerts

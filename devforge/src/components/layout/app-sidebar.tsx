@@ -22,7 +22,7 @@ import { HOME_PAGE, PAGE_GROUPS, matchesPageSearch } from "@/routes/page-routes"
 import { useCollapsedGroups } from "@/hooks/useCollapsedGroups"
 import { cn } from "@/lib/utils"
 import type { Page } from "@/types/pages.types"
-import { SidebarClaudeUsage } from "./sidebar-claude-usage"
+import { SidebarAuthStatus } from "./sidebar-auth-status"
 import { SidebarClocks } from "./sidebar-clocks"
 
 interface AppSidebarProps {
@@ -202,7 +202,7 @@ export function AppSidebar({ pages, activeTab, openTabs, onOpen, search, onSearc
                     </SidebarMenuItem>
                 </SidebarMenu>
                 <div className="border-t border-sidebar-border pt-2 group-data-[collapsible=icon]:hidden">
-                    <SidebarClaudeUsage />
+                    <SidebarAuthStatus />
                 </div>
                 <div className="border-t border-sidebar-border pt-2 group-data-[collapsible=icon]:hidden">
                     <SidebarClocks />

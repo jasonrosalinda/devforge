@@ -33,6 +33,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    appInvestigation: {
+        pickRepo: () => ipcRenderer.invoke('app-investigation:pick-repo'),
+        interpret: (payload) => ipcRenderer.invoke('app-investigation:interpret', payload),
+        run: (payload) => ipcRenderer.invoke('app-investigation:run', payload),
+        cancel: () => ipcRenderer.invoke('app-investigation:cancel'),
+        openCitation: (payload) => ipcRenderer.invoke('app-investigation:open-citation', payload),
+        onChunk: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('app-investigation:chunk', fn);
+            return () => ipcRenderer.removeListener('app-investigation:chunk', fn);
+        },
+        onProgress: (cb) => {
+            const fn = (_e, data) => cb(data);
+            ipcRenderer.on('app-investigation:progress', fn);
+            return () => ipcRenderer.removeListener('app-investigation:progress', fn);
+        },
+    },
+
     incidentReport: {
         generate: (opts) => ipcRenderer.invoke('incident-report:generate', opts),
         fetchData: (opts) => ipcRenderer.invoke('incident-report:fetchData', opts),
