@@ -157,6 +157,7 @@ jobs:
       - name: Generate release notes
         shell: bash
         run: |
+          node --test .github/scripts/release-notes.test.mjs
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           echo "Previous tag: $PREV_TAG"
           node .github/scripts/release-notes.mjs "$PREV_TAG" "v${{ needs.auto-tag.outputs.version }}" > release-notes.md

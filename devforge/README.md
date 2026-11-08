@@ -279,8 +279,13 @@ The bump is decided by scanning every commit since the last tag. The highest bum
 
 1. Merge to `main`.
 2. **deploy** builds the web version (`npm run build`) and publishes it to GitHub Pages.
-3. **auto-tag** works out the bump. It then runs `npm version`, commits `chore: release vX.Y.Z [skip ci]`, and pushes the commit and the `vX.Y.Z` tag.
+3. **auto-tag** works out the bump from every commit since the last tag. It bumps from whichever is higher, `package.json` or the highest `v*` tag, so a tag made outside the workflow (for example, a release created in the GitHub UI) can't make it re-create an existing tag. It then runs `npm version`, commits `chore: release vX.Y.Z`, and pushes the commit and the `vX.Y.Z` tag.
 4. **release**, on a Windows runner, generates release notes with [`.github/scripts/release-notes.mjs`](../.github/scripts/release-notes.mjs), then runs `npm run electron:build`. It uploads the installers and `latest*.yml` (for the auto-updater) to a GitHub Release.
+   - **Notes content:** a summary line, sections by type (breaking changes first), one line per change with the first sentence of its commit body, PR and commit links, and an Install section with download links.
+   - **Squash merges:** a squash merge that lists `* feat: …` items in its body gets one line per item.
+   - **Dropped vs kept:** `chore:`, `ci:`, `test:`, `style:` and `build:` commits are left out, but a merged PR (`… (#12)`) is always kept.
+   - **Format:** the notes use only the Markdown the in-app Release notes tab renders.
+   - **Tests:** `node --test .github/scripts/release-notes.test.mjs`, which the job runs first.
 5. Installed apps pick up the new version on their next launch (see Auto-Update).
 
 ---
