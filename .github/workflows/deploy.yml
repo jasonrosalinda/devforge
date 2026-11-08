@@ -110,8 +110,22 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           cd devforge
+          # Bump from the higher of package.json and the highest release tag. A tag
+          # made outside this job (e.g. a release created in the GitHub UI) leaves
+          # package.json behind, and bumping from it would re-create an existing tag.
+          CUR=$(node -p "require('./package.json').version")
+          TOP_TAG=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+          TOP="${TOP_TAG#v}"
+          if [ -n "$TOP" ] && [ "$TOP" != "$CUR" ] && [ "$(printf '%s\n%s\n' "$CUR" "$TOP" | sort -V | tail -1)" = "$TOP" ]; then
+            echo "package.json $CUR is behind tag $TOP_TAG; bumping from $TOP"
+            npm version "$TOP" --no-git-tag-version --allow-same-version > /dev/null
+          fi
           NEW_TAG=$(npm version ${{ steps.type.outputs.bump }} --no-git-tag-version)
           VERSION_NO_V="${NEW_TAG#v}"
+          if git rev-parse -q --verify "refs/tags/$NEW_TAG" > /dev/null; then
+            echo "::error::Tag $NEW_TAG already exists; not re-tagging."
+            exit 1
+          fi
           cd ..
           echo "version=$VERSION_NO_V" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
