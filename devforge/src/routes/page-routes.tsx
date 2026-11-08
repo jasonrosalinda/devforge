@@ -1,5 +1,5 @@
 import type { Page, PageGroup } from "@/types/pages.types";
-import { Activity, BookOpen, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, SearchCode, Telescope } from "lucide-react";
+import { Activity, BookOpen, ClipboardList, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, SearchCode, Telescope } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -8,6 +8,7 @@ import UnusedAssetsPage from "@/pages/unusedAssetsPage";
 import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import TelemetryPage from "@/pages/telemetryPage";
 import AppInvestigationPage from "@/pages/appInvestigationPage";
+import ServiceKpiPage from "@/pages/serviceKpiPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
 import ReleaseRunbookPage from "@/pages/releaseRunbookPage";
 import { createToolboxToolPage } from "@/pages/toolboxToolPage";
@@ -53,6 +54,15 @@ export const pages: Page[] = [
         description: "Describe an incident; Claude reads the app's Azure telemetry and source code (read-only) and reports the root cause, with an RCA",
         group: "Monitoring",
         keywords: ["incident", "rca", "root cause", "investigate", "source", "code", "claude", "azure", "outage"]
+    },
+    {
+        title: "Service KPI",
+        url: "#",
+        icon: ClipboardList,
+        component: ServiceKpiPage,
+        description: "One month's CPU, memory, DB, 5xx, uptime and cloud cost per app, ready to copy into the KPI report",
+        group: "Monitoring",
+        keywords: ["kpi", "monthly", "report", "cpu", "memory", "cost", "uptime", "5xx", "excel"]
     },
     {
         title: "PageSpeed",

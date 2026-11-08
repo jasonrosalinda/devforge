@@ -128,6 +128,7 @@ function BadgeRow({ badge, actions, guide, onRecheck }: { badge: AuthBadge; acti
                     )}
                 >
                     {badge.tone === "checking" ? <Loader2 className="size-2.5 animate-spin" aria-hidden /> : <span className="size-1.5 rounded-full bg-current" aria-hidden />}
+                    {badge.prefix && <span className="tabular-nums">{badge.prefix}</span>}
                     {badge.label}
                 </button>
             </DropdownMenuTrigger>

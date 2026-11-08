@@ -74,6 +74,14 @@ describe("claudeBadge", () => {
         expect(claudeBadge(ok).hint).toContain("Team")
     })
 
+    it("prefixes session / weekly usage, rounded, with a dash for a missing window", () => {
+        const limit = (id: string, percent: number) => ({ id, label: id, percent, resetsAt: null })
+        expect(claudeBadge({ ...ok, limits: [limit("session", 12.4), limit("weekly", 33.6), limit("weekly_opus", 90)] }).prefix).toBe("12% / 34%")
+        expect(claudeBadge({ ...ok, limits: [limit("weekly", 5)] }).prefix).toBe("– / 5%")
+        expect(claudeBadge(ok).prefix).toBeUndefined()
+        expect(claudeBadge({ success: false, code: "NETWORK", error: "x" }).prefix).toBeUndefined()
+    })
+
     it("separates not-signed-in from expired", () => {
         expect(claudeBadge({ success: false, code: "NOT_SIGNED_IN", error: "x" })).toMatchObject({ tone: "bad", text: "Not signed in" })
         expect(claudeBadge({ success: false, code: "EXPIRED", error: "x" })).toMatchObject({ tone: "bad", text: "Login expired" })

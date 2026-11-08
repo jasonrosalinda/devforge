@@ -13,16 +13,20 @@ export interface UptimeRobotMonitor {
   url: string;
   status: number; // 0=paused,1=not_checked,2=up,8=seems_down,9=down
   logs: UptimeRobotLog[];
+  /** Uptime % for the requested custom range ("99.94"), when one was asked for. */
+  custom_uptime_ranges?: string;
 }
 
 /** One getMonitors call, logs narrowed to [rangeStart, rangeEnd]. Rejects with the
  *  API's own message on a non-ok reply. Shared by the card hook and the background
- *  monitor, which has no React. */
+ *  monitor, which has no React. `uptimeOnly` asks UptimeRobot for the exact uptime %
+ *  over the range instead of logs, which cap at 50 and can truncate a month. */
 export async function fetchUptimeRobotMonitors(
   apiKey: string,
   monitorIds: string[],
   rangeStart?: string,
   rangeEnd?: string,
+  uptimeOnly = false,
 ): Promise<UptimeRobotMonitor[]> {
   const startUnix = rangeStart ? Math.floor(new Date(rangeStart).getTime() / 1000) : undefined;
   const endUnix   = rangeEnd   ? Math.floor(new Date(rangeEnd).getTime()   / 1000) : undefined;
@@ -30,10 +34,11 @@ export async function fetchUptimeRobotMonitors(
   const params: Record<string, string> = {
     api_key: apiKey,
     format: 'json',
-    logs: '1',
+    logs: uptimeOnly ? '0' : '1',
     logs_limit: '50',
     monitors: monitorIds.join('-'),
   };
+  if (uptimeOnly && startUnix && endUnix) params['custom_uptime_ranges'] = `${startUnix}_${endUnix}`;
   if (startUnix) params['logs_start_time'] = String(startUnix);
   if (endUnix)   params['logs_end_time']   = String(endUnix);
 

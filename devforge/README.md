@@ -68,6 +68,30 @@ Every page opens as its own tab from the sidebar. The sidebar groups them as bel
 - **Safety and cost.** If the repository changes during a run, a warning says so. Report text is rendered with raw HTML removed and only web links kept. Runs use your Claude Code login, never the metered API. Each report shows the tokens it used (hover for the API-equivalent figure). Understanding a description is a lean call of about 3–4k tokens. An investigation is a full agent run, capped at an API-equivalent of $2.
 - **Needs:** `az login`, the app in **Settings → Azure** with its **App repository** (and **API repository** if separate) set to a local git clone, and the Claude CLI on PATH. Desktop app only.
 
+#### Service KPI
+
+**Use it to** fill in the monthly Service KPI report without opening the Azure portal, Cost Analysis and UptimeRobot one by one. Pick last month, press Fetch, and copy each figure (or the whole table) into the Excel file. It covers every app in **Settings → Azure**, not only MEDU.
+
+- **Month.** Defaults to the previous month in SGT. The window is shown in the report's own wording (`01 Mar 2024 12:00:00 AM to 31 Mar 2024 11:59:59 PM (UTC+08)`), with a copy button.
+- **One row per site.** Each configured app gets a row, plus a row for its API when one is set. A checkbox leaves a row out of the fetch and of Copy all. Columns: **CPU % (avg)**, **Memory % (avg)**, **DB CPU % (avg)** (when the app has a database), **5xx errors** (when the site has App Insights), **Uptime %** (when the platform has UptimeRobot monitors) and **RG cost (USD)**. A column that doesn't apply shows "-", and hovering it says what to add in Settings.
+- **How figures are read.**
+  - CPU, memory and DB are the mean of the daily averages over the SGT month. This can differ slightly from the portal's whole-range average when a day has missing samples.
+  - App Service CPU and memory are for the App Service plan, as the portal dashboards chart them, so sites on one plan show the same numbers. The plan name is under the app name.
+  - Container Apps use their own `CpuPercentage` / `MemoryPercentage`.
+  - 5xx counts every request with a 5xx code, plus failed requests with no code (the same rule as App Health Check), weighted for sampling. It uses each site's own App Insights resource.
+  - Uptime is UptimeRobot's exact uptime % for the month (`custom_uptime_ranges`), averaged across a platform's monitors, so long months aren't cut short by the 50-log limit.
+- **Cloud cost.** The Cost Management figures for the UTC calendar month, with copy buttons throughout:
+  - **By resource group.** Tick groups to get **Selected groups by service** and their combined total. This is how a platform's report lines read; for example, the "MEDU (last month)" Cost Analysis view is `prdmedu-rg` + `uatmedu-rg` together. The configured apps' groups start ticked.
+  - **Subscription by service** and the subscription total.
+  - **The RG cost column** in the table is the app's whole resource group. When several rows share a group the hover says so, so don't add those cells up.
+  - **Throttling.** Cost Management allows only a few queries a minute. A throttled request is retried once, then the card asks you to wait a minute.
+- **Copying.** Every value has its own copy button, every row has Copy row, and **Copy all** copies the table as tab-separated text that pastes straight into Excel cells. Values are rounded as the report asks: 2 dp, uptime 1 dp, 5xx as a whole number.
+- **Failures stay local.** A missing permission or resource marks only its own cell (hover for the reason), and the rest of the page still fills in.
+- **Not covered:** average page load (Google Analytics) stays a manual step.
+- **Needs:** `az login`, the apps in **Settings → Azure**, the **Cost Management Reader** role on the subscription for cost, and the UptimeRobot API key in Settings for uptime. Desktop app only.
+
+Implementation: [electron/ipc/azure-kpi.cjs](electron/ipc/azure-kpi.cjs), [src/pages/serviceKpiPage.tsx](src/pages/serviceKpiPage.tsx), [src/lib/service-kpi.ts](src/lib/service-kpi.ts)
+
 ### Web quality
 
 #### PageSpeed
@@ -150,7 +174,7 @@ Offline utilities, each on its own page. Nothing you paste leaves the machine.
   - Azure is unreachable for 3 checks in a row (and again when it recovers).
 - Each alert carries its numbers (peak values, time, averages). The Settings tab lists the exact thresholds.
 - It also runs the **saved-query alerts** set up on Ask Telemetry (see there).
-- Clicking an alert opens App Health Check reloaded to today, or Ask Telemetry for a saved-query alert. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu.
+- Clicking an alert opens App Health Check reloaded to today, or Ask Telemetry for a saved-query alert. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu. devForge runs as a single instance: launching it again while it is open (or hidden in the tray) brings the existing window forward instead of starting a second copy.
 
 Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-monitor.cjs), [src/monitor/](src/monitor/)
 
@@ -159,7 +183,7 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 ## App shell
 
 - **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search. Click a group heading to collapse or expand it. Every group starts expanded and the choice is remembered; searching shows all matches regardless.
-- **Authentication badges** at the foot of the sidebar: one badge each for Azure (CLI sign-in), Atlassian (Confluence API token and browser session, green only when both work) and Claude (Claude Code login), colored by connection: green when signed in, amber when it can't be verified, red when it needs fixing, grey while checking or not set up. Hover for the exact state. They re-check every 5 minutes. Click a badge for a Re-check; when one isn't signed in, the menu also shows the step-by-step sign-in guide and the fix (copy `az login` / `claude`, open Settings → Atlassian, create an API token). These badges replace the per-page Azure and Atlassian token pills, so every page shows them in one place. The Claude Code check reads the login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) through [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs) and bills nothing. Implementation: [src/components/layout/sidebar-auth-status.tsx](src/components/layout/sidebar-auth-status.tsx)
+- **Authentication badges** at the foot of the sidebar: one badge each for Azure (CLI sign-in), Atlassian (Confluence API token and browser session, green only when both work) and Claude (Claude Code login; the badge reads `12% / 34% Claude`, your 5-hour session usage then weekly usage), colored by connection: green when signed in, amber when it can't be verified, red when it needs fixing, grey while checking or not set up. Hover for the exact state. They re-check every 5 minutes. Click a badge for a Re-check; when one isn't signed in, the menu also shows the step-by-step sign-in guide and the fix (copy `az login` / `claude`, open Settings → Atlassian, create an API token). These badges replace the per-page Azure and Atlassian token pills, so every page shows them in one place. The Claude Code check reads the login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) through [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs) and bills nothing. Implementation: [src/components/layout/sidebar-auth-status.tsx](src/components/layout/sidebar-auth-status.tsx)
 - **Browser-style tabs.** Open tabs are restored on the next launch and stay mounted, so switching back keeps your inputs and results. Shortcuts: **Ctrl+Tab** / **Ctrl+Shift+Tab** to cycle, **Ctrl+W** to close, **Ctrl+1–8** to jump to a tab and **Ctrl+9** for the last one.
 - **Settings**, **Release notes** and **auto-update** are covered in their sections below.
 

@@ -145,3 +145,4 @@ module.exports = function registerBackgroundMonitor(mainWindow) {
 
 /** main.cjs asks this before quitting on window-all-closed. */
 module.exports.isEnabled = () => enabled;
+module.exports.showMain = showMain;

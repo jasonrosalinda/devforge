@@ -2,6 +2,7 @@ import type { IAzureAPI } from './azureCapture.types';
 import type { IAzureMetricsAPI } from './azureMetrics.types';
 import type { ITelemetryAPI } from './telemetry.types';
 import type { IAppInvestigationAPI } from './app-investigation.types';
+import type { IServiceKpiAPI } from './serviceKpi.types';
 
 export type ReportKind = 'rca' | 'investigation';
 
@@ -114,6 +115,9 @@ export interface IElectronAPI {
 
     // Azure Monitor Metrics  (new)
     azureMetrics: IAzureMetricsAPI;
+
+    // Service KPI — one month's averages, 5xx counts and cost per configured app
+    serviceKpi: IServiceKpiAPI;
 
     // Ask Telemetry — Claude-written KQL against App Insights
     telemetry: ITelemetryAPI;

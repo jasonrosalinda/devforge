@@ -2678,5 +2678,12 @@ handler._fetchMonitorMetrics = fetchMonitorMetrics;
 handler._fetchAppMetrics = fetchAppMetrics;
 handler._clearLookups = () => _lookupCache.clear();
 handler._fetchFiveXxRequests = fetchFiveXxRequests;
+// Shared with azure-kpi.cjs (Service KPI), so both read resources the same way.
+handler._getToken = getToken;
+handler._resourceId = resourceId;
+handler._sqlDbResourceId = sqlDbResourceId;
+handler._getPlanInfo = getPlanInfo;
+handler._resolveSiteAppId = resolveSiteAppId;
+handler._RC_5XX_EXPR = RC_5XX_EXPR;
 
 module.exports = handler;

@@ -22,6 +22,17 @@ const TITLEBAR_THEMES = {
 };
 const useCustomTitlebar = process.platform === 'win32';
 
+// One instance only: a second launch (e.g. while devForge sits in the tray) quits
+// itself and surfaces the running window instead.
+let primaryWindow = null;
+if (!app.requestSingleInstanceLock()) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (primaryWindow) backgroundMonitor.showMain(primaryWindow);
+    });
+}
+
 function createWindow() {
     const mainWindow = new BrowserWindow({
         width: 1400,
@@ -73,13 +84,23 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    // The losing instance is already quitting; don't build a window or tray for it.
+    if (!app.hasSingleInstanceLock()) return;
     const mainWindow = createWindow();
+    primaryWindow = mainWindow;
 
     try {
         require('./ipc/azure-metrics.cjs')(mainWindow);
         console.log('✅ azure-metrics handlers registered');
     } catch (err) {
         console.error('❌ Failed to load azure-metrics.cjs:', err);
+    }
+
+    try {
+        require('./ipc/azure-kpi.cjs')();
+        console.log('✅ azure-kpi handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load azure-kpi.cjs:', err);
     }
 
     try {

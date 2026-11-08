@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
     },
 
+    serviceKpi: {
+        fetch: (opts) => ipcRenderer.invoke('azure-kpi:fetch', opts),
+    },
+
     telemetry: {
         ask: (opts) => ipcRenderer.invoke('telemetry:ask', opts),
         run: (opts) => ipcRenderer.invoke('telemetry:run', opts),
