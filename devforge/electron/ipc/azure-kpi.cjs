@@ -13,8 +13,8 @@ const {
   _getPlanInfo: getPlanInfo,
   _resolveSiteAppId: resolveSiteAppId,
   _RC_5XX_EXPR: RC_5XX_EXPR,
-  _createCachingCredential: createCachingCredential,
 } = metrics;
+const { sharedCredential } = require('./azure-credential.cjs');
 
 const COST_API = '2023-03-01';
 // shortcut: stops after this many Cost Management pages; one month of one subscription grouped by RG x service fits easily, raise it if the total ever reads short.
@@ -226,15 +226,14 @@ async function fetchServiceKpi({ client, cred }, { config, window, targets }) {
 
 const handler = () => {
   const { ipcMain } = require('electron');
-  const { DefaultAzureCredential } = require('@azure/identity');
   const { MetricsQueryClient } = require('@azure/monitor-query');
 
+  // The shared credential keeps no failed token, so a fresh `az login` works on retry
+  // without dropping anything here.
   let shared = null;
   const azure = () => {
-    if (!shared) {
-      const cred = createCachingCredential(new DefaultAzureCredential());
-      shared = { cred, client: new MetricsQueryClient(cred) };
-    }
+    const cred = sharedCredential();
+    if (shared?.cred !== cred) shared = { cred, client: new MetricsQueryClient(cred) };
     return shared;
   };
 
@@ -242,8 +241,6 @@ const handler = () => {
     try {
       return await fetchServiceKpi(azure(), opts);
     } catch (err) {
-      // A credential failure (not signed in) lands here; drop the client so `az login` takes effect on retry.
-      shared = null;
       return { _error: errMessage(err) };
     }
   });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { AppMetrics, ReleaseEvent } from '@shared/types/azureMetrics.types';
+import type { ReleaseEvent } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -10,23 +10,15 @@ import { requestHealthCheckReload } from '@/lib/health-check-reload';
 import { cn } from '@/lib/utils';
 import { releaseTitle } from './releaseMarkers';
 import {
-  MIN_AFTER_MS, NEW_TYPE_MIN_COUNT, compareWindows, newExceptionTypes, overallVerdict, splitEventCounts,
-  verdictLabel, verdictTeamsTable, verdictWindows, type OverallVerdict, type VerdictRow,
+  MIN_AFTER_MS, NEW_TYPE_MIN_COUNT, computeReleaseVerdict,
+  verdictLabel, verdictTeamsTable, verdictWindows, type OverallVerdict, type VerdictOutcome, type VerdictResult,
 } from './releaseVerdict';
 
 const HOURS = [1, 2, 6] as const;
 
-interface Result {
-  rows: VerdictRow[];
-  newTypes: Array<{ type: string; count: number }>;
-  verdict: OverallVerdict;
-}
+type Result = VerdictResult;
 
-type State =
-  | { kind: 'loading' }
-  | { kind: 'too-soon'; minutesSince: number }
-  | { kind: 'error'; message: string }
-  | { kind: 'done'; result: Result };
+type State = { kind: 'loading' } | VerdictOutcome;
 
 const VERDICT_CLASS: Record<OverallVerdict, string> = {
   regressed: 'border-error/50 bg-error/10 text-error',
@@ -60,39 +52,14 @@ export function ReleaseVerdictDialog({ target, onClose, appKey, appName, hasApi,
     const atMs = Date.parse(target.event.at);
     const now = Date.now();
     const w = verdictWindows(atMs, hours, now);
+    // Answered without a fetch, so no loading flash.
     if (w.afterEnd - w.afterStart < MIN_AFTER_MS) {
       setState({ kind: 'too-soon', minutesSince: Math.max(0, Math.round((now - atMs) / 60000)) });
       return;
     }
     setState({ kind: 'loading' });
-    const iso = (ms: number) => new Date(ms).toISOString();
-    const api = window.electronAPI.azureMetrics;
-    const side = (start: number, end: number) =>
-      // `silent`: these windows must not stream into the Health Check cards behind the dialog.
-      api.fetch({ appKeys: [appKey], range: 'custom', config, customStart: iso(start), customEnd: iso(end), silent: true });
-    const events = { appKey, range: 'custom', config, customStart: iso(w.beforeStart), customEnd: iso(w.afterEnd) };
-
-    Promise.all([side(w.beforeStart, w.beforeEnd), side(w.afterStart, w.afterEnd), api.fetchRestarts(events), api.fetchCrashes(events)])
-      .then(([b, a, restarts, crashes]) => {
-        if (id !== requestId.current) return;
-        const before = b[appKey] as (AppMetrics & { error?: string }) | undefined;
-        const after = a[appKey] as (AppMetrics & { error?: string }) | undefined;
-        if (!before || !after || before.error || after.error) {
-          setState({ kind: 'error', message: before?.error ?? after?.error ?? 'No metrics came back for this app.' });
-          return;
-        }
-        const r = target.site === 'fe' ? restarts.fe : restarts.api;
-        const c = target.site === 'fe' ? crashes.fe : crashes.api;
-        const counts = splitEventCounts(atMs, r, c);
-        const rows = compareWindows(
-          { metrics: before, minutes: (w.beforeEnd - w.beforeStart) / 60000, ...counts.before },
-          { metrics: after, minutes: (w.afterEnd - w.afterStart) / 60000, ...counts.after },
-          target.site,
-        );
-        const insights = (m: AppMetrics) => (target.site === 'fe' ? m.requestInsights : m.apiRequestInsights);
-        const newTypes = newExceptionTypes(insights(before)?.errorTypes, insights(after)?.errorTypes);
-        setState({ kind: 'done', result: { rows, newTypes, verdict: overallVerdict(rows, newTypes) } });
-      })
+    computeReleaseVerdict(window.electronAPI.azureMetrics, { appKey, site: target.site, event: target.event, hours, config, nowMs: now })
+      .then(outcome => { if (id === requestId.current) setState(outcome); })
       .catch((err: unknown) => {
         if (id === requestId.current) setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
       });

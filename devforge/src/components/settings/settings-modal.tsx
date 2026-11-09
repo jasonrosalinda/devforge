@@ -657,7 +657,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                 />
               </div>
 
-              {/* Mirrors src/monitor/healthAlerts.ts, status.ts, anomalyDetection.ts and appRemarks.tsx — update together. */}
+              {/* Mirrors src/monitor/healthAlerts.ts, releaseAlerts.ts, certAlerts.ts, status.ts, anomalyDetection.ts and appRemarks.tsx — update together. */}
               <div className="grid gap-3 sm:grid-cols-[auto_1fr]">
                 <div className="flex flex-col gap-1">
                   <Label className="text-xs">Watches</Label>
@@ -666,6 +666,8 @@ const [newMonitorId, setNewMonitorId] = useState('');
                     <li>Database CPU and memory, when a database is set</li>
                     <li>Requests and 5xx errors</li>
                     <li>UptimeRobot downtime, when monitors are set</li>
+                    <li>New production releases (checked every 10 min)</li>
+                    <li>TLS certificates of each app&apos;s hosts (checked once a day)</li>
                   </ul>
                 </div>
                 <div className="flex flex-col gap-1">
@@ -682,6 +684,11 @@ const [newMonitorId, setNewMonitorId] = useState('');
                     <li>5xx errors go above 5% of requests in the latest minute.</li>
                     <li>UptimeRobot reports downtime.</li>
                     <li>Azure is unreachable for 3 checks in a row, and again when it recovers.</li>
+                    <li>
+                      A release regresses: 70 min after it reaches production, its first hour is compared with the hour
+                      before (the Release Verdict) and the verdict is Regressed.
+                    </li>
+                    <li>A host&apos;s certificate drops under 14 days left, and again when it expires.</li>
                   </ul>
                   <p className="text-xs text-muted-foreground">
                     Each alert fires once. An anomaly alerts again only if it gets worse.

@@ -92,6 +92,34 @@ Every page opens as its own tab from the sidebar. The sidebar groups them as bel
 
 Implementation: [electron/ipc/azure-kpi.cjs](electron/ipc/azure-kpi.cjs), [src/pages/serviceKpiPage.tsx](src/pages/serviceKpiPage.tsx), [src/lib/service-kpi.ts](src/lib/service-kpi.ts)
 
+#### Config Diff
+
+**Use it to** check, before a slot swap or a UAT → PRD release, that two App Service sites have the same app settings and connection strings, without opening both Configuration blades side by side.
+
+- Pick a **Left** and a **Right** site (each configured web app, and its API when that is an App Service) and a slot for each (**production** or any deployment slot, listed from Azure). **Compare**, or swap the sides with the arrow button.
+- Every app setting and connection string name is listed with its status: **Only in left**, **Only in right**, **Differs** or **Same**, differences first. Filter chips show the counts. Badges mark connection strings (with their type) and **slot settings** (sticky, stays with its slot on a swap).
+- **Values never leave the main process.** devForge reads them, compares them on this machine and sends only the names and statuses to the page. They aren't shown, logged or sent to Claude, and error messages never include Azure's response. **Copy** puts the names and statuses on the clipboard as tab-separated text.
+- Container Apps aren't covered: they have no App Service settings.
+- **Needs:** `az login` and the apps in **Settings → Azure**. Reading settings needs the `config/list` action (**Website Contributor** or higher) on each site's resource group, because Reader is not enough. Without it, that side shows a "No permission" line naming the resource group. Desktop app only.
+
+Implementation: [electron/ipc/azure-config.cjs](electron/ipc/azure-config.cjs), [src/pages/configDiffPage.tsx](src/pages/configDiffPage.tsx), [src/lib/config-diff.ts](src/lib/config-diff.ts)
+
+#### Cert & Domain Expiry
+
+**Use it to** see how many days each app's TLS certificate has left, before a lapsed certificate takes a site down.
+
+- Pick apps (all by default) and **Check certificates**. The hosts are each app's **platform URLs** from Settings, plus the host names Azure has bound to the web app and the API (App Service host names, or a Container App's ingress FQDN and custom domains). Kudu (`*.scm.*`) hosts are skipped. Without Reader access, or when signed out, only the platform URLs are checked.
+- One row per host, soonest expiry first: host, app (and whether it came from a platform URL, the web app or the API), expiry date in SGT, **days left** (red under 14, amber under 30, or "Expired N d ago"), issuer and **Trusted**.
+- devForge only reads the certificate from the TLS handshake on port 443 and sends nothing. What each row shows depends on what the handshake reports:
+  - **An expired certificate** keeps its real dates and shows "Expired N d ago".
+  - **A certificate that doesn't name the host** shows its days left, plus **Doesn't cover this host** under Trusted. Hover it to see the names the certificate does cover.
+  - **A certificate whose chain this machine can't trust** says **Can't verify from this network** instead of a days-left figure. A self-signed certificate does this, and so does a TLS-inspecting corporate proxy, whose date would be the proxy's.
+  - **An unreachable host** shows its error.
+- With the background monitor on, the same check runs once a day and alerts when a certificate drops under 14 days or expires (see Background monitor).
+- **Needs:** apps in **Settings → Azure** (platform URLs and/or `az login` with Reader on the apps). Desktop app only.
+
+Implementation: [electron/ipc/cert-expiry.cjs](electron/ipc/cert-expiry.cjs), [src/pages/certExpiryPage.tsx](src/pages/certExpiryPage.tsx), [src/monitor/certAlerts.ts](src/monitor/certAlerts.ts)
+
 ### Web quality
 
 #### PageSpeed
@@ -158,6 +186,9 @@ Offline utilities, each on its own page. Nothing you paste leaves the machine.
 | **Encoders** | Base64, URL and HTML encode / decode, hashes (SHA) and UUIDs. |
 | **Text Diff** | Compare two blocks of text line by line. |
 | **Image Converter** | Convert images between PNG, JPEG, WebP, ICO and SVG (traced or embedded), e.g. to make a favicon. |
+| **App Settings Converter** | Turn `appsettings.json` (comments and trailing commas allowed) into Azure App Service settings: Advanced-edit JSON (optionally all sticky slot settings) or `NAME=value` lines, with nested keys as `Section__Key` and arrays as `Origins__0`. Warns when two names differ only by case. Also converts back from Advanced-edit JSON or `NAME=value` lines to nested JSON (values come back as strings). |
+| **Connection String Parser** | Split a SQL Server, Storage, Service Bus / Event Hubs, Cosmos DB, Redis or App Insights connection string into fields, with the kind detected. Passwords and keys are masked until you switch on **Show secrets**; each field has a copy button. |
+| **Color & Contrast** | Convert a colour between HEX, RGB and HSL, and check text / background contrast against WCAG AA and AAA (normal and large text, UI components), with a live preview. |
 
 ---
 
@@ -171,7 +202,9 @@ Offline utilities, each on its own page. Nothing you paste leaves the machine.
   - 2 or more of CPU, memory, DB CPU and DB memory spike together;
   - 5xx errors (status 500+, or a request that failed with no status code; 4xx never count) go above 5% of requests;
   - UptimeRobot reports downtime;
-  - Azure is unreachable for 3 checks in a row (and again when it recovers).
+  - Azure is unreachable for 3 checks in a row (and again when it recovers);
+  - **a release regresses.** Every 10 minutes it looks for a new production release on each watched site (FE and API apart). 70 minutes after a release (its first hour, plus 10 minutes for App Insights to catch up), it runs the Release Verdict, comparing 1 hour before with 1 hour after. If the verdict is **Regressed**, the alert names the release time (SGT) and lists up to three metrics that got worse ("5xx rate 0.40% → 2.10%") and any new exception types. Releases from before the monitor started are never judged, each release is judged once, and a verdict that keeps failing is dropped 6 hours after the release. The check isn't kept across a restart, so a restart within that hour skips the release;
+  - **a TLS certificate is close to expiry.** Once a day it runs the Cert & Domain Expiry check for the watched apps and alerts once per host when the certificate drops under 14 days left, and again when it expires. Hosts whose chain this machine can't trust are skipped. The alert state isn't kept across a restart, so a host that is still under 14 days alerts again after one.
 - Each alert carries its numbers (peak values, time, averages). The Settings tab lists the exact thresholds.
 - It also runs the **saved-query alerts** set up on Ask Telemetry (see there).
 - Clicking an alert opens App Health Check reloaded to today, or Ask Telemetry for a saved-query alert. With the monitor on, closing the window keeps devForge in the tray; quit from the tray menu. devForge runs as a single instance: launching it again while it is open (or hidden in the tray) brings the existing window forward instead of starting a second copy.
@@ -183,8 +216,15 @@ Implementation: [electron/ipc/background-monitor.cjs](electron/ipc/background-mo
 ## App shell
 
 - **Sidebar**, grouped Monitoring / Web quality / Release / Utilities, with search. Click a group heading to collapse or expand it. Every group starts expanded and the choice is remembered; searching shows all matches regardless.
-- **Authentication badges** at the foot of the sidebar: one badge each for Azure (CLI sign-in), Atlassian (Confluence API token and browser session, green only when both work) and Claude (Claude Code login; the badge reads `12% / 34% Claude`, your 5-hour session usage then weekly usage), colored by connection: green when signed in, amber when it can't be verified, red when it needs fixing, grey while checking or not set up. Hover for the exact state. They re-check every 5 minutes. Click a badge for a Re-check; when one isn't signed in, the menu also shows the step-by-step sign-in guide and the fix (copy `az login` / `claude`, open Settings → Atlassian, create an API token). These badges replace the per-page Azure and Atlassian token pills, so every page shows them in one place. The Claude Code check reads the login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) through [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs) and bills nothing. Implementation: [src/components/layout/sidebar-auth-status.tsx](src/components/layout/sidebar-auth-status.tsx)
+- **Authentication badges** at the foot of the sidebar: one badge each for Azure (CLI sign-in), Atlassian (Confluence API token and browser session, green only when both work) and Claude (Claude Code login; the badge reads `12% / 34% Claude`, your 5-hour session usage then weekly usage), colored by connection: green when signed in, amber when it can't be verified, red when it needs fixing, grey while checking or not set up. Hover for the exact state. They re-check every 5 minutes; the Azure poll reuses the cached token, so it starts no `az` process while the token is valid. Click a badge for a Re-check (for Azure this drops the cached tokens, so a fresh `az login` or another account takes effect at once); when one isn't signed in, the menu also shows the step-by-step sign-in guide and the fix (copy `az login` / `claude`, open Settings → Atlassian, create an API token). These badges replace the per-page Azure and Atlassian token pills, so every page shows them in one place. The Claude Code check reads the login on this machine (`~/.claude/.credentials.json`, or `CLAUDE_CONFIG_DIR`) through [electron/ipc/claude-usage.cjs](electron/ipc/claude-usage.cjs) and bills nothing. Implementation: [src/components/layout/sidebar-auth-status.tsx](src/components/layout/sidebar-auth-status.tsx)
 - **Browser-style tabs.** Open tabs are restored on the next launch and stay mounted, so switching back keeps your inputs and results. Shortcuts: **Ctrl+Tab** / **Ctrl+Shift+Tab** to cycle, **Ctrl+W** to close, **Ctrl+1–8** to jump to a tab and **Ctrl+9** for the last one.
+- **Command palette (Ctrl+K).** One search box for:
+  - every page and Toolbox tool;
+  - **Health Check: <app>** for each configured app, which opens App Health Check on that app for the last 6 hours, like a Home card;
+  - every saved Ask Telemetry query, which opens Ask Telemetry and runs it, with no Claude call;
+  - **Open Settings**.
+
+  Matches use each page's keywords and description too. Press Ctrl+K again or Esc to close.
 - **Settings**, **Release notes** and **auto-update** are covered in their sections below.
 
 ---
@@ -240,6 +280,8 @@ npm run electron:dev:live    # Vite + Electron with HMR
 ```
 
 `electron:dev:live` runs Vite at `http://localhost:5173` and launches Electron with hot reload — recommended for active development.
+
+**Timing trace:** set `DEVFORGE_TRACE=1` before starting (PowerShell: `$env:DEVFORGE_TRACE=1; npm run electron:dev:live`) to log every outbound call (host and path, status, ms), every IPC handler's total time and every Azure token request (cache hit or miss) to the terminal. Headers, bodies and query strings are never logged. Implementation: [electron/ipc/trace.cjs](electron/ipc/trace.cjs)
 
 ---
 
@@ -323,7 +365,11 @@ devforge/
 │   ├── main.cjs             # App entry, BrowserWindow, auto-updater wiring
 │   ├── preload.cjs          # contextBridge exposing electronAPI (main window + worker)
 │   └── ipc/                 # Per-feature IPC modules
+│       ├── azure-credential.cjs      # One shared, caching Azure credential (CLI first) for every module
 │       ├── azure-metrics.cjs         # Azure Monitor / App Insights queries (page + monitor fetch)
+│       ├── azure-config.cjs          # Config Diff: app setting / connection string names, values stay in main
+│       ├── cert-expiry.cjs           # Cert & Domain Expiry: TLS handshake per app host
+│       ├── trace.cjs                 # DEVFORGE_TRACE=1 timing log (fetch, IPC, tokens)
 │       ├── azure-*.cjs               # SNAT, restarts, crash monitoring, page views, detectors, signals
 │       ├── background-monitor.cjs    # Tray icon, hidden worker window, desktop notifications
 │       ├── incident-report.cjs       # AI report + Claude RCA

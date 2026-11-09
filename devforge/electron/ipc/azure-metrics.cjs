@@ -178,36 +178,8 @@ async function getToken(credential) {
   return tokenResp.token;
 }
 
-// Refetch this long before expiry, so a token never lapses mid-fetch.
-const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
-
-/**
- * A TokenCredential that keeps each scope's token until close to expiry. Every
- * handler used to build a fresh DefaultAzureCredential, and the Azure CLI credential
- * underneath starts an `az` process (~1s) per getToken — several per app per fetch,
- * every minute with the background monitor on. Concurrent callers share one request;
- * a failure is not kept, so the next call tries again.
- */
-function createCachingCredential(inner) {
-  const tokens = new Map();
-  return {
-    getToken(scopes, options) {
-      // MetricsQueryClient asks for "https://management.azure.com//.default" — the same
-      // resource as the single-slash form the handlers use.
-      const key = [].concat(scopes).map(s => s.replace(/\/+\.default$/, '/.default')).join(' ');
-      const hit = tokens.get(key);
-      if (hit && (hit.pending || hit.expiresOn - Date.now() > TOKEN_REFRESH_MARGIN_MS)) return hit.promise;
-      const promise = Promise.resolve(inner.getToken(scopes, options));
-      const entry = { promise, pending: true, expiresOn: 0 };
-      tokens.set(key, entry);
-      promise.then(
-        (t) => { entry.pending = false; entry.expiresOn = t?.expiresOnTimestamp ?? 0; },
-        () => { if (tokens.get(key) === entry) tokens.delete(key); },
-      );
-      return promise;
-    },
-  };
-}
+// Token caching lives in azure-credential.cjs, shared by every Azure module.
+const { sharedCredential, resetCredential, ARM_SCOPE } = require('./azure-credential.cjs');
 
 function buildTimespan(range, customStart, customEnd) {
   if (customStart && customEnd) {
@@ -906,7 +878,20 @@ async function getAvailability(client, token, resId, appType, range, granularity
   return { pct, downtimeMins, incidents: downtimeIntervals.length, downtimeIntervals, series };
 }
 
-async function findAppInsightsAppId(token, subscriptionId, resourceGroup, appName) {
+/**
+ * The App Insights AppId linked to a site, cached for LOOKUP_TTL. The raw lookup reads the
+ * app settings and then lists every App Insights component in the subscription, and it
+ * used to run on every fetch. Only a found id is kept: a null can just as well be a 401 or
+ * 429, and caching that would hide App Insights for the rest of the session.
+ */
+function findAppInsightsAppId(token, subscriptionId, resourceGroup, appName) {
+  return cachedLookup(
+    `aiid:${subscriptionId}/${resourceGroup}/${appName}`.toLowerCase(),
+    () => lookupAppInsightsAppId(token, subscriptionId, resourceGroup, appName),
+  );
+}
+
+async function lookupAppInsightsAppId(token, subscriptionId, resourceGroup, appName) {
   try {
     // 1. Try reading app settings for instrumentation key
     let ikey = null;
@@ -1954,13 +1939,25 @@ async function fetchAppMetrics(client, token, credential, app, subscriptionId, r
 // lookup that failed is not.
 const LOOKUP_TTL = 60 * 60 * 1000;
 const _lookupCache = new Map();
+const _lookupInFlight = new Map();
 
+/** Concurrent callers for one key (FE + details + deps on first load) share one lookup. */
 async function cachedLookup(key, fn, { keepNull = false } = {}) {
   const hit = _lookupCache.get(key);
   if (hit && Date.now() < hit.expiresAt) return hit.value;
-  const value = await fn();
-  if (value != null || keepNull) _lookupCache.set(key, { value, expiresAt: Date.now() + LOOKUP_TTL });
-  return value;
+  const running = _lookupInFlight.get(key);
+  if (running) return running;
+  const promise = (async () => {
+    try {
+      const value = await fn();
+      if (value != null || keepNull) _lookupCache.set(key, { value, expiresAt: Date.now() + LOOKUP_TTL });
+      return value;
+    } finally {
+      _lookupInFlight.delete(key);
+    }
+  })();
+  _lookupInFlight.set(key, promise);
+  return promise;
 }
 
 /** One query for several metrics of one resource → each metric's data points by name. */
@@ -2227,46 +2224,42 @@ const DETECTOR_QUERIES = [
 
 const handler = (_mainWindow) => {
   const { ipcMain } = require('electron');
-  const { DefaultAzureCredential } = require('@azure/identity');
   const { MetricsQueryClient } = require('@azure/monitor-query');
 
-  // One credential and metrics client for every handler below, so tokens are reused
-  // across fetches (see createCachingCredential). Re-check drops them, so a new
-  // `az login` takes effect straight away rather than when the old token expires.
+  // One credential (shared with every Azure module, see azure-credential.cjs) and one
+  // metrics client for every handler below, so tokens are reused across fetches. The
+  // client is rebuilt only when a Re-check has reset the credential.
   let shared = null;
   const sharedAzure = () => {
-    if (!shared) {
-      const cred = createCachingCredential(new DefaultAzureCredential());
-      shared = { cred, client: new MetricsQueryClient(cred) };
-    }
+    const cred = sharedCredential();
+    if (shared?.cred !== cred) shared = { cred, client: new MetricsQueryClient(cred) };
     return shared;
   };
 
-  ipcMain.handle('azure-metrics:check-credential', async () => {
-    shared = null;
-    const { AzureCliCredential } = require('@azure/identity');
-    const scope = 'https://management.azure.com/.default';
-    const withTimeout = (promise, ms, label) =>
+  // The sidebar badge polls this every 5 minutes: through the shared caching credential
+  // a valid token answers instantly, with no `az` process. Only a user's Re-check passes
+  // `reset`, which drops the cached tokens and lookups so a fresh `az login` (or another
+  // account) takes effect at once.
+  ipcMain.handle('azure-metrics:check-credential', async (_event, opts) => {
+    if (opts?.reset) {
+      resetCredential();
+      _lookupCache.clear();
+    }
+    const withTimeout = (promise, ms) =>
       Promise.race([
         promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), ms)),
       ]);
 
     try {
-      const cliCred = new AzureCliCredential();
-      await withTimeout(cliCred.getToken(scope), 6000, 'AzureCliCredential');
-      return { ok: true, source: 'azure-cli' };
-    } catch (cliErr) {
-      try {
-        const cred = new DefaultAzureCredential();
-        await withTimeout(cred.getToken(scope), 8000, 'DefaultAzureCredential');
-        return { ok: true, source: 'default' };
-      } catch (err) {
-        const msg = (err.message || String(err)).includes('timed out')
-          ? 'Azure credential check timed out. Run `az login` in your terminal, then click Re-check.'
-          : (cliErr.message || err.message || String(err));
-        return { ok: false, error: msg };
+      await withTimeout(sharedAzure().cred.getToken(ARM_SCOPE), 10_000);
+      return { ok: true };
+    } catch (err) {
+      if (err?.message === 'timed out') {
+        return { ok: false, error: 'Azure credential check timed out. Run `az login` in your terminal, then click Re-check.' };
       }
+      // ChainedTokenCredential reports every credential it tried; the Azure CLI one comes first and says what to do.
+      return { ok: false, error: err?.errors?.[0]?.message || err?.message || String(err) };
     }
   });
 
@@ -2670,7 +2663,6 @@ const handler = (_mainWindow) => {
 handler._getGranularity = getGranularity;
 handler._summarize = summarize;
 handler._groupUrlSeries = groupUrlSeries;
-handler._createCachingCredential = createCachingCredential;
 handler._findAppInsightsAppId = findAppInsightsAppId;
 handler._setCached = setCached;
 handler._cacheSize = () => _fetchCache.size;

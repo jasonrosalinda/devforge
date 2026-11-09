@@ -1,5 +1,5 @@
 import type { Page, PageGroup } from "@/types/pages.types";
-import { Activity, BookOpen, ClipboardList, Gauge, Languages, LayoutDashboard, Rocket, ScanSearch, SearchCode, Telescope } from "lucide-react";
+import { Activity, BookOpen, ClipboardList, Gauge, GitCompareArrows, ShieldCheck, Languages, LayoutDashboard, Rocket, ScanSearch, SearchCode, Telescope } from "lucide-react";
 
 import HomePage from "@/pages/homePage";
 import LocalizationPage from "@/pages/localizationPage";
@@ -9,6 +9,8 @@ import AppHealthCheckPage from "@/pages/appHealthCheckPage";
 import TelemetryPage from "@/pages/telemetryPage";
 import AppInvestigationPage from "@/pages/appInvestigationPage";
 import ServiceKpiPage from "@/pages/serviceKpiPage";
+import ConfigDiffPage from "@/pages/configDiffPage";
+import CertExpiryPage from "@/pages/certExpiryPage";
 import ReleasePilotPage from "@/pages/releasePilotPage";
 import ReleaseRunbookPage from "@/pages/releaseRunbookPage";
 import { createToolboxToolPage } from "@/pages/toolboxToolPage";
@@ -63,6 +65,24 @@ export const pages: Page[] = [
         description: "One month's CPU, memory, DB, 5xx, uptime and cloud cost per app, ready to copy into the KPI report",
         group: "Monitoring",
         keywords: ["kpi", "monthly", "report", "cpu", "memory", "cost", "uptime", "5xx", "excel"]
+    },
+    {
+        title: "Config Diff",
+        url: "#",
+        icon: GitCompareArrows,
+        component: ConfigDiffPage,
+        description: "Compare app setting and connection string names between two App Service sites or slots before a swap",
+        group: "Monitoring",
+        keywords: ["slot", "swap", "app settings", "config", "configuration", "drift", "connection string", "staging", "uat"]
+    },
+    {
+        title: "Cert & Domain Expiry",
+        url: "#",
+        icon: ShieldCheck,
+        component: CertExpiryPage,
+        description: "Days left on the TLS certificate of every host your apps answer on",
+        group: "Monitoring",
+        keywords: ["certificate", "cert", "ssl", "tls", "https", "expiry", "expire", "domain", "renewal"]
     },
     {
         title: "PageSpeed",

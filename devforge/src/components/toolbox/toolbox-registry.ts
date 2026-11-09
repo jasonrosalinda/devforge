@@ -1,4 +1,4 @@
-import { Binary, Braces, CalendarClock, Clock, GitCompareArrows, Image as ImageIcon, KeyRound, Regex } from "lucide-react";
+import { Binary, Braces, CalendarClock, Clock, Contrast, FileCog, GitCompareArrows, Image as ImageIcon, KeyRound, PlugZap, Regex } from "lucide-react";
 import type { ToolboxTool } from "@/types/toolbox.types";
 
 import JwtDecoder from "./jwt-decoder";
@@ -9,6 +9,9 @@ import EncodersTool from "./encoders-tool";
 import TextDiff from "./text-diff";
 import DateTimeConverter from "./datetime-converter";
 import ImageConverter from "./image-converter";
+import AppSettingsConverter from "./appsettings-converter";
+import ConnStringParser from "./connstring-parser";
+import ColorContrast from "./color-contrast";
 
 /**
  * Every Toolbox utility. Each entry becomes its own page under the sidebar's
@@ -78,5 +81,29 @@ export const TOOLBOX_TOOLS: ToolboxTool[] = [
         description: "Convert images between PNG, JPEG, WebP, ICO and SVG — traced or embedded — offline.",
         component: ImageConverter,
         keywords: ["image", "convert", "png", "jpg", "jpeg", "webp", "ico", "favicon", "svg", "vector", "trace", "resize"],
+    },
+    {
+        id: "appsettings",
+        title: "App Settings Converter",
+        icon: FileCog,
+        description: "Turn appsettings.json into Azure App Service settings (Section__Key) and back.",
+        component: AppSettingsConverter,
+        keywords: ["appsettings", "app settings", "azure", "app service", "environment", "env", "configuration", "advanced edit", "dotnet"],
+    },
+    {
+        id: "connstring",
+        title: "Connection String Parser",
+        icon: PlugZap,
+        description: "Split a SQL, Storage, Service Bus, Cosmos or Redis connection string into fields, secrets masked.",
+        component: ConnStringParser,
+        keywords: ["connection string", "connstring", "sql", "storage", "service bus", "event hubs", "cosmos", "redis", "password"],
+    },
+    {
+        id: "color",
+        title: "Color & Contrast",
+        icon: Contrast,
+        description: "Convert colours between HEX, RGB and HSL and check WCAG contrast.",
+        component: ColorContrast,
+        keywords: ["color", "colour", "contrast", "wcag", "accessibility", "a11y", "hex", "rgb", "hsl"],
     },
 ];

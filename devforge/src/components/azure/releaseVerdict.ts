@@ -1,4 +1,4 @@
-import type { AppMetrics, CrashResult, ReleaseEvent, RestartResult } from '@shared/types/azureMetrics.types';
+import type { AppMetrics, CrashResult, IAzureMetricsAPI, ReleaseEvent, RestartResult } from '@shared/types/azureMetrics.types';
 import type { TeamsTable } from '@/lib/teams-html';
 import { restartEvents } from './restartSection';
 import { releaseTitle } from './releaseMarkers';
@@ -155,6 +155,56 @@ export function verdictWindows(atMs: number, hours: number, nowMs: number) {
 
 /** Less than this much "after" data and the comparison is mostly noise. */
 export const MIN_AFTER_MS = 15 * 60 * 1000;
+
+export interface VerdictResult {
+  rows: VerdictRow[];
+  newTypes: Array<{ type: string; count: number }>;
+  verdict: OverallVerdict;
+}
+
+export type VerdictOutcome =
+  | { kind: 'too-soon'; minutesSince: number }
+  | { kind: 'error'; message: string }
+  | { kind: 'done'; result: VerdictResult };
+
+/**
+ * Fetch both windows and compare them: what the Release Verdict dialog shows, and what
+ * the background monitor judges a new release by. `api` is window.electronAPI.azureMetrics.
+ */
+export async function computeReleaseVerdict(
+  api: Pick<IAzureMetricsAPI, 'fetch' | 'fetchRestarts' | 'fetchCrashes'>,
+  opts: { appKey: string; site: 'fe' | 'api'; event: ReleaseEvent; hours: number; config: unknown; nowMs?: number },
+): Promise<VerdictOutcome> {
+  const { appKey, site, event, hours, config } = opts;
+  const atMs = Date.parse(event.at);
+  const now = opts.nowMs ?? Date.now();
+  const w = verdictWindows(atMs, hours, now);
+  if (w.afterEnd - w.afterStart < MIN_AFTER_MS) {
+    return { kind: 'too-soon', minutesSince: Math.max(0, Math.round((now - atMs) / 60000)) };
+  }
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const side = (start: number, end: number) =>
+    // `silent`: these windows must not stream into any Health Check cards on screen.
+    api.fetch({ appKeys: [appKey], range: 'custom', config, customStart: iso(start), customEnd: iso(end), silent: true });
+  const events = { appKey, range: 'custom', config, customStart: iso(w.beforeStart), customEnd: iso(w.afterEnd) };
+
+  const [b, a, restarts, crashes] = await Promise.all([
+    side(w.beforeStart, w.beforeEnd), side(w.afterStart, w.afterEnd), api.fetchRestarts(events), api.fetchCrashes(events),
+  ]);
+  const before = b[appKey] as (AppMetrics & { error?: string }) | undefined;
+  const after = a[appKey] as (AppMetrics & { error?: string }) | undefined;
+  if (!before || !after || before.error || after.error) {
+    return { kind: 'error', message: before?.error ?? after?.error ?? 'No metrics came back for this app.' };
+  }
+  const counts = splitEventCounts(atMs, site === 'fe' ? restarts.fe : restarts.api, site === 'fe' ? crashes.fe : crashes.api);
+  const rows = compareWindows(
+    { metrics: before, minutes: (w.beforeEnd - w.beforeStart) / 60000, ...counts.before },
+    { metrics: after, minutes: (w.afterEnd - w.afterStart) / 60000, ...counts.after },
+    site,
+  );
+  const newTypes = newExceptionTypes(insightsOf(before, site)?.errorTypes, insightsOf(after, site)?.errorTypes);
+  return { kind: 'done', result: { rows, newTypes, verdict: overallVerdict(rows, newTypes) } };
+}
 
 const VERDICT_LABEL: Record<OverallVerdict, string> = { regressed: 'Regressed', improved: 'Improved', 'no-change': 'No change' };
 const VERDICT_ACCENT: Record<OverallVerdict, string> = { regressed: '#cf222e', improved: '#1a7f37', 'no-change': '#57606a' };

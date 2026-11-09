@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
 
     azureMetrics: {
-        checkCredential: () => ipcRenderer.invoke('azure-metrics:check-credential'),
+        checkCredential: (opts) => ipcRenderer.invoke('azure-metrics:check-credential', opts),
         fetch: (opts) => ipcRenderer.invoke('azure-metrics:fetch', opts),
         fetchAppDetails: (opts) => ipcRenderer.invoke('azure-metrics:fetch-app-details', opts),
         fetchMonitor: (opts) => ipcRenderer.invoke('azure-metrics:fetch-monitor', opts),
@@ -23,6 +23,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     serviceKpi: {
         fetch: (opts) => ipcRenderer.invoke('azure-kpi:fetch', opts),
+    },
+
+    azureConfig: {
+        slots: (opts) => ipcRenderer.invoke('azure-config:slots', opts),
+        diff: (opts) => ipcRenderer.invoke('azure-config:diff', opts),
+    },
+
+    certs: {
+        check: (opts) => ipcRenderer.invoke('certs:check', opts),
     },
 
     telemetry: {

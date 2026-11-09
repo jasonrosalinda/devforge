@@ -3,6 +3,9 @@ const { app, BrowserWindow, shell, ipcMain, Menu } = require('electron');
 
 const isDev = !app.isPackaged;
 
+// DEVFORGE_TRACE=1 logs every fetch / IPC / token timing; must wrap ipcMain before any handler registers.
+require('./ipc/trace.cjs').install();
+
 Menu.setApplicationMenu(null);
 
 // Windows attributes the monitor's toasts to this id. Matches
@@ -89,6 +92,9 @@ app.whenReady().then(() => {
     const mainWindow = createWindow();
     primaryWindow = mainWindow;
 
+    // Fetch the Azure tokens while the window loads, so the first page doesn't wait on `az`.
+    try { require('./ipc/azure-credential.cjs').warmTokens(); } catch { /* @azure/identity missing: pages report it */ }
+
     try {
         require('./ipc/azure-metrics.cjs')(mainWindow);
         console.log('✅ azure-metrics handlers registered');
@@ -101,6 +107,20 @@ app.whenReady().then(() => {
         console.log('✅ azure-kpi handlers registered');
     } catch (err) {
         console.error('❌ Failed to load azure-kpi.cjs:', err);
+    }
+
+    try {
+        require('./ipc/azure-config.cjs')();
+        console.log('✅ azure-config handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load azure-config.cjs:', err);
+    }
+
+    try {
+        require('./ipc/cert-expiry.cjs')();
+        console.log('✅ cert-expiry handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load cert-expiry.cjs:', err);
     }
 
     try {

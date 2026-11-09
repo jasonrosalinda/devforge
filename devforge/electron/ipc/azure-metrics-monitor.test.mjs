@@ -4,59 +4,37 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const handler = require('./azure-metrics.cjs');
 
-const { _createCachingCredential, _setCached, _cacheSize, _fetchMonitorMetrics, _clearLookups } = handler;
+const { _setCached, _cacheSize, _fetchMonitorMetrics, _clearLookups, _findAppInsightsAppId } = handler;
 
 const MIN = 60_000;
 
-describe('createCachingCredential', () => {
-  const token = (value, expiresInMs) => ({ token: value, expiresOnTimestamp: Date.now() + expiresInMs });
+describe('findAppInsightsAppId', () => {
+  const components = { value: [{ name: 'web', id: '/subscriptions/s/resourceGroups/rg/providers/microsoft.insights/components/web', properties: { AppId: 'app-1' } }] };
+  let fetchMock;
+  beforeEach(() => {
+    _clearLookups();
+    fetchMock = vi.fn(async (url) => (String(url).includes('appsettings')
+      ? { ok: true, json: async () => ({ properties: {} }) }
+      : { ok: true, json: async () => components }));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
 
-  it('reuses a token until 5 minutes before it expires, then fetches a new one', async () => {
-    vi.useFakeTimers();
-    try {
-      const inner = { getToken: vi.fn().mockResolvedValueOnce(token('a', 60 * MIN)).mockResolvedValueOnce(token('b', 60 * MIN)) };
-      const cred = _createCachingCredential(inner);
-      expect((await cred.getToken('scope')).token).toBe('a');
-      vi.advanceTimersByTime(54 * MIN);
-      expect((await cred.getToken('scope')).token).toBe('a');
-      vi.advanceTimersByTime(2 * MIN);
-      expect((await cred.getToken('scope')).token).toBe('b');
-      expect(inner.getToken).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('lists the subscription once, however many fetches ask (also when they ask at the same time)', async () => {
+    const ids = await Promise.all([
+      _findAppInsightsAppId('t', 's', 'rg', 'web'),
+      _findAppInsightsAppId('t', 's', 'rg', 'web'),
+    ]);
+    expect(await _findAppInsightsAppId('t', 's', 'RG', 'WEB')).toBe('app-1');
+    expect(ids).toEqual(['app-1', 'app-1']);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // app settings + component list, first lookup only
   });
 
-  it('shares one in-flight request between concurrent callers', async () => {
-    const inner = { getToken: vi.fn().mockResolvedValue(token('a', 60 * MIN)) };
-    const cred = _createCachingCredential(inner);
-    const [x, y] = await Promise.all([cred.getToken('scope'), cred.getToken('scope')]);
-    expect(x).toBe(y);
-    expect(inner.getToken).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps scopes apart, whether passed as a string or an array', async () => {
-    const inner = { getToken: vi.fn(async (s) => token(String(s), 60 * MIN)) };
-    const cred = _createCachingCredential(inner);
-    await cred.getToken('arm');
-    await cred.getToken(['arm']);
-    await cred.getToken('insights');
-    expect(inner.getToken).toHaveBeenCalledTimes(2);
-  });
-
-  it("treats MetricsQueryClient's double-slash scope as the same resource", async () => {
-    const inner = { getToken: vi.fn(async () => token('a', 60 * MIN)) };
-    const cred = _createCachingCredential(inner);
-    await cred.getToken('https://management.azure.com/.default');
-    await cred.getToken(['https://management.azure.com//.default']);
-    expect(inner.getToken).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not keep a failure, so the next call tries again', async () => {
-    const inner = { getToken: vi.fn().mockRejectedValueOnce(new Error('az login')).mockResolvedValueOnce(token('a', 60 * MIN)) };
-    const cred = _createCachingCredential(inner);
-    await expect(cred.getToken('scope')).rejects.toThrow('az login');
-    expect((await cred.getToken('scope')).token).toBe('a');
+  it('does not keep a miss: a 401 or 429 must not hide App Insights for the session', async () => {
+    fetchMock.mockImplementationOnce(async () => ({ ok: true, json: async () => ({ properties: {} }) }))
+      .mockImplementationOnce(async () => ({ ok: false, status: 429 }));
+    expect(await _findAppInsightsAppId('t', 's', 'rg', 'web')).toBeNull();
+    expect(await _findAppInsightsAppId('t', 's', 'rg', 'web')).toBe('app-1');
   });
 });
 

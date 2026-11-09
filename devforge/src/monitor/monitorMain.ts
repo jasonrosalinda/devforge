@@ -13,6 +13,13 @@ import { snapshotApp, diffApp, trackFetch, type AppSnapshot, type FetchHealth } 
 import { loadLibrary } from '@/lib/telemetry-library';
 import type { AzureSettings } from '@/types/settings.types';
 import { evaluateQueryRule, isDue, queryAlertBody, shouldAlert } from './queryAlerts';
+import { computeReleaseVerdict } from '@/components/azure/releaseVerdict';
+import {
+  RELEASE_POLL_MS, RELEASE_VERDICT_HOURS, afterVerdict, dueReleases, emptyReleaseWatch, noteRelease, parseWatchKey,
+  releaseAlertBody, watchKey,
+} from './releaseAlerts';
+import { CERT_CHECK_MS, certAlertLines } from './certAlerts';
+import type { CertStatus } from '@shared/types/certs.types';
 
 const WINDOW_MS = 6 * 3_600_000;
 const TICK_MS = 60_000;
@@ -24,6 +31,13 @@ let running = false;
 const queryLastRun: Record<string, number> = {};
 const queryFiring: Record<string, boolean> = {};
 const queryHealth: Record<string, FetchHealth> = {};
+// Release-regression alerts, keyed by app.
+// shortcut: in memory only, so a restart within an hour of a release skips its verdict; persist the watch if that matters.
+const releaseLastPoll: Record<string, number> = {};
+let releaseWatch = emptyReleaseWatch();
+// Certificate expiry, by host; checked once a day.
+let certLastRun: number | undefined;
+let certState: Record<string, CertStatus | undefined> = {};
 
 /** An IPC rejection arrives as "Error invoking remote method '…': Error: <message>". */
 function ipcErrorMessage(e: unknown): string {
@@ -93,6 +107,8 @@ async function tick() {
         await window.electronAPI.backgroundMonitor.alert({ title: `${label} — health alert`, body: lines.join('\n') });
       }
     }));
+    await checkReleases(azure, keys);
+    await checkCerts(azure, keys);
     console.log(`[monitor] checked ${keys.length} app(s) at ${customEnd}`);
   } catch (e) {
     console.warn('[monitor] check failed', e);
@@ -109,6 +125,72 @@ setTimeout(() => {
 }, TICK_MS - (Date.now() % TICK_MS));
 
 window.electronAPI.backgroundMonitor.onCheckNow(() => void tick());
+
+/** New production releases, then the Release Verdict on each once its first hour is in.
+ *  Alerts only on Regressed; each release is judged at most once. Errors stay quiet. */
+async function checkReleases(azure: AzureSettings, keys: string[]): Promise<void> {
+  const nowMs = Date.now();
+  const api = window.electronAPI.azureMetrics;
+  for (const key of keys) {
+    const last = releaseLastPoll[key];
+    if (last != null && nowMs - last < RELEASE_POLL_MS - 1_000) continue;
+    releaseLastPoll[key] = nowMs;
+    try {
+      const res = await api.fetchReleases({ appKey: key, range: '1h', config: azure });
+      // A null site result is a failed read, not "no releases": skip it, or the next good
+      // read would take an old release for a new one.
+      if (res.fe) releaseWatch = noteRelease(releaseWatch, watchKey(key, 'fe'), res.fe.last, nowMs);
+      if (res.api && azure.apps.find(a => a.name === key)?.apiName) {
+        releaseWatch = noteRelease(releaseWatch, watchKey(key, 'api'), res.api.last, nowMs);
+      }
+    } catch (e) {
+      console.warn(`[monitor] ${key}: releases failed`, ipcErrorMessage(e));
+    }
+  }
+
+  for (const [wkey, event] of dueReleases(releaseWatch, nowMs)) {
+    const { appKey, site } = parseWatchKey(wkey);
+    if (!keys.includes(appKey)) continue;
+    let judged = false;
+    try {
+      const outcome = await computeReleaseVerdict(api, { appKey, site, event, hours: RELEASE_VERDICT_HOURS, config: azure, nowMs });
+      judged = outcome.kind === 'done';
+      if (outcome.kind === 'done' && outcome.result.verdict === 'regressed') {
+        const appDef = azure.apps.find(a => a.name === appKey);
+        const label = `${appDef?.platformName || appDef?.resourceGroup || appKey}${appDef?.apiName ? (site === 'api' ? ' API' : ' FE') : ''}`;
+        const when = new Date(event.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Singapore' });
+        await window.electronAPI.backgroundMonitor.alert({
+          title: `${label} — ${when} release regressed`,
+          body: releaseAlertBody(outcome.result.rows, outcome.result.newTypes),
+        });
+      } else if (outcome.kind === 'error') {
+        console.warn(`[monitor] ${wkey}: release verdict failed`, outcome.message);
+      }
+    } catch (e) {
+      console.warn(`[monitor] ${wkey}: release verdict failed`, ipcErrorMessage(e));
+    }
+    releaseWatch = afterVerdict(releaseWatch, wkey, judged, nowMs);
+  }
+}
+
+/** Once a day: one alert per host whose certificate has under 14 days left or has expired. */
+async function checkCerts(azure: AzureSettings, keys: string[]): Promise<void> {
+  const nowMs = Date.now();
+  if (certLastRun != null && nowMs - certLastRun < CERT_CHECK_MS) return;
+  certLastRun = nowMs;
+  try {
+    const { results } = await window.electronAPI.certs.check({ appKeys: keys, config: azure });
+    const label = (key: string) => {
+      const a = azure.apps.find(x => x.name === key);
+      return a?.platformName || a?.resourceGroup || key;
+    };
+    const { next, lines } = certAlertLines(certState, results, label);
+    certState = next;
+    if (lines.length) await window.electronAPI.backgroundMonitor.alert({ title: 'TLS certificate expiry', body: lines.join('\n') });
+  } catch (e) {
+    console.warn('[monitor] certificate check failed', ipcErrorMessage(e));
+  }
+}
 
 /** Saved Ask Telemetry queries with an alert rule. Read from the same localStorage the
  *  page writes (same origin), every tick, so a rule switched on applies within a minute. */

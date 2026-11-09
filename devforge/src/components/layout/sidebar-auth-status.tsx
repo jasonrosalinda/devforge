@@ -28,13 +28,14 @@ function useAzureAuth() {
     const [error, setError] = useState<string | null>(null)
     const inFlight = useRef(false)
 
-    const check = useCallback(async () => {
+    // Polls reuse the cached token (no `az` process); only a Re-check click resets it.
+    const check = useCallback(async (reset = false) => {
         const api = window.electronAPI?.azureMetrics
         if (!api || inFlight.current) return
         inFlight.current = true
         setStatus("checking")
         try {
-            const r = await api.checkCredential()
+            const r = await api.checkCredential({ reset })
             setStatus(r.ok ? "ok" : "error")
             setError(r.ok ? null : (r.error ?? "Authentication failed"))
         } catch (err) {
@@ -197,7 +198,7 @@ export function SidebarAuthStatus() {
         <div className="flex flex-col gap-1.5 px-2">
             <span className="text-[10px] font-medium uppercase tracking-wider text-sidebar-foreground/50">Connections</span>
             <div className="flex flex-wrap gap-1.5">
-                <BadgeRow badge={azure.badge} guide={needsFix(azure.badge) ? AZURE_GUIDE : undefined} actions={needsFix(azure.badge) ? [copyCommand("az login")] : []} onRecheck={() => void azure.check()} />
+                <BadgeRow badge={azure.badge} guide={needsFix(azure.badge) ? AZURE_GUIDE : undefined} actions={needsFix(azure.badge) ? [copyCommand("az login")] : []} onRecheck={() => void azure.check(true)} />
                 <BadgeRow badge={atlassian} guide={atlassian.tone === "bad" || atlassian.tone === "idle" ? <TokenSteps compact /> : undefined} actions={atlassianActions} onRecheck={recheckAtlassian} />
                 <BadgeRow badge={claude.badge} guide={needsFix(claude.badge) ? CLAUDE_GUIDE : undefined} actions={needsFix(claude.badge) ? [copyCommand("claude")] : []} onRecheck={() => void claude.check()} />
             </div>

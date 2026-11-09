@@ -44,6 +44,25 @@ export async function uploadEach(
   return { done, error: null };
 }
 
+/** Runs `copy` over every name, at most `limit` at once, and collects every error in name
+ *  order: one bad file never stops the rest (unlike uploadEach). */
+export async function copyEach(
+  names: string[],
+  copy: (name: string) => Promise<string | null>,
+  limit = 4,
+): Promise<string[]> {
+  const errors: (string | null)[] = new Array(names.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < names.length) {
+      const i = next++;
+      errors[i] = await copy(names[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, names.length) }, worker));
+  return errors.filter((e): e is string => e !== null);
+}
+
 /** Image files to insert for a paste — none when it also carries text: Excel,
  *  Word and OneNote put a picture of the selection next to the real content. */
 export function pastedImages(clip: { files: ArrayLike<File>; getData: (type: string) => string }): File[] {

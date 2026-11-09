@@ -2142,12 +2142,12 @@ Socket-layer and application-timeout exceptions are counted separately and never
 // ── IPC handler ───────────────────────────────────────────────────────────────
 
 async function collectIncident(opts) {
-  const { DefaultAzureCredential } = require('@azure/identity');
+  const { sharedCredential } = require('./azure-credential.cjs');
   const { startMs, endMs, subscriptionId, resourceGroup, appName, appInsightsAppId, appType, apiName, apiInsightsAppId, apiType,
           logAnalyticsWorkspaceId, appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId,
           dbName, dbServerName } = opts;
   const isContainerApp = appType === 'containerapp';
-  const cred = new DefaultAzureCredential();
+  const cred = sharedCredential();
 
   const needsAiToken = !!(appInsightsAppId || apiInsightsAppId);
   const needsLaToken = !!(logAnalyticsWorkspaceId && (appGatewayResourceId || frontDoorResourceId));

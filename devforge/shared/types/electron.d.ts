@@ -3,6 +3,8 @@ import type { IAzureMetricsAPI } from './azureMetrics.types';
 import type { ITelemetryAPI } from './telemetry.types';
 import type { IAppInvestigationAPI } from './app-investigation.types';
 import type { IServiceKpiAPI } from './serviceKpi.types';
+import type { IAzureConfigAPI } from './azureConfig.types';
+import type { ICertsAPI } from './certs.types';
 
 export type ReportKind = 'rca' | 'investigation';
 
@@ -118,6 +120,12 @@ export interface IElectronAPI {
 
     // Service KPI — one month's averages, 5xx counts and cost per configured app
     serviceKpi: IServiceKpiAPI;
+
+    // Config Diff — app setting / connection string names across two sites or slots
+    azureConfig: IAzureConfigAPI;
+
+    // Cert & Domain Expiry — TLS certificate days left per app host
+    certs: ICertsAPI;
 
     // Ask Telemetry — Claude-written KQL against App Insights
     telemetry: ITelemetryAPI;

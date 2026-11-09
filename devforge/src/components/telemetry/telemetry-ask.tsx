@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookmarkPlus, ImageIcon, Loader2, Sparkles, Square, TableIcon } from 'lucide-react';
 import type { TelemetryTarget } from '@shared/types/telemetry.types';
 import useTelemetryAsk from '@/hooks/useTelemetryAsk';
@@ -11,6 +11,7 @@ import { toChartData, toTsv } from '@/lib/telemetry-chart';
 import {
     deleteQuery, loadLibrary, loadRecent, pushRecent, renameQuery, saveQuery, setQueryAlert, type SavedTelemetryQuery,
 } from '@/lib/telemetry-library';
+import { onTelemetryRun } from '@/lib/telemetry-request';
 import { toDatetimeLocal } from '@/components/app-health-check/styles';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -119,6 +120,15 @@ export default function TelemetryAsk() {
         load(entry.kql, entry.chart);
         doRun(entry.kql, entry.appKey, entry.target);
     };
+
+    // A saved query picked in the Ctrl+K palette. The ref keeps the subscription stable
+    // while runSaved (which reads the latest state) changes every render.
+    const runSavedRef = useRef(runSaved);
+    useEffect(() => { runSavedRef.current = runSaved; });
+    useEffect(() => onTelemetryRun(({ queryId }) => {
+        const entry = loadLibrary().find(q => q.id === queryId);
+        if (entry) runSavedRef.current(entry);
+    }), []);
 
     const save = () => {
         const kql = kqlDraft.trim();

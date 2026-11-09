@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { AppMetrics, CrashResult, ReleaseEvent, RestartResult } from '@shared/types/azureMetrics.types';
 import {
-  compareWindows, judge, newExceptionTypes, overallVerdict, splitEventCounts, verdictTeamsTable, verdictWindows,
+  compareWindows, computeReleaseVerdict, judge, newExceptionTypes, overallVerdict, splitEventCounts, verdictTeamsTable, verdictWindows,
   type VerdictRow, type VerdictWindow,
 } from './releaseVerdict';
 import { teamsTableHtml } from '@/lib/teams-html';
@@ -155,5 +155,45 @@ describe('verdictTeamsTable', () => {
     expect(table.title).toBe('Release verdict — MSP: No change');
     expect(table.rows.some(r => r[0] === 'Response p95')).toBe(false);
     expect(table.footer).toEqual([]);
+  });
+});
+
+describe('computeReleaseVerdict', () => {
+  const event: ReleaseEvent = { at: new Date(AT).toISOString(), source: 'swap' };
+  const fakeApi = (beforeFe: ReturnType<typeof insights>, afterFe: ReturnType<typeof insights>, error?: string) => {
+    const calls: Array<{ customStart?: string; silent?: boolean }> = [];
+    return {
+      calls,
+      api: {
+        fetch: async (o: { customStart?: string; silent?: boolean }) => {
+          calls.push(o);
+          const m = win({ fe: Date.parse(o.customStart!) < AT ? beforeFe : afterFe }).metrics;
+          return { app: error ? ({ error } as unknown as AppMetrics) : m };
+        },
+        fetchRestarts: async () => ({ fe: null, api: null }),
+        fetchCrashes: async () => ({ fe: null, api: null }),
+      },
+    };
+  };
+
+  it('needs 15 minutes of after-release data before it fetches anything', async () => {
+    const { api, calls } = fakeApi(insights({}), insights({}));
+    const out = await computeReleaseVerdict(api as never, { appKey: 'app', site: 'fe', event, hours: 1, config: {}, nowMs: AT + 10 * 60_000 });
+    expect(out).toEqual({ kind: 'too-soon', minutesSince: 10 });
+    expect(calls).toEqual([]);
+  });
+
+  it('fetches both windows silently and judges them', async () => {
+    const { api, calls } = fakeApi(insights({ t5: 2 }), insights({ t5: 40 }));
+    const out = await computeReleaseVerdict(api as never, { appKey: 'app', site: 'fe', event, hours: 1, config: {}, nowMs: AT + 2 * H });
+    expect(calls.map(c => c.silent)).toEqual([true, true]);
+    expect(out.kind === 'done' && out.result.verdict).toBe('regressed');
+    expect(out.kind === 'done' && row(out.result.rows, 'rate5xx').judgement).toBe('worse');
+  });
+
+  it('reports a fetch error instead of a verdict', async () => {
+    const { api } = fakeApi(insights({}), insights({}), 'AuthorizationFailed');
+    const out = await computeReleaseVerdict(api as never, { appKey: 'app', site: 'fe', event, hours: 1, config: {}, nowMs: AT + 2 * H });
+    expect(out).toEqual({ kind: 'error', message: 'AuthorizationFailed' });
   });
 });

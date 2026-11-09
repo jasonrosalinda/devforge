@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { referencedImages, screenshotName, cellAfterEdit, uploadEach, pastedImages, unsupportedFormatting } from './attachments';
+import { referencedImages, screenshotName, cellAfterEdit, uploadEach, copyEach, pastedImages, unsupportedFormatting } from './attachments';
 
 describe('referencedImages', () => {
   it('lists each attached image once, in order, decoding entities', () => {
@@ -52,6 +52,21 @@ describe('review fixes', () => {
     });
     expect(sent).toEqual(['a.png', 'b.png']);
     expect(res).toEqual({ done: ['a.png'], error: 'b.png: rejected' });
+  });
+
+  it('copies every file at most `limit` at once and reports every failure in name order', async () => {
+    let running = 0;
+    let peak = 0;
+    const errors = await copyEach(['a', 'b', 'c', 'd', 'e'], async name => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise(r => setTimeout(r, name === 'a' ? 20 : 5));
+      running -= 1;
+      return name === 'b' || name === 'e' ? `copy ${name}: x` : null;
+    }, 2);
+    expect(errors).toEqual(['copy b: x', 'copy e: x']);
+    expect(peak).toBe(2);
+    expect(await copyEach([], async () => 'never')).toEqual([]);
   });
 
   // I5: Office pastes put a picture of the selection next to the real text.

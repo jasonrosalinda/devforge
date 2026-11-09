@@ -759,7 +759,8 @@ export interface FiveXxRequestsResult {
 }
 
 export interface IAzureMetricsAPI {
-  checkCredential: () => Promise<{ ok: boolean; error?: string }>
+  /** `reset` (a user's Re-check) drops the cached tokens so a fresh `az login` takes effect; polls leave it off. */
+  checkCredential: (opts?: { reset?: boolean }) => Promise<{ ok: boolean; error?: string }>
   /** `silent` skips the `onPartial` stream, for side fetches that must not repaint the Health Check cards. */
   fetch: (opts: { appKeys: string[]; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined; silent?: boolean | undefined }) => Promise<Record<string, AppMetrics>>
   fetchAppDetails: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<Pick<AppMetrics, 'requestInsights' | 'apiRequestInsights' | 'pageViews'>>

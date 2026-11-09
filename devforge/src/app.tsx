@@ -15,6 +15,7 @@ import { requestHealthCheckReload } from "@/lib/health-check-reload";
 import { HEALTH_CHECK_PAGE, HOME_PAGE, TELEMETRY_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
 import { AppHeader } from "./components/layout/app-header";
 import { AppSidebar } from "./components/layout/app-sidebar";
+import { CommandPalette } from "./components/layout/command-palette";
 import { PageTabs, panelId, tabId } from "./components/layout/page-tabs";
 import { TabErrorBoundary } from "./components/layout/tab-error-boundary";
 import HomePage from "@/pages/homePage";
@@ -26,6 +27,7 @@ export default function App() {
   const { info: updateInfo, install: installUpdate } = useAppUpdater();
   const { openTabs, activeTab, open, close, cycle, activateAt, move } = usePageTabs(PAGE_TITLES, HOME_PAGE);
   const [search, setSearch] = useState<string>("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // Set when a page is opened from the sidebar or Home, so focus moves to
   // the page for keyboard/screen-reader users. Tab-strip navigation keeps focus
   // on the strip instead.
@@ -59,7 +61,10 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-      if (e.key === "Tab") {
+      if (e.key.toLowerCase() === "k" && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      } else if (e.key === "Tab") {
         e.preventDefault();
         cycle(e.shiftKey ? -1 : 1);
       } else if (e.key.toLowerCase() === "w" && !e.shiftKey) {
@@ -143,6 +148,8 @@ export default function App() {
           </div>
 
         </SidebarInset>
+
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onOpenPage={openPage} />
 
         <Toaster />
 

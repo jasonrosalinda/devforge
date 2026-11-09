@@ -14,6 +14,8 @@ const {
   pageIdFromUrl, authHeader, normalizeBase, errDetail,
   getPage, updatePage, createPage, searchUsers, lookupUsers, uploadAttachment, fetchAttachment,
 } = require('./confluence-write.cjs');
+const { mapPool, makeStickyOrder } = require('./pool.cjs');
+const trace = require('./trace.cjs');
 
 function sess() {
   return session.fromPartition(PARTITION);
@@ -104,22 +106,6 @@ async function sessGetJson(url) {
   }
 }
 
-// Run fn over items with a bounded number of concurrent workers; preserves
-// input order in the returned results array.
-async function mapPool(items, limit, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workerCount = Math.max(1, Math.min(limit, items.length));
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (true) {
-      const idx = cursor++;
-      if (idx >= items.length) break;
-      results[idx] = await fn(items[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 
@@ -243,31 +229,6 @@ module.exports = function registerConfluenceHandlers() {
       const headers = { Accept: 'application/json' };
       if (email && apiToken) headers.Authorization = authHeader(email, apiToken);
 
-      const cRes = await fetch(
-        `${wiki}/rest/api/content/${pageId}?expand=body.export_view,body.storage,version,history,space`,
-        { headers },
-      );
-      if (!cRes.ok) {
-        const detail = await errDetail(cRes);
-        // Retry the same page through the signed-in browser session. Its status
-        // separates "this account/page is blocked" from "the API token is".
-        const viaSession = await sessGetJson(
-          `${wiki}/rest/api/content/${pageId}?expand=version`,
-        );
-        const parts = [`Confluence responded ${cRes.status}.`];
-        if (detail) parts.push(detail);
-        if (!headers.Authorization) parts.push('No API token was sent — set email + API token in Settings → Atlassian.');
-        if (hostMismatch) parts.push(`Page URL host ${hostMismatch} ≠ base URL ${base} in Settings.`);
-        parts.push(`(token auth ${cRes.status}, session auth ${viaSession.status}${connected ? '' : ', not signed in'})`);
-        if (cRes.status === 401) parts[0] = 'Auth failed (401) — check email / API token, or Connect Confluence.';
-        if (cRes.status === 404) parts[0] = 'Page not found (404) — check the URL / access.';
-        return { ok: false, error: parts.join(' ') };
-      }
-      const c = await cRes.json();
-
-      const html = (c.body && c.body.export_view && c.body.export_view.value) ||
-                   (c.body && c.body.storage && c.body.storage.value) || '';
-
       // Token-auth JSON GET (REST API token); pairs with sessGetJson (cookies).
       const tokenGetJson = async (u) => {
         try {
@@ -275,6 +236,8 @@ module.exports = function registerConfluenceHandlers() {
           return r.ok ? { ok: true, status: r.status, json: await r.json() } : { ok: false, status: r.status };
         } catch (err) { return { ok: false, status: 0, error: (err && err.message) || String(err) }; }
       };
+
+      const attDebug = { connected, listStatus: 0, listed: 0, downloaded: 0, firstErr: undefined };
 
       // Page v1 child/attachment with a given JSON getter → download descriptors.
       const listV1 = async (getJson) => {
@@ -302,11 +265,37 @@ module.exports = function registerConfluenceHandlers() {
         return out;
       };
 
-      // Phase 1: list attachments. The signed-in user (session cookies) usually
-      // sees more attachments than the REST API token — list via the session
-      // first, fall back to the token only if the session sees nothing.
-      const attDebug = { connected, listStatus: 0, listed: 0, downloaded: 0, firstErr: undefined };
-      let pending = await listV1(sessGetJson);
+      // The content and the attachment list need only the page id, so fetch them together.
+      // The signed-in user (session cookies) usually sees more attachments than the REST
+      // API token — list via the session first, fall back to the token only if the
+      // session sees nothing (below, once the page is known to load).
+      const [cRes, sessListed] = await Promise.all([
+        fetch(`${wiki}/rest/api/content/${pageId}?expand=body.export_view,body.storage,version,history,space`, { headers }),
+        listV1(sessGetJson),
+      ]);
+      if (!cRes.ok) {
+        const detail = await errDetail(cRes);
+        // Retry the same page through the signed-in browser session. Its status
+        // separates "this account/page is blocked" from "the API token is".
+        const viaSession = await sessGetJson(
+          `${wiki}/rest/api/content/${pageId}?expand=version`,
+        );
+        const parts = [`Confluence responded ${cRes.status}.`];
+        if (detail) parts.push(detail);
+        if (!headers.Authorization) parts.push('No API token was sent — set email + API token in Settings → Atlassian.');
+        if (hostMismatch) parts.push(`Page URL host ${hostMismatch} ≠ base URL ${base} in Settings.`);
+        parts.push(`(token auth ${cRes.status}, session auth ${viaSession.status}${connected ? '' : ', not signed in'})`);
+        if (cRes.status === 401) parts[0] = 'Auth failed (401) — check email / API token, or Connect Confluence.';
+        if (cRes.status === 404) parts[0] = 'Page not found (404) — check the URL / access.';
+        return { ok: false, error: parts.join(' ') };
+      }
+      const c = await cRes.json();
+
+      const html = (c.body && c.body.export_view && c.body.export_view.value) ||
+                   (c.body && c.body.storage && c.body.storage.value) || '';
+
+      // Phase 1: the session's attachment list came back with the content above.
+      let pending = sessListed;
       attDebug.sessListed = pending.length;
       if (pending.length === 0) {
         pending = await listV1(tokenGetJson);
@@ -322,11 +311,21 @@ module.exports = function registerConfluenceHandlers() {
         Accept: 'image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8',
         ...(headers.Authorization ? { Authorization: headers.Authorization } : {}),
       };
+      // Token first, then session — but once one path has worked, try that one first, so a
+      // page whose token can't download images doesn't pay two round trips per image.
+      const order = makeStickyOrder(['token', 'session']);
+      const fetchers = {
+        token: (url) => fetchImageWithHeaders(url, dlHeaders),
+        session: (url) => fetchImageViaSession(url),
+      };
       const downloadImage = async (url) => {
-        const t = await fetchImageWithHeaders(url, dlHeaders);
-        if (t.ok) return t;
-        const s = await fetchImageViaSession(url);
-        return s.ok ? s : t; // surface the token error if both fail
+        let firstFail = null;
+        for (const path of order.current()) {
+          const r = await fetchers[path](url);
+          if (r.ok) { order.succeeded(path); return r; }
+          if (path === 'token' || !firstFail) firstFail = r; // surface the token error if both fail
+        }
+        return firstFail;
       };
 
       // Phase 2: download attachment bytes in parallel (bounded concurrency) —
@@ -392,8 +391,9 @@ module.exports = function registerConfluenceHandlers() {
       };
 
       // One-shot probe of the first unmatched image — pins exactly which path
-      // (session vs token list, signed vs raw download) works, so we stop guessing.
-      if (htmlImgs[0]) {
+      // (session vs token list, signed vs raw download) works. Five sequential requests,
+      // so only with DEVFORGE_TRACE on; the renderer never reads attDebug.probe.
+      if (trace.enabled && htmlImgs[0]) {
         const it = htmlImgs[0];
         const q = `${wiki}/rest/api/content/${it.cid}/child/attachment?filename=${encodeURIComponent(it.base)}`;
         const sf = await sessGetJson(q);

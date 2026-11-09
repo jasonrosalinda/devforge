@@ -332,16 +332,14 @@ const CLAUDE_FLAGS = [
 
 const handler = (_mainWindow) => {
   const { ipcMain } = require('electron');
-  const { DefaultAzureCredential } = require('@azure/identity');
   const azureMetrics = require('./azure-metrics.cjs');
+  const { sharedCredential } = require('./azure-credential.cjs');
 
-  let cred = null;
-  const credential = () => cred ?? (cred = azureMetrics._createCachingCredential(new DefaultAzureCredential()));
+  // The shared credential keeps no failed token, so a fresh `az login` works on the next try.
   const getToken = async (scope) => {
     try {
-      return (await credential().getToken(scope)).token;
+      return (await sharedCredential().getToken(scope)).token;
     } catch (e) {
-      cred = null; // a fresh `az login` should work on the next try
       throw new Error(`Azure sign-in failed — run \`az login\`. (${e.message})`);
     }
   };

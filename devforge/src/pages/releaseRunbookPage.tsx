@@ -17,7 +17,7 @@ import { ConfluenceConnectionPills, ConfluenceCredsBanner } from '@/components/r
 import { RunbookSectionTable } from '@/components/runbook-editor/runbookSectionTable';
 import { SaveReviewDialog } from '@/components/runbook-editor/saveReviewDialog';
 import { RichTextPanel } from '@/components/runbook-editor/richTextPanel';
-import { referencedImages, screenshotName, uploadEach } from '@/lib/runbook-richtext/attachments';
+import { copyEach, referencedImages, screenshotName, uploadEach } from '@/lib/runbook-richtext/attachments';
 import { maxTaskId } from '@/lib/runbook-richtext/editor-to-storage';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -243,12 +243,20 @@ export default function ReleaseRunbookPage() {
   // A new page shows the source page's screenshots by filename: copy them over.
   async function copyFromSource(pageId: string, filenames: string[]): Promise<string | null> {
     if (!sourcePageId || sourcePageId === pageId) return null;
-    // Copy every one, reporting all failures — one bad file shouldn't stop the rest.
-    const errors: string[] = [];
-    for (const filename of filenames.filter(f => !pending.has(f))) {
+    // Copy every one, reporting all failures — one bad file shouldn't stop the rest. Downloads
+    // from the source run four at a time; uploads to the new page stay one by one.
+    const names = filenames.filter(f => !pending.has(f));
+    const fetched = new Map<string, string>();
+    const errors = await copyEach(names, async filename => {
       const got = await api!.fetchAttachment({ ...creds, pageId: sourcePageId, filename });
-      if (!got.ok || !got.dataUri) { errors.push(`copy ${filename}: ${got.error ?? 'not found'}`); continue; }
-      const [head, b64] = got.dataUri.split(',');
+      if (!got.ok || !got.dataUri) return `copy ${filename}: ${got.error ?? 'not found'}`;
+      fetched.set(filename, got.dataUri);
+      return null;
+    });
+    for (const filename of names) {
+      const dataUri = fetched.get(filename);
+      if (!dataUri) continue;
+      const [head, b64] = dataUri.split(',');
       const bytes = Uint8Array.from(atob(b64!), ch => ch.charCodeAt(0));
       const up = await api!.uploadAttachment({ ...creds, pageId, filename, mediaType: head!.slice(5).split(';')[0]!, bytes });
       if (!up.ok) errors.push(`copy ${filename}: ${up.error}`);
