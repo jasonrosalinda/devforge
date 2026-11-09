@@ -1,7 +1,24 @@
 // @vitest-environment happy-dom
 // XML parsing goes through DOMParser, which only exists in a DOM environment.
 import { describe, it, expect } from 'vitest';
-import { parseData, stringifyData, convertData, formatData, detectFormat } from './dataFormat';
+import { parseData, stringifyData, convertData, formatData, detectFormat, formatFromSource } from './dataFormat';
+
+describe('formatFromSource', () => {
+    it('reads the extension of a file name or URL path, ignoring the query', () => {
+        expect(formatFromSource('appsettings.Development.json')).toBe('json');
+        expect(formatFromSource('https://x.com/openapi.YAML?raw=1#top')).toBe('yaml');
+        expect(formatFromSource('pipeline.yml')).toBe('yaml');
+        expect(formatFromSource('C:\\app\\web.config')).toBe('xml');
+        expect(formatFromSource('App.csproj')).toBe('xml');
+    });
+
+    it('falls back to the Content-Type, then the content', () => {
+        expect(formatFromSource('https://api.x.com/v1/items', 'application/json; charset=utf-8')).toBe('json');
+        expect(formatFromSource('https://x.com/feed', 'application/rss+xml')).toBe('xml');
+        expect(formatFromSource('https://x.com/raw', 'text/plain', 'a: 1')).toBe('yaml');
+        expect(formatFromSource('notes.txt', '', '')).toBeNull();
+    });
+});
 
 describe('detectFormat', () => {
     it('recognises JSON objects and arrays', () => {

@@ -19,6 +19,7 @@ import {
 } from "@/lib/toolbox/datetime";
 import { CopyButton, ErrorNote, ToolPanel } from "./toolbox-shared";
 import { TimezoneCombobox, type ZoneOption } from "./timezone-combobox";
+import { DateTimeBulk } from "./datetime-bulk";
 
 const ZONES_KEY = "devforge_datetime_zones";
 
@@ -78,14 +79,31 @@ function ResultRow({ label, detail, value, onRemove }: { label: string; detail?:
 }
 
 export default function DateTimeConverter() {
-    const [text, setText] = useState(() => toWallClockText(new Date(), LOCAL_ZONE));
-    const [sourceZone, setSourceZone] = useState(LOCAL_ZONE);
+    const [mode, setMode] = useState<"single" | "bulk">("single");
     const [zones, setZones] = useState<string[]>([]);
-    const [now, setNow] = useState(() => new Date());
-    const pickerRef = useRef<HTMLInputElement>(null);
-
     // Read after mount so the web build's first paint doesn't depend on storage.
     useEffect(() => setZones(readZones()), []);
+
+    return (
+        <div className="flex flex-col gap-4 h-full min-h-0">
+            <div role="group" aria-label="Mode" className="flex gap-2">
+                <Button variant={mode === "single" ? "default" : "outline"} size="sm" className="h-8 text-xs" aria-pressed={mode === "single"} onClick={() => setMode("single")}>
+                    One value
+                </Button>
+                <Button variant={mode === "bulk" ? "default" : "outline"} size="sm" className="h-8 text-xs" aria-pressed={mode === "bulk"} onClick={() => setMode("bulk")}>
+                    Bulk text → SGT
+                </Button>
+            </div>
+            {mode === "single" ? <SingleValue zones={zones} setZones={setZones} /> : <DateTimeBulk zones={zones} />}
+        </div>
+    );
+}
+
+function SingleValue({ zones, setZones }: { zones: string[]; setZones: (z: string[]) => void }) {
+    const [text, setText] = useState(() => toWallClockText(new Date(), LOCAL_ZONE));
+    const [sourceZone, setSourceZone] = useState(LOCAL_ZONE);
+    const [now, setNow] = useState(() => new Date());
+    const pickerRef = useRef<HTMLInputElement>(null);
 
     // Keeps the "relative" row honest without re-rendering every second.
     useEffect(() => {

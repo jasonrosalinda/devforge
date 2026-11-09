@@ -28,6 +28,22 @@ export function detectFormat(text: string): DataFormat | null {
     return 'yaml';
 }
 
+/**
+ * The format of a loaded file: its extension (file name or URL path) first, then the
+ * response Content-Type, then the content itself. null when nothing says.
+ */
+export function formatFromSource(name: string, contentType = '', text = ''): DataFormat | null {
+    const path = name.split(/[?#]/)[0]!.toLowerCase();
+    if (/\.json$/.test(path)) return 'json';
+    if (/\.ya?ml$/.test(path)) return 'yaml';
+    if (/\.(xml|config|csproj|props|targets|resx|svg)$/.test(path)) return 'xml';
+    const ct = contentType.toLowerCase();
+    if (ct.includes('json')) return 'json';
+    if (ct.includes('yaml')) return 'yaml';
+    if (ct.includes('xml')) return 'xml';
+    return detectFormat(text);
+}
+
 function lineAndColumn(text: string, position: number): { line: number; column: number } {
     const upTo = text.slice(0, position);
     const lines = upTo.split('\n');

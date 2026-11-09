@@ -174,15 +174,15 @@ Implementation: [electron/ipc/cert-expiry.cjs](electron/ipc/cert-expiry.cjs), [s
 
 #### Toolbox
 
-Offline utilities, each on its own page. Nothing you paste leaves the machine.
+Offline utilities, each on its own page. Nothing you paste leaves the machine. The only network call is a URL you ask JSON / YAML / XML to load.
 
 | Tool | Use it to |
 |------|-----------|
-| **DateTime Converter** | Convert a time between local, UTC, other time zones, ISO 8601 and Unix timestamps — e.g. to read a log timestamp in SGT. |
+| **DateTime Converter** | Convert a time between local, UTC, other time zones, ISO 8601 and Unix timestamps — e.g. to read a log timestamp in SGT. **Bulk text → SGT** takes pasted logs, JSON or a table and restates every timestamp in SGT (or another zone you pick), leaving the rest of the text as it is. It reads ISO 8601 with a zone (`Z`, `+00:00`, `-05:00`), `… UTC` / `… GMT` and HTTP dates. **No zone = UTC** also converts date-times with no zone, as App Insights and SQL exports often are. Milliseconds are kept, and Unix numbers are left alone. |
 | **JWT Decoder** | Decode a token and read its claims, with expiry and issue times shown in local time and UTC. |
 | **Regex Tester** | Try a pattern against sample text, with warnings where .NET's regex engine behaves differently. |
 | **Cron Explainer & Creator** | Explain an existing cron / NCRONTAB expression, or build one, and preview its next runs. |
-| **JSON / YAML / XML** | Format, validate and convert config between the three formats. |
+| **JSON / YAML / XML** | Format, validate and convert config between the three formats. Paste the input, **Open file…** (browse to any folder), drop a file onto the input, or **Load URL** (http/https; the desktop app fetches it from the main process, so sites without CORS work too, with no cookies or credentials sent). Files and URLs are capped at 5 MB, and the input format is picked from the extension, Content-Type or content. **Tree view** on the output panel shows the input read-only as a collapsible tree: keys, values coloured by type, item and key counts, **Expand all** / **Collapse all**, and each row's path on hover (e.g. `spec.containers[0].image`). A node shows its first 200 children. **Dates → SGT** restates every timestamp in SGT: rewritten in the converted output (with a count), and shown beside the value in the tree, where the input is left unchanged. **No zone = UTC** includes date-times that carry no zone. |
 | **Encoders** | Base64, URL and HTML encode / decode, hashes (SHA) and UUIDs. |
 | **Text Diff** | Compare two blocks of text line by line. |
 | **Image Converter** | Convert images between PNG, JPEG, WebP, ICO and SVG (traced or embedded), e.g. to make a favicon. |

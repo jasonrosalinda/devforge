@@ -127,6 +127,14 @@ export interface IElectronAPI {
     // Cert & Domain Expiry — TLS certificate days left per app host
     certs: ICertsAPI;
 
+    // Toolbox — load a text file from a URL (main process, so CORS doesn't block it)
+    toolbox: {
+        fetchText: (opts: { url: string }) => Promise<
+            | { ok: true; text: string; contentType: string; finalUrl: string }
+            | { ok: false; error: string }
+        >;
+    };
+
     // Ask Telemetry — Claude-written KQL against App Insights
     telemetry: ITelemetryAPI;
 

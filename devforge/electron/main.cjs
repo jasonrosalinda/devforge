@@ -124,6 +124,13 @@ app.whenReady().then(() => {
     }
 
     try {
+        require('./ipc/toolbox-fetch.cjs')();
+        console.log('✅ toolbox-fetch handlers registered');
+    } catch (err) {
+        console.error('❌ Failed to load toolbox-fetch.cjs:', err);
+    }
+
+    try {
         require('./ipc/telemetry-ask.cjs')(mainWindow);
         console.log('✅ telemetry-ask handlers registered');
     } catch (err) {

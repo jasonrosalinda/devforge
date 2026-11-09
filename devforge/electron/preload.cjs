@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         check: (opts) => ipcRenderer.invoke('certs:check', opts),
     },
 
+    toolbox: {
+        fetchText: (opts) => ipcRenderer.invoke('toolbox:fetch-text', opts),
+    },
+
     telemetry: {
         ask: (opts) => ipcRenderer.invoke('telemetry:ask', opts),
         run: (opts) => ipcRenderer.invoke('telemetry:run', opts),
