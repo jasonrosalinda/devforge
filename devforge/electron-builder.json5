@@ -9,9 +9,12 @@
   "files": [
     "dist/**/*",
     "electron/**/*",
+    "!electron/**/*.test.mjs",
     "public/**/*",
     "package.json"
   ],
+  // Only en-US Chromium UI strings; the other ~50 locale .pak files are dead weight.
+  "electronLanguages": ["en-US"],
   "publish": {
     "provider": "github",
     "owner": "jasonrosalinda",

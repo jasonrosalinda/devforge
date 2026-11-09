@@ -300,6 +300,8 @@ Targets configured in [electron-builder.json5](electron-builder.json5):
 - **macOS**: DMG + ZIP
 - **Linux**: AppImage + deb
 
+**Keep the installer small:** electron-builder copies every package in `dependencies` into `app.asar`. Only packages the Electron main process `require`s at runtime go in `dependencies` (today that is `@azure/identity`, `@azure/monitor-query` and `electron-updater`). Everything the frontend uses goes in `devDependencies`, because Vite already bundles it into `dist/`. Tests (`electron/**/*.test.mjs`) and non-English Chromium locales are excluded from the package.
+
 ---
 
 ## Release Workflow
