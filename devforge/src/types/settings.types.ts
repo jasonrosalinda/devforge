@@ -10,6 +10,8 @@ export interface AzureAppEntry {
   platformName?: string;
   /** Public URLs for this platform, e.g. ["https://mims-cpd.com"]. */
   platformUrls?: string[];
+  /** Ends this app's RCA file names: "INC-202611-004 (MIMS-CPD).pdf". Blank leaves the incident number alone. */
+  incidentSuffix?: string;
   appInsightsAppId?: string;
   uptimeRobotMonitorIds?: string[];
   // API
@@ -32,8 +34,8 @@ export interface AzureAppEntry {
   frontDoorResourceId?: string;       // AFD (Microsoft.Cdn/profiles) or classic frontDoors resource id
   loadBalancerResourceId?: string;    // /subscriptions/.../providers/Microsoft.Network/loadBalancers/<name>
   // Source code (App Investigation reads it, never writes)
-  sourcePath?: string;      // local git repository of the app
-  apiSourcePath?: string;   // local git repository of the API, when separate
+  sourcePath?: string;      // local git repository of the app, or its https://github.com URL
+  apiSourcePath?: string;   // same, for the API when separate
 }
 
 /** Used wherever an app has no explicit `sloMs`. One second is the common

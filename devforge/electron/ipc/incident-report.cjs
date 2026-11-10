@@ -26,6 +26,13 @@ const {
   extractDowntimeIntervalsMultiSignal,
 } = require('./azure-signals.cjs');
 
+// The one 5xx definition every count in the app uses, so a burst here matches the page.
+const azureMetrics = require('./azure-metrics.cjs');
+const { _RC_5XX_EXPR: RC_5XX_EXPR } = azureMetrics;
+
+const { fetchRestartCharts, restartSummary, restartEvents } = require('./azure-restarts.cjs');
+const { fetchCrashData, crashTotals } = require('./azure-crashmonitoring.cjs');
+
 const REPORTS_DIR = path.join(os.homedir(), '.claude', 'agents', 'incident-reports');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -46,8 +53,22 @@ function msToSGT(ms) {
 // The prefix keeps an App Investigation report from overwriting the RCA for the same
 // window. Both values arrive from the renderer, so neither may steer the path.
 const REPORT_KINDS = new Set(['rca', 'investigation']);
-function reportFilename(kind, appName, startMs, endMs, ext) {
+// A file name part: no path separators or reserved characters, bounded.
+const safeNamePart = (s) => String(s ?? '').replace(/[^A-Za-z0-9._ -]/g, '').replace(/\s+/g, ' ').trim().replace(/^\.+/, '').slice(0, 60);
+
+/**
+ * `naming.incidentNumber` and `naming.suffix` turn an RCA's file name into
+ * "INC-202611-004 (MIMS-CPD).pdf": the incident number from the report, then the app's
+ * configured suffix. Only the RCA is named that way; without an incident number, or for the
+ * investigation report, the window-based name below keeps the two from overwriting each other.
+ */
+function reportFilename(kind, appName, startMs, endMs, ext, naming = {}) {
   const prefix = REPORT_KINDS.has(kind) ? kind : 'rca';
+  const num = prefix === 'rca' ? safeNamePart(naming?.incidentNumber) : '';
+  if (num) {
+    const suffix = safeNamePart(naming.suffix);
+    return `${num}${suffix ? ` (${suffix})` : ''}.${ext}`;
+  }
   const app = String(appName ?? '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'app';
   return `${prefix}-${app}-${msToSGT(startMs).file}-${msToSGT(endMs).file}.${ext}`;
 }
@@ -316,16 +337,29 @@ async function fetchEdgeDiagnostics(armToken, laToken, workspaceId, ids, startTi
   return { configured, appGateway, frontDoor, loadBalancer };
 }
 
+/** Pure. "Where it was thrown": the first few stack frames, application frames before framework ones. */
+function topFrames(parsedStack, n = 3) {
+  let frames;
+  try { frames = JSON.parse(parsedStack); } catch { return ''; }
+  if (!Array.isArray(frames)) return '';
+  const name = (f) => `${f.method ?? '?'}${f.fileName ? ` (${String(f.fileName).split(/[\\/]/).pop()}${f.line ? ':' + f.line : ''})` : ''}`;
+  const isFramework = (f) => /^(System|Microsoft)\./.test(String(f.method ?? ''));
+  const app = frames.filter(f => !isFramework(f));
+  return (app.length ? app : frames).slice(0, n).map(name).join(' ← ');
+}
+
 async function fetchExceptionAnalysis(appId, aiToken, timespan) {
+  // itemCount, not count(): App Insights samples, and count() under-reports what the page shows.
   const rows = await runKQL(appId, aiToken, timespan, `
 exceptions
-| summarize count=count(), firstOccurrence=min(timestamp), lastOccurrence=max(timestamp),
-    sampleInnerMsg=any(innermostMessage), sampleOpName=any(operation_Name), sampleInnerType=any(innermostType)
+| summarize count=sum(itemCount), firstOccurrence=min(timestamp), lastOccurrence=max(timestamp),
+    sampleInnerMsg=any(innermostMessage), sampleOpName=any(operation_Name), sampleInnerType=any(innermostType),
+    sampleStack=any(tostring(details[0].parsedStack))
     by type, outerMessage
 | order by count desc
 | take 20`);
   if (!rows) return null;
-  return rows.map(([type, outerMessage, count, firstOccurrence, lastOccurrence, sampleInnerMsg, sampleOpName, sampleInnerType]) => ({
+  return rows.map(([type, outerMessage, count, firstOccurrence, lastOccurrence, sampleInnerMsg, sampleOpName, sampleInnerType, sampleStack]) => ({
     type: String(type ?? '(unknown)'),
     outerMessage: String(outerMessage ?? ''),
     count: Number(count) || 0,
@@ -334,7 +368,36 @@ exceptions
     sampleInnerMsg: String(sampleInnerMsg ?? ''),
     sampleOpName: String(sampleOpName ?? ''),
     sampleInnerType: String(sampleInnerType ?? ''),
+    thrownAt: topFrames(sampleStack),
   }));
+}
+
+/** The busiest 5-minute buckets of exceptions, oldest first, so a spike can be lined up with downtime. */
+async function fetchExceptionPeaks(appId, aiToken, timespan) {
+  const rows = await runKQL(appId, aiToken, timespan,
+    `exceptions | summarize n=sum(itemCount) by bin(timestamp, 5m) | top 5 by n desc`);
+  if (!rows) return null;
+  return rows.map(([t, n]) => ({ t: String(t ?? ''), count: Number(n) || 0 })).sort((a, b) => (a.t < b.t ? -1 : 1));
+}
+
+/** Markdown for the exception table and its peak buckets; the same for both sites. Pure. */
+function exceptionsSection(list, peaks) {
+  if (!list || list.length === 0) return `_No exceptions detected._\n\n`;
+  let md = mdTable(
+    ['Exception Type', 'Inner Type', 'Message', 'Inner Msg', 'Operation', 'Thrown at', 'Count', 'First Seen (SGT)', 'Last Seen (SGT)'],
+    list.slice(0, 15).map(e => [
+      '`' + e.type + '`',
+      e.sampleInnerType ? '`' + e.sampleInnerType + '`' : '—',
+      (e.outerMessage || '').slice(0, 80),
+      (e.sampleInnerMsg || '').slice(0, 80),
+      (e.sampleOpName || '—').slice(0, 60),
+      e.thrownAt || '—',
+      e.count, sgt(e.firstOccurrence), sgt(e.lastOccurrence),
+    ])
+  );
+  md += '\n';
+  if (peaks?.length) md += `Busiest 5-minute buckets: ${peaks.map(p => `${sgt(p.t)} (${p.count})`).join(', ')}.\n\n`;
+  return md;
 }
 
 async function fetchEndpointLatency(appId, aiToken, timespan) {
@@ -520,6 +583,170 @@ requests
     else if (statusGroup === '5xx') result.urls5xx.push(entry);
   }
   return result;
+}
+
+// ── 5xx bursts ────────────────────────────────────────────────────────────────
+// What App Health Check's Incident Timeline calls a "5xx burst": 5-minute buckets
+// where 5xx is above 5% of requests, adjacent buckets merged into one interval.
+
+const BURST_RATE = 0.05;
+const BURST_STEP_MS = 5 * 60_000;
+const MAX_BURSTS = 3;   // the worst few get the endpoint / downstream drilldown
+
+/** Pure. rows: [timestamp, total, failed] per 5-minute bucket, any order. */
+function detectBursts(rows) {
+  const bad = (rows ?? [])
+    .map(([t, total, failed]) => ({ start: Date.parse(t), total: Number(total) || 0, failed: Number(failed) || 0 }))
+    .filter(b => !isNaN(b.start) && b.total > 0 && b.failed / b.total > BURST_RATE)
+    .sort((a, b) => a.start - b.start);
+  const out = [];
+  for (const b of bad) {
+    const last = out[out.length - 1];
+    if (last && b.start <= last.end) {
+      last.end = Math.max(last.end, b.start + BURST_STEP_MS);
+      last.total += b.total; last.failed += b.failed;
+      last.peak = Math.max(last.peak, b.failed / b.total);
+    } else {
+      out.push({ start: b.start, end: b.start + BURST_STEP_MS, total: b.total, failed: b.failed, peak: b.failed / b.total });
+    }
+  }
+  return out;
+}
+
+const OP_CLEAN = `extend opClean=iif(operation_Name has "?", substring(operation_Name, 0, indexof(operation_Name, "?")), operation_Name)`;
+
+/** Bursts for one site, the worst MAX_BURSTS with their top 5xx endpoints and failing downstream calls. */
+async function fetchFiveXxBursts(appId, aiToken, timespan) {
+  const rows = await runKQL(appId, aiToken, timespan,
+    `requests | extend rc=toint(resultCode) | summarize total=sum(itemCount), failed=sumif(itemCount, ${RC_5XX_EXPR}) by bin(timestamp, 5m)`);
+  if (!rows) return null;
+  const worst = detectBursts(rows).sort((a, b) => b.failed - a.failed).slice(0, MAX_BURSTS).sort((a, b) => a.start - b.start);
+  return Promise.all(worst.map(async (b) => {
+    const span = `${new Date(b.start).toISOString()}/${new Date(b.end).toISOString()}`;
+    const [eps, deps] = await Promise.all([
+      runKQL(appId, aiToken, span,
+        `requests | extend rc=toint(resultCode) | where ${RC_5XX_EXPR} ` +
+        `| extend nameClean=iif(name has "?", substring(name, 0, indexof(name, "?")), name) ` +
+        `| summarize count=sum(itemCount) by nameClean, code=iff(isempty(resultCode), "(none)", tostring(resultCode)) | top 8 by count desc`),
+      runKQL(appId, aiToken, span,
+        `dependencies | where success == false | ${OP_CLEAN} ` +
+        `| summarize failed=sum(itemCount) by opClean, type, target | top 8 by failed desc`),
+    ]);
+    return {
+      ...b,
+      endpoints: (eps ?? []).map(([name, code, count]) => ({ name: String(name ?? ''), code: String(code ?? ''), count: Number(count) || 0 })),
+      deps: (deps ?? []).map(([op, type, target, failed]) => ({ op: String(op ?? '') || '(no operation)', type: String(type ?? ''), target: String(target ?? ''), failed: Number(failed) || 0 })),
+    };
+  }));
+}
+
+/** Markdown for the 5xx bursts; '' when they could not be fetched. Pure. */
+function fiveXxBurstsSection(bursts, heading) {
+  if (!bursts) return '';
+  let md = `${heading}\n\n`;
+  if (!bursts.length) {
+    return md + `_No 5xx burst: 5xx stayed at or below ${BURST_RATE * 100}% of requests in every 5-minute bucket (the same rule as App Health Check's Incident Timeline)._\n\n`;
+  }
+  md += `_A burst is a run of 5-minute buckets where 5xx is above ${BURST_RATE * 100}% of requests (the same rule as App Health Check's Incident Timeline). A burst can start before downtime, and that is often the first sign of the cause. Only the worst ${MAX_BURSTS} get the drilldown._\n\n`;
+  md += mdTable(['Start (SGT)', 'End (SGT)', 'Peak 5xx %', '5xx', 'Requests'],
+    bursts.map(b => [sgt(b.start), sgt(b.end), (b.peak * 100).toFixed(1) + '%', b.failed.toLocaleString(), b.total.toLocaleString()]));
+  md += '\n';
+  for (const b of bursts) {
+    md += `**${sgt(b.start)} → ${sgt(b.end)}**\n\n`;
+    md += b.endpoints?.length
+      ? mdTable(['5xx endpoint', 'Status', 'Count'], b.endpoints.map(e => ['`' + e.name + '`', e.code, e.count]))
+      : '_No 5xx endpoints returned._\n';
+    md += '\n';
+    md += b.deps?.length
+      ? `Downstream calls that failed in the same window (by the operation that made them):\n\n` +
+        mdTable(['Operation', 'Type', 'Target', 'Failed'], b.deps.map(d => ['`' + d.op + '`', d.type, d.target, d.failed]))
+      : '_No failed downstream calls in this window._\n';
+    md += '\n';
+  }
+  return md;
+}
+
+// ── Restarts & crashes ────────────────────────────────────────────────────────
+// The same App Service detectors App Health Check shows. "The process died, and why"
+// is the one thing availability and 5xx cannot say: Kudu kill, App Crash or Platform Healing.
+
+const MAX_EVENT_ROWS = 20;
+
+/** Restarts and crashes for one App Service site; each is null when its detector is missing or fails. */
+async function fetchSiteEvents(token, siteResId, startIso, endIso) {
+  const [restarts, crashes] = await Promise.all([
+    fetchRestartCharts(token, siteResId, startIso, endIso, 'PT5M').catch(() => null),
+    fetchCrashData(token, siteResId, startIso, endIso, 'PT5M').catch(() => null),
+  ]);
+  return { restarts, crashes };
+}
+
+/** Markdown for one site's restarts and crashes; '' when the site has none to report on. Pure. */
+function siteEventsSection(ev, label) {
+  if (!ev) return '';
+  let md = `### ${label}\n\n`;
+  const r = ev.restarts;
+  if (!r) {
+    md += `**Restarts:** _no restart detector for this site, so restarts are unknown (not "none")._\n\n`;
+  } else {
+    // Chart first, else the detector's written findings: on real sites the chart is empty
+    // and the events are only in the prose, so reading the chart alone said "none".
+    const { total, byCause } = restartSummary(r);
+    if (!total && !r.insights?.length) {
+      md += `**Restarts:** none in the window.\n\n`;
+    } else {
+      md += `**Restarts:** ${total || 'see the detector findings below'}\n\n`;
+      if (total) md += mdTable(['Cause', 'Count'], byCause.map(c => [c.cause, c.count])) + '\n';
+      const events = restartEvents(r);
+      if (events.length) {
+        md += mdTable(['Time (SGT)', 'Cause', 'Instance', 'Count'],
+          events.slice(0, MAX_EVENT_ROWS).map(e => [e.t ? sgt(e.t) : 'time not published', e.cause, e.instance ?? null, e.count])) + '\n';
+      }
+    }
+    for (const f of (r.insights ?? []).slice(0, 5)) {
+      // The detector's "Additional Information" item is generic advice, not a finding.
+      const items = (f.items ?? []).filter(i => !/additional information/i.test(i.name)).slice(0, 5);
+      md += `- ${f.message}${items.length ? ': ' + items.map(i => `${i.name} ${i.text}`.trim()).join('; ') : ''}\n`;
+    }
+    if (r.insights?.length) md += '\n';
+  }
+  const c = ev.crashes;
+  if (!c) {
+    md += `**Crashes:** _no crash detector for this site, so crashes are unknown (not "none")._\n\n`;
+  } else {
+    const total = crashTotals(c.charts).total;
+    if (!total && !c.events?.length) {
+      md += `**Crashes:** none in the window.\n\n`;
+    } else {
+      md += `**Crashes:** ${total}. ${c.events?.length ?? 0} with a captured stack trace.\n\n`;
+      if (c.events?.length) {
+        md += mdTable(['Time (SGT)', 'Exit code', 'Category', 'Exception', 'Top frames'],
+          c.events.slice(0, 10).map(e => [
+            sgt(e.t), e.exitCode, e.category, e.exceptionType ? '`' + e.exceptionType + '`' : null,
+            String(e.stackTrace ?? '').split('\n').filter(Boolean).slice(0, 3).join(' ← '),
+          ])) + '\n';
+      }
+    }
+  }
+  return md;
+}
+
+/** Markdown for restarts and crashes of both sites; '' when neither was fetched. */
+function siteEventsReport(siteEvents) {
+  const parts = [siteEventsSection(siteEvents?.fe, 'Frontend'), siteEventsSection(siteEvents?.api, 'API')].filter(Boolean);
+  return parts.length ? `## 17. Restarts & Crashes\n\n${parts.join('')}` : '';
+}
+
+/** Markdown for the per-endpoint 5xx / 4xx tables; '' when there is nothing to show. */
+function failedUrlsSection(f) {
+  let md = '';
+  for (const [rows, label] of [[f?.urls5xx, '5xx'], [f?.urls4xx, '4xx']]) {
+    if (!rows?.length) continue;
+    md += `**${label} errors by endpoint:**\n\n`;
+    md += mdTable(['Endpoint', 'Count'], rows.slice(0, 15).map(e => ['`' + e.name + '`', e.count]));
+    md += '\n';
+  }
+  return md;
 }
 
 async function fetchSlowUrls(appId, aiToken, timespan) {
@@ -802,7 +1029,9 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
     fetchTimeoutsByEndpoint(appId, aiToken, timespan),
     fetchSocketSkew(appId, aiToken, timespan),
     fetchUserTraffic(appId, aiToken, timespan),
-  ]) : Promise.resolve(Array(17).fill(null));
+    fetchFiveXxBursts(appId, aiToken, timespan),
+    fetchExceptionPeaks(appId, aiToken, timespan),
+  ]) : Promise.resolve(Array(19).fill(null));
 
   // Infrastructure signals that need no App Insights — socket/TCP counters, plan
   // capacity, connection growth, per-instance health. These are ARM metrics and
@@ -822,7 +1051,7 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
          [exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
           failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
           failedUrlsByStatus, slowUrls, oomInsights, dependencyTimeouts,
-          timeoutsByEndpoint, socketSkew, userTraffic],
+          timeoutsByEndpoint, socketSkew, userTraffic, fiveXxBursts, exceptionPeaks],
          [socketCounters, planCapacity, connectionsSeries,
           instReqSplit, inst5xxSplit, instProbeSplit, dbCpuSeries, dbMemSeries]]
     = await Promise.all([armPromises, kqlPromises, infraPromises]);
@@ -845,7 +1074,7 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
     exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
     failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
     failedUrlsByStatus, slowUrls,
-    oomInsights, dependencyTimeouts, timeoutsByEndpoint, socketSkew, userTraffic,
+    oomInsights, dependencyTimeouts, timeoutsByEndpoint, socketSkew, userTraffic, fiveXxBursts, exceptionPeaks,
     socketCounters, planCapacity, connectionsSeries, dbCpuSeries, dbMemSeries,
     instanceHealthSeries, instanceProbeSeries,
   };
@@ -886,7 +1115,8 @@ function buildInstanceHealth(reqSplit, errSplit) {
 // resolved, in which case the ARM half degrades to empty and the section says so.
 async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = null, armResId = null, planResId = null) {
   const timespan = `${startTime.toISOString()}/${endTime.toISOString()}`;
-  const settled = await Promise.allSettled([
+  // No App Insights id (it is shared with the frontend): only the ARM half runs.
+  const settled = !appId ? [] : await Promise.allSettled([
     fetchEndpointLatency(appId, aiToken, timespan),
     fetchExceptionAnalysis(appId, aiToken, timespan),
     fetchFailedDeps(appId, aiToken, timespan),
@@ -897,8 +1127,11 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = 
     fetchOomExceptions(appId, aiToken, timespan),
     fetchDependencyTimeouts(appId, aiToken, timespan),
     fetchUserTraffic(appId, aiToken, timespan),
+    fetchFailedUrlsByStatus(appId, aiToken, timespan),
+    fetchFiveXxBursts(appId, aiToken, timespan),
+    fetchExceptionPeaks(appId, aiToken, timespan),
   ]);
-  const val = (i) => settled[i].status === 'fulfilled' ? settled[i].value : null;
+  const val = (i) => settled[i]?.status === 'fulfilled' ? settled[i].value : null;
 
   const armResults = (token && armResId)
     ? await Promise.all([
@@ -912,7 +1145,7 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = 
       ])
     : null;
 
-  const reqRows = await runKQL(appId, aiToken, timespan,
+  const reqRows = !appId ? null : await runKQL(appId, aiToken, timespan,
     `requests | summarize total=count(), failed=countif(success==false), avgMs=round(avg(duration),0), p99Ms=round(percentile(duration,99),0)`
   ).catch(() => null);
 
@@ -927,6 +1160,9 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = 
     oomInsights: val(7),
     dependencyTimeouts: val(8),
     userTraffic: val(9),
+    failedUrlsByStatus: val(10),
+    fiveXxBursts: val(11),
+    exceptionPeaks: val(12),
     reqSummary: reqRows?.[0] ?? null,
     arm: armResults ? {
       cpuSeries: armResults[0], memSeries: armResults[1], rtSeries: armResults[2],
@@ -1271,7 +1507,10 @@ function buildTimelineSection(data, downtimeIntervals) {
   // Inside an interval vs merely near one: a context row can sit at 100%
   // availability, so labelling it DOWN would contradict its own numbers.
   const isDown    = (t) => downtimeIntervals.some(iv => t >= iv.start && t <= iv.end);
-  const inHotZone = (t) => downtimeIntervals.some(iv => t >= iv.start - CONTEXT_MS && t <= iv.end + CONTEXT_MS);
+  // A 5xx burst earns the same 5-minute rows as downtime: it often starts before the outage
+  // and an hourly rollup would flatten it.
+  const hotIntervals = [...downtimeIntervals, ...(data.fiveXxBursts ?? [])];
+  const inHotZone = (t) => hotIntervals.some(iv => t >= iv.start - CONTEXT_MS && t <= iv.end + CONTEXT_MS);
 
   const row = (t) => {
     const req   = reqM.get(t) ?? uReqM.get(t) ?? null;
@@ -1556,19 +1795,10 @@ Socket-layer and application-timeout exceptions are counted separately and never
       );
       md += '\n';
     }
-    if (data.failedUrlsByStatus) {
-      if (data.failedUrlsByStatus.urls5xx?.length) {
-        md += `**5xx errors by endpoint:**\n\n`;
-        md += mdTable(['Endpoint', 'Count'], data.failedUrlsByStatus.urls5xx.slice(0, 15).map(e => ['`' + e.name + '`', e.count]));
-        md += '\n';
-      }
-      if (data.failedUrlsByStatus.urls4xx?.length) {
-        md += `**4xx errors by endpoint:**\n\n`;
-        md += mdTable(['Endpoint', 'Count'], data.failedUrlsByStatus.urls4xx.slice(0, 15).map(e => ['`' + e.name + '`', e.count]));
-        md += '\n';
-      }
-    }
+    md += failedUrlsSection(data.failedUrlsByStatus);
   }
+  // Outside the branch above: bursts come from their own queries, not from the endpoint table.
+  if (hasAppInsights) md += fiveXxBurstsSection(data.fiveXxBursts, '### 5xx Bursts');
 
   // ── Category 5: Database Deep ──
   md += `## 5. Database Deep Insights\n\n`;
@@ -1722,21 +1952,8 @@ Socket-layer and application-timeout exceptions are counted separately and never
   md += `## 10. Error Intelligence\n\n`;
   if (!hasAppInsights) {
     md += `_App Insights not configured._\n\n`;
-  } else if (!data.exceptionAnalysis || data.exceptionAnalysis.length === 0) {
-    md += `_No exceptions detected._\n\n`;
   } else {
-    md += mdTable(
-      ['Exception Type', 'Inner Type', 'Message', 'Inner Msg', 'Operation', 'Count', 'First Seen (SGT)', 'Last Seen (SGT)'],
-      data.exceptionAnalysis.slice(0, 15).map(e => [
-        '`' + e.type + '`',
-        e.sampleInnerType ? '`' + e.sampleInnerType + '`' : '—',
-        (e.outerMessage || '').slice(0, 80),
-        (e.sampleInnerMsg || '').slice(0, 80),
-        (e.sampleOpName || '—').slice(0, 60),
-        e.count, sgt(e.firstOccurrence), sgt(e.lastOccurrence),
-      ])
-    );
-    md += '\n';
+    md += exceptionsSection(data.exceptionAnalysis, data.exceptionPeaks);
   }
 
   // ── Category 11: Infrastructure Saturation ──
@@ -1942,6 +2159,8 @@ Socket-layer and application-timeout exceptions are counted separately and never
   // ── Category 16: User Traffic & Bursts ──
   md += userTrafficSection(data.userTraffic, hasAppInsights, '## 16. User Traffic & Bursts');
 
+  md += siteEventsReport(data.siteEvents);
+
   // ── API Section ──
   if (apiData && apiName) {
     md += `---\n\n## API: ${apiName}\n\n`;
@@ -1987,6 +2206,12 @@ Socket-layer and application-timeout exceptions are counted separately and never
       md += `_If the API and the frontend share an App Service plan, the CPU and memory rows above are the same plan-level figures reported in Category 11 — compare the request and availability rows to tell the two apart._\n\n`;
     }
 
+    if (apiData.sharedInsights) {
+      md += `### Application Insights\n\n_The API reports to the same Application Insights resource as the frontend, so requests, exceptions, dependencies and SQL are not split by site. The frontend sections above already include the API's calls (see the \`cloud_RoleName\` and endpoint names). Here the API has only its own Azure metrics (above) and its restarts and crashes (Category 17)._\n\n`;
+    } else {
+    md += fiveXxBurstsSection(apiData.fiveXxBursts, '### 5xx Bursts');
+    md += failedUrlsSection(apiData.failedUrlsByStatus);
+
     md += `### Top Endpoints (P99 latency)\n\n`;
     if (!apiData.endpointLatency || apiData.endpointLatency.length === 0) {
       md += `_No endpoint data._\n\n`;
@@ -2003,22 +2228,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
     }
 
     md += `### Exceptions\n\n`;
-    if (!apiData.exceptionAnalysis || apiData.exceptionAnalysis.length === 0) {
-      md += `_No exceptions detected._\n\n`;
-    } else {
-      md += mdTable(
-        ['Exception Type', 'Inner Type', 'Message', 'Inner Msg', 'Operation', 'Count', 'First Seen (SGT)', 'Last Seen (SGT)'],
-        apiData.exceptionAnalysis.slice(0, 15).map(e => [
-          '`' + e.type + '`',
-          e.sampleInnerType ? '`' + e.sampleInnerType + '`' : '—',
-          (e.outerMessage || '').slice(0, 80),
-          (e.sampleInnerMsg || '').slice(0, 80),
-          (e.sampleOpName || '—').slice(0, 60),
-          e.count, sgt(e.firstOccurrence), sgt(e.lastOccurrence),
-        ])
-      );
-      md += '\n';
-    }
+    md += exceptionsSection(apiData.exceptionAnalysis, apiData.exceptionPeaks);
 
     md += `### Failed Dependencies\n\n`;
     if (!apiData.failedDeps || apiData.failedDeps.length === 0) {
@@ -2102,6 +2312,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
     }
 
     md += userTrafficSection(apiData.userTraffic, true, '### User Traffic & Bursts');
+    }
   }
 
   // ── Raw Time Series ──
@@ -2143,22 +2354,37 @@ Socket-layer and application-timeout exceptions are counted separately and never
 
 async function collectIncident(opts) {
   const { sharedCredential } = require('./azure-credential.cjs');
-  const { startMs, endMs, subscriptionId, resourceGroup, appName, appInsightsAppId, appType, apiName, apiInsightsAppId, apiType,
+  const { startMs, endMs, subscriptionId, resourceGroup, appName, appType, apiName, apiType,
           logAnalyticsWorkspaceId, appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId,
           dbName, dbServerName } = opts;
   const isContainerApp = appType === 'containerapp';
   const cred = sharedCredential();
 
-  const needsAiToken = !!(appInsightsAppId || apiInsightsAppId);
   const needsLaToken = !!(logAnalyticsWorkspaceId && (appGatewayResourceId || frontDoorResourceId));
-  const [tokenResp, aiTokenResp, laTokenResp] = await Promise.all([
+  const [tokenResp, laTokenResp] = await Promise.all([
     cred.getToken('https://management.azure.com/.default'),
-    needsAiToken ? cred.getToken('https://api.applicationinsights.io/.default').catch(() => null) : Promise.resolve(null),
     needsLaToken ? cred.getToken('https://api.loganalytics.io/.default').catch(() => null) : Promise.resolve(null),
   ]);
   const token = tokenResp.token;
-  const aiToken = aiTokenResp?.token ?? null;
   const laToken = laTokenResp?.token ?? null;
+
+  // The id from Settings, else the one linked to the site in Azure: the same lookup App Health
+  // Check uses. Without it an API with no id in Settings had no telemetry here at all.
+  const aiIdFor = async (configured, name, isContainer) => configured
+    || ((name && !isContainer) ? await azureMetrics._findAppInsightsAppId(token, subscriptionId, resourceGroup, name).catch(() => null) : null);
+  const isApiContainerApp = apiType === 'containerapp';
+  const [appInsightsAppId, apiAiId] = await Promise.all([
+    aiIdFor(opts.appInsightsAppId, appName, isContainerApp),
+    aiIdFor(opts.apiInsightsAppId, apiName, isApiContainerApp),
+  ]);
+  // One shared resource would return the same rows for both sites.
+  const apiSharesInsights = !!apiAiId && apiAiId === appInsightsAppId;
+  const apiInsightsAppId = apiSharesInsights ? null : apiAiId;
+
+  const aiTokenResp = (appInsightsAppId || apiInsightsAppId)
+    ? await cred.getToken('https://api.applicationinsights.io/.default').catch(() => null)
+    : null;
+  const aiToken = aiTokenResp?.token ?? null;
 
   const startTime = new Date(startMs);
   const endTime = new Date(endMs);
@@ -2168,7 +2394,6 @@ async function collectIncident(opts) {
     : `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}`;
 
   // The API lives in the same resource group as its frontend app.
-  const isApiContainerApp = apiType === 'containerapp';
   const apiResId = apiName
     ? (isApiContainerApp
         ? `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.App/containerApps/${apiName}`
@@ -2187,15 +2412,24 @@ async function collectIncident(opts) {
   const edgeIds = { appGatewayResourceId, frontDoorResourceId, loadBalancerResourceId };
   const hasEdgeConfig = !!(appGatewayResourceId || frontDoorResourceId || loadBalancerResourceId);
 
-  const [data, apiData, edge] = await Promise.all([
+  // Detectors exist for App Service only, never a Container App.
+  const events = (resId, isContainer) => (resId && !isContainer)
+    ? fetchSiteEvents(token, resId, startTime.toISOString(), endTime.toISOString()).catch(() => null)
+    : Promise.resolve(null);
+
+  const [data, apiData, edge, feEvents, apiEvents] = await Promise.all([
     fetchAllIncidentData(token, aiToken, appResId, planResId, appInsightsAppId, startTime, endTime, isContainerApp, dbResId),
-    (apiInsightsAppId && aiToken)
+    ((apiInsightsAppId && aiToken) || apiSharesInsights)
       ? fetchApiIncidentData(aiToken, apiInsightsAppId, startTime, endTime, token, apiResId, apiPlanResId).catch(() => null)
       : Promise.resolve(null),
     hasEdgeConfig
       ? fetchEdgeDiagnostics(token, laToken, logAnalyticsWorkspaceId, edgeIds, startTime, endTime).catch(() => null)
       : Promise.resolve(null),
+    events(appResId, isContainerApp),
+    events(apiResId, isApiContainerApp),
   ]);
+  if (apiData && apiSharesInsights) apiData.sharedInsights = true;
+  data.siteEvents = { fe: feEvents, api: apiEvents };
   data.edge = edge;
   data.hasEdgeConfig = hasEdgeConfig;
   data.hasDbConfig = !!dbResId;
@@ -2818,10 +3052,10 @@ const handler = (_mainWindow) => {
   });
 
   // Save an RCA markdown to the incident-reports folder and open it.
-  ipcMain.handle('incident-report:saveRca', async (_event, { appName, startMs, endMs, markdown, kind }) => {
+  ipcMain.handle('incident-report:saveRca', async (_event, { appName, startMs, endMs, markdown, kind, incidentNumber, fileSuffix }) => {
     try {
       if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'md'));
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'md', { incidentNumber, suffix: fileSuffix }));
       fs.writeFileSync(filepath, markdown, 'utf8');
       shell.openPath(filepath);
       return { success: true, path: filepath };
@@ -2833,7 +3067,7 @@ const handler = (_mainWindow) => {
   // Render the RCA to PDF via Chromium's own print pipeline. The renderer supplies
   // a complete standalone document (see rcaHtml.ts) because it already has `marked`
   // and the print stylesheet.
-  ipcMain.handle('incident-report:exportRcaPdf', async (_event, { appName, startMs, endMs, html, kind }) => {
+  ipcMain.handle('incident-report:exportRcaPdf', async (_event, { appName, startMs, endMs, html, kind, incidentNumber, fileSuffix }) => {
     let win = null;
     let tmpFile = null;
     try {
@@ -2864,7 +3098,7 @@ const handler = (_mainWindow) => {
         generateDocumentOutline: true,
       });
 
-      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'pdf'));
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'pdf', { incidentNumber, suffix: fileSuffix }));
       fs.writeFileSync(filepath, pdf);
       shell.openPath(filepath);
       return { success: true, path: filepath };
@@ -2880,11 +3114,11 @@ const handler = (_mainWindow) => {
   // Word export. Written as a Word-flavoured HTML document with a .doc extension —
   // Word opens it as an editable document, headings, tables and all. A real .docx
   // would need a zip/OOXML dependency for no gain the reader would notice.
-  ipcMain.handle('incident-report:exportRcaDoc', async (_event, { appName, startMs, endMs, html, kind }) => {
+  ipcMain.handle('incident-report:exportRcaDoc', async (_event, { appName, startMs, endMs, html, kind, incidentNumber, fileSuffix }) => {
     try {
       if (!html || typeof html !== 'string') throw new Error('No HTML supplied for the Word document.');
       if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'doc'));
+      const filepath = path.join(REPORTS_DIR, reportFilename(kind, appName, startMs, endMs, 'doc', { incidentNumber, suffix: fileSuffix }));
       // BOM: Word reads a UTF-8 HTML document as the system codepage without it,
       // which mangles the SGT arrows and every non-ASCII character in the report.
       fs.writeFileSync(filepath, '﻿' + html, 'utf8');
@@ -2911,6 +3145,9 @@ handler._buildTimelineSection = buildTimelineSection;
 handler._buildInstanceHealth = buildInstanceHealth;
 handler._stripModelNarration = stripModelNarration;
 handler._generateMarkdown = generateMarkdown;
+handler._detectBursts = detectBursts;
+handler._restartEvents = restartEvents;
+handler._topFrames = topFrames;
 handler._buildRcaPrompt = buildRcaPrompt;
 handler._buildAiRemarksPrompt = buildAiRemarksPrompt;
 handler._rcaCommand = rcaCommand;

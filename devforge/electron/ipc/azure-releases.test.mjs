@@ -84,6 +84,14 @@ describe('parseKuduDeployments', () => {
     }]);
   });
 
+  it('keeps the pipeline branch name, and merge carries it onto the Activity Log swap', () => {
+    const msg = JSON.stringify({ type: 'SlotSwap', commitId: 'b0fa303cbceda3b2', releaseId: '1', branch: '2026.11' });
+    const [ev] = parseKuduDeployments([kudu('SlotSwap', '2026-10-20T09:12:08Z', '1', { message: msg })]);
+    expect(ev.branch).toBe('2026.11');
+    const [merged] = mergeReleases([{ at: '2026-10-20T09:12:00Z', source: 'swap', by: 'a@b' }], [ev]);
+    expect(merged).toMatchObject({ by: 'a@b', branch: '2026.11', commit: 'b0fa303c' });
+  });
+
   it('keeps a pipeline deploy that no swap followed', () => {
     const [ev] = parseKuduDeployments([kudu('Deployment', '2026-07-23T10:12:27Z', '4502', {})]);
     expect(ev.source).toBe('deploy');

@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         pickRepo: () => ipcRenderer.invoke('app-investigation:pick-repo'),
         interpret: (payload) => ipcRenderer.invoke('app-investigation:interpret', payload),
         run: (payload) => ipcRenderer.invoke('app-investigation:run', payload),
+        deployedRef: (payload) => ipcRenderer.invoke('app-investigation:deployed-ref', payload),
         cancel: () => ipcRenderer.invoke('app-investigation:cancel'),
         openCitation: (payload) => ipcRenderer.invoke('app-investigation:open-citation', payload),
         onChunk: (cb) => {

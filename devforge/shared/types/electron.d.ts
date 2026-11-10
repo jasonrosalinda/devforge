@@ -355,6 +355,9 @@ export interface IElectronAPI {
             markdown: string;
             /** File-name prefix; 'investigation' keeps App Investigation reports apart from RCAs. */
             kind?: ReportKind;
+            /** With `fileSuffix`, names an RCA "INC-202611-004 (MIMS-CPD)"; without it the name is window-based. */
+            incidentNumber?: string | undefined;
+            fileSuffix?: string | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         exportRcaPdf: (opts: {
             appName: string;
@@ -362,6 +365,8 @@ export interface IElectronAPI {
             endMs: number;
             html: string;
             kind?: ReportKind;
+            incidentNumber?: string | undefined;
+            fileSuffix?: string | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         /** Word export — the same document written as Word-flavoured HTML with a .doc name. */
         exportRcaDoc: (opts: {
@@ -370,6 +375,8 @@ export interface IElectronAPI {
             endMs: number;
             html: string;
             kind?: ReportKind;
+            incidentNumber?: string | undefined;
+            fileSuffix?: string | undefined;
         }) => Promise<{ success: boolean; path?: string; error?: string }>;
         onRcaChunk: (cb: (data: { appKey: string; runId?: string; chunk: string }) => void) => () => void;
         /** `reset` is set when the model falls back mid-run: clear any streamed text. */

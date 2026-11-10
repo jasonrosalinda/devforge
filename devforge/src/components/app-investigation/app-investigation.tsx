@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import {
-    AlertTriangle, BookOpen, Check, Cloud, FileCode2, FileDown, FileText, FileType2, FolderGit2, FolderOpen, GitCommitHorizontal, ImagePlus,
+    AlertTriangle, BookOpen, Check, Cloud, FileCode2, FileDown, FileText, FileType2, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, ImagePlus,
     Loader2, Search, Settings2, ShieldAlert, Share2, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react';
 import type { InvestigationCategory, InvestigationProgress } from '@shared/types/app-investigation.types';
@@ -15,9 +15,11 @@ import {
     deleteInvestigation, loadInvestigationHistory, metaOf, saveInvestigation, type InvestigationHistoryEntry,
 } from '@/lib/app-investigation-history';
 import { newRunId, splitInvestigationReport } from '@/lib/rca-report';
-import type { AzureAppEntry } from '@/types/settings.types';
+import type { AzureAppEntry, AzureSettings } from '@/types/settings.types';
+import type { ReleaseResult } from '@shared/types/azureMetrics.types';
+import { releaseStatus, releaseTitle, SOURCE_LABEL } from '@/components/azure/releaseMarkers';
 import { toDatetimeLocal } from '@/components/app-health-check/styles';
-import { downtimePeriod, formatSgtRange } from '@/components/azure/rcaHtml';
+import { downtimePeriod, formatSgt, formatSgtRange } from '@/components/azure/rcaHtml';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { RcaSection } from '@/components/azure/rcaSection';
 import { MAX_IMAGE_BYTES, imageFilesFrom, readAsDataUrl } from '@/components/azure/richTextField';
@@ -65,8 +67,10 @@ const imageSize = (src: string) => new Promise<string>(resolve => {
 });
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
+// The API shares the app's repository unless it has its own.
 const repoFor = (app: AzureAppEntry | undefined, target: 'app' | 'api') =>
-    (target === 'api' ? app?.apiSourcePath : app?.sourcePath) ?? '';
+    (target === 'api' && app?.apiSourcePath) || app?.sourcePath || '';
+const hasSeparateApiRepo = (app: AzureAppEntry | undefined) => !!app?.apiSourcePath && app.apiSourcePath !== app.sourcePath;
 
 export default function AppInvestigation() {
     const toast = Toast();
@@ -159,7 +163,7 @@ export default function AppInvestigation() {
         startMs: rcaWindow.startMs,
         endMs: rcaWindow.endMs,
     }), [settings.azure.subscriptionId, app, rcaWindow]);
-    const rca = useRcaReport({ appKey: app?.name ?? '', getPayload });
+    const rca = useRcaReport({ appKey: app?.name ?? '', getPayload, fileSuffix: app?.incidentSuffix });
     // A report only fills blank fields, so the next incident starts on a fresh form once
     // one has been filled. Notes typed before anything filled it are kept.
     const [rcaFormKey, setRcaFormKey] = useState(0);
@@ -363,6 +367,7 @@ export default function AppInvestigation() {
                     <UnderstoodCard
                         interpretation={i}
                         apps={apps}
+                        config={settings.azure}
                         appLabel={appLabel}
                         repoPath={repoPath}
                         repoIsOverride={!!repoOverride}
@@ -477,11 +482,12 @@ export default function AppInvestigation() {
 // ─── pieces ─────────────────────────────────────────────────────────────────
 
 function UnderstoodCard({
-    interpretation: i, apps, appLabel, repoPath, repoIsOverride, locked, running, done,
+    interpretation: i, apps, config, appLabel, repoPath, repoIsOverride, locked, running, done,
     onEdit, onBrowse, onOpenSettings, onRun, onEditAgain,
 }: {
     interpretation: NonNullable<ReturnType<typeof useAppInvestigation>['state']['interpretation']>;
     apps: AzureAppEntry[];
+    config: AzureSettings;
     appLabel: (a: AzureAppEntry | undefined) => string;
     repoPath: string;
     repoIsOverride: boolean;
@@ -532,14 +538,19 @@ function UnderstoodCard({
                             {windowInvalid ? 'The end must be after the start.' : formatSgtRange(i.startMs, i.endMs)}
                         </span>
                     </Field>
-                    <Field label="Code to read">
-                        <Segmented value={i.target} onChange={v => onEdit({ target: v as 'app' | 'api' })}
-                            options={[
-                                { value: 'app', label: 'App repository', disabled: locked },
-                                { value: 'api', label: 'API repository', disabled: locked || !app?.apiName, hint: 'No API configured for this app' },
-                            ]} />
-                    </Field>
+                    {/* One repository for app and API: the choice changes nothing, so it is hidden. */}
+                    {hasSeparateApiRepo(app) && (
+                        <Field label="Code to read">
+                            <Segmented value={i.target} onChange={v => onEdit({ target: v as 'app' | 'api' })}
+                                options={[
+                                    { value: 'app', label: 'App repository', disabled: locked },
+                                    { value: 'api', label: 'API repository', disabled: locked || !app?.apiName, hint: 'No API configured for this app' },
+                                ]} />
+                        </Field>
+                    )}
                 </div>
+
+                {!windowInvalid && <WindowReleases config={config} appKey={i.appKey} startMs={i.startMs} endMs={i.endMs} hasApi={!!app?.apiName} target={i.target} repoPath={repoPath} />}
 
                 {i.symptoms.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -584,6 +595,127 @@ function UnderstoodCard({
         </Card>
     );
 }
+
+/** The last release live at the window's end (as App Health Check shows it), and whether one landed inside the window. */
+function WindowReleases({ config, appKey, startMs, endMs, hasApi, target, repoPath }: {
+    config: AzureSettings; appKey: string; startMs: number; endMs: number; hasApi: boolean; target: 'app' | 'api'; repoPath: string;
+}) {
+    const [rel, setRel] = useState<{ loading: boolean; fe: ReleaseResult | null; api: ReleaseResult | null }>({ loading: true, fe: null, api: null });
+    useEffect(() => {
+        let live = true;
+        setRel(r => ({ ...r, loading: true }));
+        // Debounced: the window inputs fire on every keystroke.
+        const t = setTimeout(() => {
+            window.electronAPI.azureMetrics.fetchReleases({
+                appKey, range: 'custom', config, customStart: new Date(startMs).toISOString(), customEnd: new Date(endMs).toISOString(),
+            })
+                .then(r => { if (live) setRel({ loading: false, fe: r.fe ?? null, api: r.api ?? null }); })
+                .catch(() => { if (live) setRel({ loading: false, fe: null, api: null }); });
+        }, 400);
+        return () => { live = false; clearTimeout(t); };
+    }, [config, appKey, startMs, endMs]);
+
+    const inWindow = [rel.fe, rel.api].flatMap(r => r?.events ?? []).filter(ev => {
+        const at = Date.parse(ev.at);
+        return at >= startMs && at <= endMs;
+    }).length;
+    // The release live at the window end on the site whose code is read.
+    const live = (target === 'api' ? rel.api : rel.fe)?.events.filter(ev => Date.parse(ev.at) <= endMs).at(-1) ?? null;
+    const sites = [
+        { key: 'app', label: 'Frontend', r: rel.fe },
+        ...(hasApi ? [{ key: 'api', label: 'API', r: rel.api }] : []),
+    ];
+    return (
+        <section aria-label="Production at window end" className="flex flex-col gap-2 rounded-md border bg-muted/30 p-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Production at window end</span>
+                {!rel.loading && inWindow > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning">
+                        <AlertTriangle className="h-3 w-3" />{inWindow} release{inWindow > 1 ? 's' : ''} inside this window
+                    </span>
+                )}
+            </div>
+            {rel.loading
+                ? <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Loading releases…</span>
+                : (
+                    <>
+                        {repoPath && <DeployedBranch repoPath={repoPath} endMs={endMs} commit={live?.commit} branch={live?.branch} />}
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+                            {sites.map(s => (
+                                <Fragment key={s.key}>
+                                    <dt className={s.key === target ? 'font-medium text-foreground' : 'text-muted-foreground'}>{s.label}</dt>
+                                    <dd className="min-w-0"><SiteRelease r={s.r} startMs={startMs} /></dd>
+                                </Fragment>
+                            ))}
+                        </dl>
+                    </>
+                )}
+        </section>
+    );
+}
+
+/** How a release sits against the incident: "6 days before the window", "3h before the window", "inside the window". */
+function relativeToWindow(atMs: number, startMs: number): string {
+    if (atMs >= startMs) return 'inside the window';
+    const h = (startMs - atMs) / 3_600_000;
+    return h < 48 ? `${Math.max(1, Math.round(h))}h before the window` : `${Math.round(h / 24)} days before the window`;
+}
+
+/** One site's last release up to the window end: when, how long before the incident, how and who. */
+function SiteRelease({ r, startMs }: { r: ReleaseResult | null; startMs: number }) {
+    const last = r?.last;
+    if (!last) return <span className="text-muted-foreground">{releaseStatus(r)?.text ?? 'unavailable'}</span>;
+    const at = Date.parse(last.at);
+    const detail = [relativeToWindow(at, startMs), SOURCE_LABEL[last.source], last.build && `build ${last.build}`, last.by].filter(Boolean);
+    return (
+        <span title={releaseTitle(last)}>
+            <span className="font-medium text-foreground">{formatSgt(at)}</span>
+            <span className={at >= startMs ? 'text-warning' : 'text-muted-foreground'}> · {detail.join(' · ')}</span>
+        </span>
+    );
+}
+
+const BASIS_TITLE = {
+    'commit': 'The exact commit Azure recorded for the release live at the window end. The investigation reads this code.',
+    'branch-at-end': 'Estimated: Azure recorded no matching commit, so this is the release branch as it stood at the window end (Azure\'s branch name first, else the one with the latest commit by then). The investigation reads this code.',
+    'checked-out': 'No release branch found in the repository, so the checked-out branch is read. It may not match production.',
+} as const;
+
+/** "Release branch": the code the investigation treats as production at the window end. */
+function DeployedBranch({ repoPath, endMs, commit, branch }: { repoPath: string; endMs: number; commit?: string | undefined; branch?: string | undefined }) {
+    const [res, setRes] = useState<Awaited<ReturnType<typeof window.electronAPI.appInvestigation.deployedRef>> | null>(null);
+    useEffect(() => {
+        let live = true;
+        setRes(null);
+        window.electronAPI.appInvestigation.deployedRef({ repoPath, endMs, release: commit || branch ? { commit, branch } : null })
+            .then(r => { if (live) setRes(r); })
+            .catch(() => { if (live) setRes({ success: false }); });
+        return () => { live = false; };
+    }, [repoPath, endMs, commit, branch]);
+
+    if (!res) return <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Finding the release branch…</span>;
+    if (!res.success || !res.branch) return null;
+    const badge = res.basis && BASIS_BADGE[res.basis];
+    return (
+        <div className="flex flex-col gap-0.5" title={[res.basis && BASIS_TITLE[res.basis], res.note].filter(Boolean).join('\n')}>
+            <div className="flex flex-wrap items-center gap-2">
+                <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-mono text-sm font-semibold">{res.branch}</span>
+                {res.sha && <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{res.sha}</span>}
+                {badge && <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.cls}`}>{badge.text}</span>}
+            </div>
+            <span className="pl-5 text-xs text-muted-foreground">
+                The investigation reads this code{res.note && <span className="text-warning"> · {res.note}</span>}
+            </span>
+        </div>
+    );
+}
+
+const BASIS_BADGE = {
+    'commit': { text: 'Deployed commit', cls: 'bg-success/10 text-success' },
+    'branch-at-end': { text: 'Estimated', cls: 'bg-warning/10 text-warning' },
+    'checked-out': { text: 'Checked-out branch · may not match production', cls: 'bg-warning/10 text-warning' },
+} as const;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
     return (

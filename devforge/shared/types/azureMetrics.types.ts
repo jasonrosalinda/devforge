@@ -618,6 +618,8 @@ export interface ReleaseEvent {
   by?: string
   build?: string
   commit?: string
+  /** Azure DevOps' Build.SourceBranchName: the last path segment only. */
+  branch?: string
   message?: string
 }
 

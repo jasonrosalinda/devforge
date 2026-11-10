@@ -4,7 +4,7 @@ import {
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
   parseRcaFields, composeRcaMarkdown, isRcaFieldsEmpty, EMPTY_RCA_FIELDS,
   stripMarkdown, buildRcaWordHtml, htmlToPlainText, plainTextToHtml, isHtmlEmpty,
-  composeTrackerMarkdown, isTrackerEmpty, parseTrackerFields, EMPTY_TRACKER_FIELDS, trackerCopyText,
+  parseTrackerFields, EMPTY_TRACKER_FIELDS, trackerCopyText,
   type RcaTrackerFields,
 } from './rcaHtml';
 
@@ -538,57 +538,14 @@ describe('composeRcaMarkdown with rich-text sections', () => {
   });
 });
 
-// The tracker is the engineer's record, drafted by the AI where they left it blank, and rides at
-// the end of the report, after section 7.
-describe('composeTrackerMarkdown', () => {
-  const tracker = (fields: Partial<RcaTrackerFields> = {}) => ({ ...EMPTY_TRACKER_FIELDS, ...fields });
-
-  it('prints one labelled line per filled field, in report order', () => {
-    const md = composeTrackerMarkdown(tracker({
-      detection: 'Login stuck on a spinner, reported by a user.',
-      rootCauseIdentified: 'A firewall rule challenged the login request.',
-      outcome: '0 login failures since 14:20 SGT.',
-    }));
-    expect(md).toContain('## Tracker');
-    expect(md).toContain('**Detection / Symptoms:** Login stuck on a spinner, reported by a user.');
-    expect(md).toContain('**Root Cause Identified:** A firewall rule challenged the login request.');
-    expect(md).toContain('**Measurable Outcome:** 0 login failures since 14:20 SGT.');
-    expect(md.indexOf('Detection / Symptoms')).toBeLessThan(md.indexOf('Root Cause Identified'));
-    expect(md.indexOf('Root Cause Identified')).toBeLessThan(md.indexOf('Measurable Outcome'));
-  });
-
-  // A blank field is left out rather than printed as an empty label.
-  it('omits blank fields', () => {
-    const md = composeTrackerMarkdown(tracker({ detection: 'Seen in the login flow.' }));
-    expect(md).toContain('**Detection / Symptoms:**');
-    expect(md).not.toContain('**Corrective Action Taken:**');
-    expect(md).not.toContain('**Measurable Outcome:**');
-  });
-
-  it('returns nothing when the tracker is untouched', () => {
-    expect(composeTrackerMarkdown(tracker())).toBe('');
-    expect(composeTrackerMarkdown(tracker({ outcome: '   ' }))).toBe('');
-  });
-
-  it('reports emptiness from the fields alone', () => {
-    expect(isTrackerEmpty(tracker())).toBe(true);
-    expect(isTrackerEmpty(tracker({ correctiveAction: '  ' }))).toBe(true);
-    expect(isTrackerEmpty(tracker({ correctiveAction: 'Removed the rule.' }))).toBe(false);
-  });
-});
-
-describe('composeRcaMarkdown with a tracker', () => {
-  const fields = { ...EMPTY_RCA_FIELDS, title: 'MEDU Downtime', status: '<p>Resolved.</p>' };
-
-  it('appends the tracker after the last section', () => {
-    const md = composeRcaMarkdown(fields, '', { ...EMPTY_TRACKER_FIELDS, detection: 'Reported by a user.' });
-    expect(md).toContain('## Tracker');
-    expect(md.indexOf('## 7. Current Status')).toBeLessThan(md.indexOf('## Tracker'));
-  });
-
-  it('omits the tracker heading when nothing is tracked', () => {
-    expect(composeRcaMarkdown(fields, '', { ...EMPTY_TRACKER_FIELDS })).not.toContain('Tracker');
-    expect(composeRcaMarkdown(fields)).not.toContain('Tracker');
+// The Tracker has its own tab and Copy buttons; the PDF, Word and Teams exports are built from
+// composeRcaMarkdown, so it must never put the Tracker in.
+describe('composeRcaMarkdown leaves the Tracker out', () => {
+  it('has no Tracker block, even with every section filled', () => {
+    const fields = { ...EMPTY_RCA_FIELDS, title: 'MEDU Downtime', status: '<p>Resolved.</p>' };
+    const md = composeRcaMarkdown(fields);
+    expect(md).toContain('## 7. Current Status');
+    expect(md).not.toContain('Tracker');
   });
 });
 
@@ -614,14 +571,6 @@ describe('parseTrackerFields', () => {
       correctiveAction: 'Rule disabled at 14:20 SGT.',
       preventiveAction: 'Exempt /auth from the challenge.',
       outcome: '0 login failures since 14:20 SGT.',
-    });
-  });
-
-  it('round-trips what composeTrackerMarkdown writes', () => {
-    const fields = { ...EMPTY_TRACKER_FIELDS, detection: 'Seen in the login flow.', outcome: 'Back to 400/day.' };
-    expect(parseTrackerFields(composeTrackerMarkdown(fields))).toEqual({
-      detection: 'Seen in the login flow.',
-      outcome: 'Back to 400/day.',
     });
   });
 

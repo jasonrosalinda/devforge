@@ -7,8 +7,9 @@ import path from 'path';
 const require = createRequire(import.meta.url);
 const {
     guardQuery, parseSgt, buildInterpretPrompt, parseInterpretation, normalizeInterpretation,
-    buildGitSeedArgs, buildInvestigationPrompt, resolveCitation, resolveRepoRoot, incidentOpts,
+    buildGitSeedArgs, gatherGitSeed, resolveDeployedRef, liveRelease, formatReleases, buildInvestigationPrompt, resolveCitation, resolveRepoRoot, isGithubUrl, incidentOpts,
     HEADINGS, FINDINGS_HEADINGS, DIRECTIVE, INTERPRET_FLAGS, OUT_OF_SCOPE_PHRASE, MAX_WINDOW_MS, writeAttachments, MAX_IMAGES,
+    capAzureReport, API_REPORT_LINES, AZURE_REPORT_LINES,
 } = require('./app-investigation.cjs').__test__;
 const { stripReportPreamble, FILE_READ_AGENT_FLAGS } = require('./claude-cli.cjs');
 
@@ -217,6 +218,32 @@ describe('FILE_READ_AGENT_FLAGS (Claude only reads, never acts)', () => {
     });
 });
 
+describe('capAzureReport', () => {
+    const rows = (prefix, n) => Array.from({ length: n }, (_, k) => `${prefix} ${k}`).join('\n');
+
+    it('keeps the API section when the frontend part alone is over the cap', () => {
+        const report = `${rows('fe', AZURE_REPORT_LINES + 200)}\n---\n\n## API: prdmeduapi\n\n${rows('api', 50)}\n---\n\n## Raw Time Series (for correlation analysis)\n\nraw`;
+        const out = capAzureReport(report);
+        expect(out).toContain('## API: prdmeduapi');
+        expect(out).toContain('api 49');
+        expect(out).not.toContain('fe 700');
+        expect(out).not.toContain('Raw Time Series');
+    });
+
+    it('caps a long API section on its own budget', () => {
+        const report = `fe\n---\n\n## API: prdmeduapi\n\n${rows('api', API_REPORT_LINES + 100)}`;
+        const out = capAzureReport(report);
+        expect(out).toContain('fe');
+        expect(out).toContain('## API: prdmeduapi');
+        expect(out).not.toContain(`api ${API_REPORT_LINES + 99}`);
+    });
+
+    it('caps a report with no API section as one', () => {
+        expect(capAzureReport(rows('fe', AZURE_REPORT_LINES + 50))).not.toContain(`fe ${AZURE_REPORT_LINES + 49}`);
+        expect(capAzureReport(null)).toBe('');
+    });
+});
+
 describe('buildGitSeedArgs', () => {
     it('builds argv from numbers only, with a 7-day lookback', () => {
         const args = buildGitSeedArgs(sgt(2026, 11, 6, 13, 0), sgt(2026, 11, 6, 15, 0));
@@ -227,6 +254,169 @@ describe('buildGitSeedArgs', () => {
             for (const a of list) expect(a).not.toMatch(/[;&|`$<>]/);
         }
         expect(args.commits).toContain('--all');
+        expect(args.stat.slice(-2)).toEqual(['HEAD', '--']);
+    });
+
+    it('scopes stat and patches to the given ref, not commits', () => {
+        const args = buildGitSeedArgs(0, 1, 'origin/release/2026.11');
+        expect(args.stat.slice(-2)).toEqual(['origin/release/2026.11', '--']);
+        expect(args.patches.slice(-2)).toEqual(['origin/release/2026.11', '--']);
+        expect(args.commits).not.toContain('origin/release/2026.11');
+    });
+});
+
+describe('formatReleases', () => {
+    const start = sgt(2026, 11, 6, 13, 0);
+    const end = sgt(2026, 11, 6, 15, 0);
+    const iso = (ms) => new Date(ms).toISOString();
+    const r = (...evs) => ({ events: evs, last: evs.at(-1) ?? null, sources: { kudu: 'ok' } });
+
+    it('lists releases from the lookback to the window end, flags the window and the latest', () => {
+        const out = formatReleases({
+            fe: r(
+                { at: iso(sgt(2026, 10, 1, 9, 0)), source: 'swap' },                      // older than lookback: kept as the one before
+                { at: iso(sgt(2026, 10, 25, 9, 0)), source: 'swap' },                     // older than lookback: superseded
+                { at: iso(sgt(2026, 11, 3, 10, 0)), source: 'deploy', build: '20261103.1', commit: 'abc1234' },
+                { at: iso(sgt(2026, 11, 6, 14, 5)), source: 'swap', by: 'pipeline', message: 'line one\nline two' },
+                { at: iso(sgt(2026, 11, 6, 16, 0)), source: 'swap' },                     // after the window: dropped
+            ),
+            api: r(),
+        }, start, end);
+        expect(out).not.toContain('2026-10-01');
+        expect(out).toContain('- Frontend 2026-10-25 09:00 SGT · slot swap');
+        expect(out).toContain('2026-11-03 10:00 SGT · deploy · build 20261103.1 · commit abc1234');
+        expect(out).toContain('- Frontend 2026-11-06 14:05 SGT **(inside the incident window)** · slot swap · by pipeline · "line one line two" ← latest release live at the window end');
+        expect(out).not.toContain('16:00');
+        expect(out).toContain('- API: none found');
+    });
+
+    it('says so when Azure gave nothing', () => {
+        expect(formatReleases(null, start, end)).toMatch(/release history unavailable/);
+        expect(formatReleases({ fe: null, api: null }, start, end)).toMatch(/release history unavailable/);
+    });
+});
+
+describe('gatherGitSeed', () => {
+    const { execFileSync } = require('child_process');
+    const repo = () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-git-'));
+        const run = (args, date) => execFileSync('git', args, {
+            cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) },
+        });
+        run(['init', '-q', '-b', 'main']);
+        return { dir, run };
+    };
+    const win = [Date.UTC(2026, 10, 1), Date.UTC(2026, 10, 9)];
+
+    it('follows the newest release branch, local or remote, over the checked-out one', async () => {
+        const { dir, run } = repo();
+        run(['commit', '-q', '--allow-empty', '-m', 'base'], '2026-11-02T00:00:00Z');
+        run(['branch', 'release/2026.10']);
+        run(['commit', '-q', '--allow-empty', '-m', 'newest release'], '2026-11-05T00:00:00Z');
+        run(['update-ref', 'refs/remotes/origin/release/2026.11', 'HEAD']);
+        run(['reset', '-q', '--hard', 'HEAD~1']);
+        run(['commit', '-q', '--allow-empty', '-m', 'main only'], '2026-11-03T00:00:00Z');
+        const seed = await gatherGitSeed(dir, ...win);
+        expect(seed.branch).toBe('origin/release/2026.11');
+        expect(seed.checkedOut).toBe('main');
+        expect(seed.head).toContain('newest release');
+        expect(seed.stat).not.toContain('main only');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('reads the deployed ref it is given, not the newest release branch', async () => {
+        const { dir, run } = repo();
+        run(['commit', '-q', '--allow-empty', '-m', 'deployed'], '2026-11-02T00:00:00Z');
+        run(['branch', 'release/2026.10']);
+        run(['commit', '-q', '--allow-empty', '-m', 'later'], '2026-11-05T00:00:00Z');
+        run(['branch', 'release/2026.11']);
+        const sha = execFileSync('git', ['rev-parse', 'release/2026.10'], { cwd: dir }).toString().trim();
+        const seed = await gatherGitSeed(dir, ...win, { ref: sha, branch: 'release/2026.10', sha: sha.slice(0, 8), basis: 'commit' });
+        expect(seed.branch).toBe('release/2026.10');
+        expect(seed.head).toContain('deployed');
+        expect(seed.stat).not.toContain('later');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('falls back to the checked-out branch when there is no release branch', async () => {
+        const { dir, run } = repo();
+        run(['commit', '-q', '--allow-empty', '-m', 'only'], '2026-11-02T00:00:00Z');
+        const seed = await gatherGitSeed(dir, ...win);
+        expect(seed.branch).toBe('main');
+        expect(seed.head).toContain('only');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+});
+
+describe('liveRelease', () => {
+    const releases = {
+        fe: { events: [{ at: '2026-11-01T00:00:00Z', commit: 'fe1' }, { at: '2026-11-08T00:00:00Z', commit: 'fe2' }] },
+        api: { events: [{ at: '2026-11-02T00:00:00Z', commit: 'api1' }] },
+    };
+    it('takes the last release at or before the window end, on the site whose code is read', () => {
+        expect(liveRelease(releases, 'app', Date.UTC(2026, 10, 5)).commit).toBe('fe1');
+        expect(liveRelease(releases, 'app', Date.UTC(2026, 10, 9)).commit).toBe('fe2');
+        expect(liveRelease(releases, 'api', Date.UTC(2026, 10, 9)).commit).toBe('api1');
+        expect(liveRelease(releases, 'api', Date.UTC(2026, 10, 1))).toBeNull();
+        expect(liveRelease(null, 'app', Date.UTC(2026, 10, 9))).toBeNull();
+    });
+});
+
+describe('resolveDeployedRef', () => {
+    const { execFileSync } = require('child_process');
+    const end = Date.UTC(2026, 10, 9);
+    // main: base(11-01) → r10 is cut; main: m(11-03); r11 cut later with a commit after the window.
+    const setup = () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-ref-'));
+        const run = (args, date) => execFileSync('git', args, {
+            cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) },
+        }).toString().trim();
+        run(['init', '-q', '-b', 'main']);
+        run(['commit', '-q', '--allow-empty', '-m', 'base'], '2026-11-01T00:00:00Z');
+        run(['checkout', '-q', '-b', 'release/2026.10']);
+        run(['commit', '-q', '--allow-empty', '-m', 'r10 hotfix'], '2026-11-02T00:00:00Z');
+        const r10 = run(['rev-parse', 'HEAD']);
+        run(['commit', '-q', '--allow-empty', '-m', 'r10 after window'], '2026-11-12T00:00:00Z');
+        run(['checkout', '-q', 'main']);
+        run(['commit', '-q', '--allow-empty', '-m', 'm'], '2026-11-03T00:00:00Z');
+        run(['checkout', '-q', '-b', 'release/2026.11']);
+        run(['commit', '-q', '--allow-empty', '-m', 'r11 after window'], '2026-11-15T00:00:00Z');
+        run(['checkout', '-q', 'main']);
+        return { dir, r10 };
+    };
+
+    it('maps the commit Azure recorded to the release branch holding it', async () => {
+        const { dir, r10 } = setup();
+        const out = await resolveDeployedRef(dir, { commit: r10.slice(0, 8) }, end);
+        expect(out).toMatchObject({ ref: r10, branch: 'release/2026.10', sha: r10.slice(0, 8), basis: 'commit' });
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('without a commit, uses the hinted branch as it stood at the window end', async () => {
+        const { dir, r10 } = setup();
+        const out = await resolveDeployedRef(dir, { branch: '2026.10' }, end);
+        expect(out).toMatchObject({ ref: r10, branch: 'release/2026.10', basis: 'branch-at-end' });
+        expect(out.note).toBeUndefined();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('says when the Azure commit is not in the clone, and ignores a non-hex commit', async () => {
+        const { dir } = setup();
+        const missing = await resolveDeployedRef(dir, { commit: 'deadbeef' }, end);
+        expect(missing.basis).toBe('branch-at-end');
+        expect(missing.note).toMatch(/not in this clone/);
+        const bogus = await resolveDeployedRef(dir, { commit: '--all' }, end);
+        expect(bogus.note).toBeUndefined();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('falls back to the checked-out branch when there is no release branch', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-ref-'));
+        const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'x'], { cwd: dir, env });
+        expect(await resolveDeployedRef(dir, null, Date.now())).toMatchObject({ ref: 'HEAD', branch: 'main', basis: 'checked-out' });
+        fs.rmSync(dir, { recursive: true, force: true });
     });
 });
 
@@ -247,6 +437,18 @@ describe('buildInvestigationPrompt', () => {
         expect(prompt).toContain('SqlException ×412');
         expect(prompt).toContain('abc1234\tfix');
         expect(prompt).toContain('the API source at C:/src/medu-api');
+        expect(prompt).toContain('### Diffs of the most recent commits (main)');
+        expect(prompt).toContain('## PRODUCTION RELEASES');
+        expect(prompt).toMatch(/release history unavailable/);
+        expect(prompt).not.toContain('Files on disk are the checked-out branch');
+    });
+
+    it('warns when the files on disk are not the release branch', () => {
+        const p = buildInvestigationPrompt({
+            interpretation, query: 'q', app: APPS[0], repoRoot: 'r', azureReport: '',
+            seed: { branch: 'origin/release/2026.11', checkedOut: 'main', head: 'h', commits: '', stat: '', patches: '' },
+        });
+        expect(p).toContain('Files on disk are the checked-out branch main');
     });
 
     it('fixes the scope, the read-only rule and the evidence standard', () => {
@@ -452,5 +654,93 @@ describe('IPC handlers', () => {
     it('open-citation refuses a root no run validated', async () => {
         const r = await handlers['app-investigation:open-citation']({ sender }, { root: os.tmpdir(), file: 'a.txt', line: 1 });
         expect(r.success).toBe(false);
+    });
+});
+
+// ─── GitHub URL as the repository: devForge's own clone ───────────────────────
+
+describe('GitHub URL repositories', () => {
+    const { execFileSync } = require('child_process');
+    const ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    let base, cacheDir, saved;
+
+    beforeEach(() => {
+        // A local bare repo stands in for GitHub: git rewrites https://github.com/ to this folder.
+        base = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-gh-'));
+        cacheDir = path.join(base, 'cache');
+        const work = path.join(base, 'work');
+        fs.mkdirSync(work);
+        const run = (args) => execFileSync('git', args, { cwd: work, env: { ...process.env, ...ENV } });
+        run(['init', '-q', '-b', 'main']);
+        fs.writeFileSync(path.join(work, 'main.txt'), 'main');
+        run(['add', '.']); run(['commit', '-q', '-m', 'main']);
+        run(['checkout', '-q', '-b', 'release/2026.11']);
+        fs.writeFileSync(path.join(work, 'release.txt'), 'release');
+        run(['add', '.']); run(['commit', '-q', '-m', 'release']);
+        run(['checkout', '-q', 'main']);
+        fs.mkdirSync(path.join(base, 'acme'));
+        execFileSync('git', ['clone', '-q', '--bare', work, path.join(base, 'acme', 'medu.git')]);
+        saved = { c: process.env.GIT_CONFIG_COUNT, k: process.env.GIT_CONFIG_KEY_0, v: process.env.GIT_CONFIG_VALUE_0 };
+        process.env.GIT_CONFIG_COUNT = '1';
+        process.env.GIT_CONFIG_KEY_0 = `url.${base.split(path.sep).join('/')}/.insteadOf`;
+        process.env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
+        return () => {
+            for (const [k, v] of [['GIT_CONFIG_COUNT', saved.c], ['GIT_CONFIG_KEY_0', saved.k], ['GIT_CONFIG_VALUE_0', saved.v]]) {
+                if (v === undefined) delete process.env[k]; else process.env[k] = v;
+            }
+            fs.rmSync(base, { recursive: true, force: true });
+        };
+    });
+
+    it('recognises only https GitHub repository URLs', () => {
+        expect(isGithubUrl('https://github.com/acme/medu')).toBe(true);
+        expect(isGithubUrl('https://github.com/acme/medu.git/')).toBe(true);
+        expect(isGithubUrl('https://gitlab.com/acme/medu')).toBe(false);
+        expect(isGithubUrl('https://github.com/acme/medu/tree/main')).toBe(false);
+        expect(isGithubUrl(String.raw`C:\GitProjects\medu`)).toBe(false);
+    });
+
+    it('refuses a URL that is not GitHub, without touching the network', async () => {
+        await expect(resolveRepoRoot('https://dev.azure.com/acme/_git/medu', { cacheDir })).rejects.toMatchObject({ code: 'NO_REPO' });
+        await expect(resolveRepoRoot('git@github.com:acme/medu.git', { cacheDir })).rejects.toMatchObject({ code: 'NO_REPO' });
+        expect(fs.existsSync(cacheDir)).toBe(false);
+    });
+
+    it('clones a GitHub URL into the cache once, sharing the clone between concurrent callers', async () => {
+        const [a, b] = await Promise.all([
+            resolveRepoRoot('https://github.com/acme/medu', { cacheDir }),
+            resolveRepoRoot('https://github.com/Acme/Medu.git', { cacheDir: () => cacheDir }),
+        ]);
+        expect(a).toBe(b);
+        // git reports the long path; the temp dir may be an 8.3 short one, so compare the leaf.
+        expect(path.basename(a)).toBe('acme__medu');
+        expect(fs.realpathSync.native(path.dirname(a))).toBe(fs.realpathSync.native(cacheDir));
+        expect(fs.existsSync(path.join(a, 'main.txt'))).toBe(true);
+    });
+
+    it('reports a clone failure with its sign-in hint', async () => {
+        await expect(resolveRepoRoot('https://github.com/acme/missing', { cacheDir })).rejects.toMatchObject({ code: 'REPO_SYNC_FAILED' });
+    });
+
+    it('run reads the clone at the deployed release branch, not the default branch', async () => {
+        const handlers = {};
+        require.cache[require.resolve('electron')] = {
+            exports: { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } }, dialog: {}, shell: { openExternal: vi.fn() } },
+        };
+        let filesAtRun = null;
+        const runClaudeCli = vi.fn(async ({ cwd }) => { filesAtRun = fs.readdirSync(cwd).sort(); return { text: '## Summary\nok', meta: {} }; });
+        require('./app-investigation.cjs')(null, {
+            runClaudeCli, repoCacheDir: cacheDir, loadReleases: async () => null,
+            incidentReport: { _collectIncident: async () => ({ data: {} }), _generateMarkdown: () => '## Report' },
+        });
+        const endMs = Date.now() + 60000;
+        const r = await handlers['app-investigation:run']({ sender: { isDestroyed: () => false, send: vi.fn() } }, {
+            query: 'MEDU 500s at 2pm', config: { subscriptionId: 'sub', apps: APPS },
+            interpretation: { appKey: 'prdmeduapp', startMs: endMs - 3600000, endMs, category: 'errors', question: 'q?' },
+            repoPath: 'https://github.com/acme/medu',
+        });
+        expect(r).toMatchObject({ success: true, meta: { branch: 'origin/release/2026.11' } });
+        expect(filesAtRun).toContain('release.txt');
+        expect(runClaudeCli.mock.calls[0][0].promptBody).not.toContain('Files on disk are the checked-out branch');
     });
 });

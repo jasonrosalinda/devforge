@@ -120,7 +120,7 @@ export function ReleaseMarkers({ stamps, yAxisId, showLabel = false }: {
   );
 }
 
-const SOURCE_LABEL: Record<ReleaseEvent['source'], string> = { swap: 'slot swap', deploy: 'deploy', revision: 'new revision' };
+export const SOURCE_LABEL: Record<ReleaseEvent['source'], string> = { swap: 'slot swap', deploy: 'deploy', revision: 'new revision' };
 
 /** Hover text for one release: what, when, which build, by whom. Pure; exported for tests. */
 export function releaseTitle(ev: ReleaseEvent): string {
@@ -128,6 +128,7 @@ export function releaseTitle(ev: ReleaseEvent): string {
     `${formatSgt(Date.parse(ev.at))} · ${SOURCE_LABEL[ev.source]}`,
     ev.build ? `Build ${ev.build}` : null,
     ev.commit ? `Commit ${ev.commit}` : null,
+    ev.branch ? `Branch ${ev.branch}` : null,
     ev.by ? `By ${ev.by}` : null,
     ev.message ?? null,
   ].filter(Boolean).join('\n');

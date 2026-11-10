@@ -14,6 +14,9 @@ const {
   _buildRcaPrompt: buildRcaPrompt,
   _buildInstanceHealth: buildInstanceHealth,
   _stripModelNarration: stripModelNarration,
+  _detectBursts: detectBursts,
+  _restartEvents: restartEvents,
+  _topFrames: topFrames,
 } = handler;
 
 // The model sometimes appends an acknowledgement that it disregarded the
@@ -349,6 +352,184 @@ describe('computeDowntime', () => {
 
 // ── Report rendering ──────────────────────────────────────────────────────────
 
+describe('detectBursts', () => {
+  const t = (min) => new Date(Date.UTC(2026, 10, 10, 6, min)).toISOString();
+
+  it('merges adjacent buckets above 5% into one interval and ignores quiet ones', () => {
+    const out = detectBursts([
+      [t(20), 1000, 10],     // 1%, fine
+      [t(10), 1000, 100],    // 10%
+      [t(5), 1000, 60],      // 6%
+      [t(0), 1000, 50],      // exactly 5%, not above
+      [t(30), 0, 0],         // no traffic
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ start: Date.parse(t(5)), end: Date.parse(t(15)), failed: 160, total: 2000 });
+    expect(out[0].peak).toBeCloseTo(0.1);
+  });
+
+  it('keeps separate bursts apart', () => {
+    expect(detectBursts([[t(0), 100, 50], [t(30), 100, 50]])).toHaveLength(2);
+  });
+
+  it('returns nothing for no data', () => {
+    expect(detectBursts(null)).toEqual([]);
+    expect(detectBursts([])).toEqual([]);
+  });
+});
+
+describe('5xx bursts in the report', () => {
+  const burst = {
+    start: START, end: START + 300_000, total: 2000, failed: 713, peak: 0.36,
+    endpoints: [{ name: 'POST User/SaveUserProfile', code: '500', count: 713 }],
+    deps: [{ op: 'POST User/SaveUserProfile', type: 'Http (tracked component)', target: 'ssoapi.mims.com', failed: 684 }],
+  };
+  const part = (md) => md.slice(md.indexOf('### 5xx Bursts'));
+
+  it('lists each burst with its endpoints and failing downstream calls', () => {
+    const md = part(render(makeData({ fiveXxBursts: [burst] })));
+    expect(md).toContain('36.0%');
+    expect(md).toContain('`POST User/SaveUserProfile`');
+    expect(md).toContain('ssoapi.mims.com');
+  });
+
+  it('says so when there is no burst, and stays silent when the fetch failed', () => {
+    expect(part(render(makeData({ fiveXxBursts: [] })))).toContain('No 5xx burst');
+    expect(render(makeData({ fiveXxBursts: null }))).not.toContain('### 5xx Bursts');
+  });
+
+  it('says the API shares the frontend\'s App Insights instead of repeating its tables', () => {
+    const md = render(makeData(), {
+      apiName: 'app-api', apiData: { reqSummary: null, arm: null, sharedInsights: true, fiveXxBursts: [burst] },
+    });
+    const apiPart = md.slice(md.indexOf('## API: app-api'));
+    expect(apiPart).toContain('same Application Insights resource as the frontend');
+    expect(apiPart).not.toContain('### Top Endpoints');
+    expect(apiPart).not.toContain('### 5xx Bursts');
+  });
+
+  it('reports the API\'s bursts too', () => {
+    const md = render(makeData(), { apiName: 'app-api', apiData: { reqSummary: null, arm: null, fiveXxBursts: [burst] } });
+    expect(md.slice(md.indexOf('## API: app-api'))).toContain('### 5xx Bursts');
+  });
+
+  it('gives a burst far from any downtime its own 5-minute timeline rows', () => {
+    const md = render(makeData({ fiveXxBursts: [{ ...burst, start: START + 20 * 300_000, end: START + 21 * 300_000 }] }));
+    const rows = md.slice(md.indexOf('## Incident Timeline')).split('\n').filter(l => l.startsWith('| ')).length;
+    const without = render(makeData()).slice(render(makeData()).indexOf('## Incident Timeline')).split('\n').filter(l => l.startsWith('| ')).length;
+    expect(rows).toBeGreaterThan(without);
+  });
+});
+
+describe('exceptions in the report', () => {
+  const stack = JSON.stringify([
+    { level: 0, method: 'System.Net.Http.HttpClient.Send', fileName: null },
+    { level: 1, method: 'MIMS.Education.API.Controllers.UserController.SaveProfile', fileName: 'C:\\src\\Controllers\\UserController.cs', line: 88 },
+    { level: 2, method: 'MIMS.Education.API.Startup.Handle', fileName: '/src/Startup.cs', line: 12 },
+    { level: 3, method: 'Microsoft.AspNetCore.Hosting.Run' },
+    { level: 4, method: 'MIMS.Education.API.Deep.Frame', fileName: 'Deep.cs', line: 1 },
+  ]);
+
+  it('names the application frames where an exception was thrown, framework frames last', () => {
+    expect(topFrames(stack)).toBe(
+      'MIMS.Education.API.Controllers.UserController.SaveProfile (UserController.cs:88) ← MIMS.Education.API.Startup.Handle (Startup.cs:12) ← MIMS.Education.API.Deep.Frame (Deep.cs:1)');
+    expect(topFrames(JSON.stringify([{ method: 'System.A' }, { method: 'System.B' }]))).toBe('System.A ← System.B');
+  });
+
+  it('returns nothing for an absent or malformed stack', () => {
+    expect(topFrames('')).toBe('');
+    expect(topFrames('not json')).toBe('');
+    expect(topFrames('{"a":1}')).toBe('');
+  });
+
+  it('shows where each exception was thrown and the busiest buckets', () => {
+    const exceptionAnalysis = [{
+      type: 'System.Net.Http.HttpRequestException', outerMessage: '429 Too Many Requests', count: 395,
+      firstOccurrence: '2026-11-10T12:00:00Z', lastOccurrence: '2026-11-10T12:25:00Z',
+      sampleInnerMsg: '', sampleOpName: 'POST User/SaveUserProfile', sampleInnerType: '', thrownAt: 'UserController.SaveProfile (UserController.cs:88)',
+    }];
+    const md = render(makeData({ exceptionAnalysis, exceptionPeaks: [{ t: '2026-11-10T12:05:00Z', count: 120 }] }));
+    const part = md.slice(md.indexOf('## 10. Error Intelligence'));
+    expect(part).toContain('Thrown at');
+    expect(part).toContain('UserController.SaveProfile (UserController.cs:88)');
+    expect(part).toContain('Busiest 5-minute buckets: 2026-11-10 20:05 SGT (120)');
+  });
+
+  it('shows the same columns for the API', () => {
+    const md = render(makeData(), { apiName: 'app-api', apiData: { reqSummary: null, arm: null, exceptionPeaks: [], exceptionAnalysis: [{
+      type: 'X', outerMessage: 'm', count: 3, firstOccurrence: '', lastOccurrence: '', sampleInnerMsg: '', sampleOpName: '', sampleInnerType: '', thrownAt: 'Api.Handler (H.cs:1)',
+    }] } });
+    expect(md.slice(md.indexOf('## API: app-api'))).toContain('Api.Handler (H.cs:1)');
+  });
+});
+
+describe('restarts & crashes in the report', () => {
+  const restarts = {
+    charts: [{ title: 'Application restarts', series: [
+      { name: 'App Crash', series: [{ t: '2026-07-29T02:05:00.000Z', count: 2 }, { t: '2026-07-29T02:10:00.000Z', count: 0 }] },
+      { name: 'Platform Healing Your App', series: [{ t: '2026-07-29T02:00:00.000Z', count: 1 }] },
+    ] }],
+    insights: [{ status: 'Critical', message: 'Application stop events are detected', items: [{ name: 'RD0001', text: 'stopped by Platform Healing' }] }],
+  };
+  const crashes = {
+    charts: [{ title: 'Crashes timeline', series: [{ name: 'Crashes', series: [{ t: '2026-07-29T02:05:00.000Z', count: 2 }] }] }],
+    events: [{ t: '2026-07-29T02:05:00.000Z', exitCode: '0xE0434352', category: 'CLR Exception', exceptionType: 'System.ObjectDisposedException', stackTrace: 'A.B()\nC.D()\nE.F()\nG.H()' }],
+  };
+  const part = (siteEvents) => {
+    const md = render(makeData({ siteEvents }));
+    return md.includes('## 17.') ? md.slice(md.indexOf('## 17.')) : '';
+  };
+
+  it('orders restart buckets newest first and drops empty ones', () => {
+    expect(restartEvents(restarts)).toEqual([
+      { t: '2026-07-29T02:05:00.000Z', cause: 'App Crash', count: 2 },
+      { t: '2026-07-29T02:00:00.000Z', cause: 'Platform Healing Your App', count: 1 },
+    ]);
+  });
+
+  // What the webappstart detector really returns: no chart at all, the events only in prose.
+  // Reading the chart alone reported "none" for an incident that had three Kudu kills.
+  it('reads restarts from the detector prose when the chart is empty', () => {
+    const prose = {
+      charts: [],
+      insights: [{ status: 'Critical', message: 'Application stop events are detected', items: [
+        { name: 'Kudu Kill(w3wp)', text: 'We analyzed ``3`` Kudu Kill Events.' },
+        { name: 'Kudu Kill(w3wp)', text: 'Kudu Kill(w3wp) Around 11/10/2026 12:21:51 (UTC), on Instance WN0SDWK000M2U, your application process (w3wp.exe) was terminated. Kudu Kill(w3wp) Around 11/10/2026 12:23:05 (UTC), on Instance WN0SDWK000M7O, your application process was terminated.' },
+        { name: 'Additional Information', text: 'Kudu Kill Around 01/01/2020 00:00:00 (UTC), on Instance IGNORED' },
+      ] }],
+    };
+    const md = part({ fe: { restarts: prose, crashes: null }, api: null });
+    expect(md).toContain('**Restarts:** 3');
+    expect(md).not.toContain('none in the window');
+    expect(md).toContain('WN0SDWK000M2U');
+    expect(md).toContain('2026-11-10 20:23 SGT');   // 12:23 UTC
+    expect(md).not.toContain('IGNORED');
+    expect(restartEvents(prose).map(e => e.instance)).toEqual(['WN0SDWK000M7O', 'WN0SDWK000M2U']);
+  });
+
+  it('reports restart causes, detector findings and crash exceptions with their top frames', () => {
+    const md = part({ fe: { restarts, crashes }, api: null });
+    expect(md).toContain('**Restarts:** 3');
+    expect(md).toContain('Platform Healing Your App');
+    expect(md).toContain('Application stop events are detected');
+    expect(md).toContain('`System.ObjectDisposedException`');
+    expect(md).toContain('A.B() ← C.D() ← E.F()');
+    expect(md).not.toContain('G.H()');
+  });
+
+  it('says "unknown" rather than "none" when a detector is missing, and "none" only when it answered empty', () => {
+    const missing = part({ fe: { restarts: null, crashes: null }, api: null });
+    expect(missing).toContain('unknown (not "none")');
+    const empty = part({ fe: { restarts: { charts: [], insights: [] }, crashes: { charts: [], events: [] } }, api: null });
+    expect(empty).toContain('**Restarts:** none in the window.');
+    expect(empty).toContain('**Crashes:** none in the window.');
+  });
+
+  it('omits the section when neither site was queried', () => {
+    expect(part({ fe: null, api: null })).toBe('');
+  });
+});
+
 describe('generateMarkdown', () => {
   it('emits every category including the new ones', () => {
     const md = render(makeData());
@@ -371,6 +552,21 @@ describe('generateMarkdown', () => {
     const md = render(makeData());
     expect(md).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
     expect(md).not.toMatch(/\d{2}:\d{2}:\d{2}(\.\d+)?Z/);
+  });
+
+  it('lists the API\'s 5xx and 4xx endpoints, and omits the tables when there are none', () => {
+    const api = (failedUrlsByStatus) => render(makeData(), {
+      apiName: 'app-api', apiData: { reqSummary: null, arm: null, failedUrlsByStatus },
+    });
+    const md = api({ urls5xx: [{ name: '/v1/orders', count: 7 }], urls4xx: [{ name: '/v1/login', count: 3 }] });
+    const apiPart = md.slice(md.indexOf('## API: app-api'));
+    expect(apiPart).toContain('**5xx errors by endpoint:**');
+    expect(apiPart).toContain('`/v1/orders`');
+    expect(apiPart).toContain('**4xx errors by endpoint:**');
+    expect(apiPart).toContain('`/v1/login`');
+
+    const none = api(null);
+    expect(none.slice(none.indexOf('## API: app-api'))).not.toContain('errors by endpoint');
   });
 
   it('marks unconfigured sections as unassessed rather than healthy', () => {
@@ -789,6 +985,26 @@ describe('reportFilename', () => {
 
   it('keeps an investigation report apart from the RCA for the same window', () => {
     expect(handler._reportFilename('investigation', 'prdmeduapp', start, end, 'pdf')).toBe('investigation-prdmeduapp-202611061300-202611061500.pdf');
+  });
+
+  it('names an RCA by its incident number and the app\'s configured suffix', () => {
+    const name = (n) => handler._reportFilename('rca', 'prdmeduapp', start, end, 'pdf', n);
+    expect(name({ incidentNumber: 'INC-202611-004', suffix: 'MIMS-CPD' })).toBe('INC-202611-004 (MIMS-CPD).pdf');
+    expect(name({ incidentNumber: 'INC-202611-004', suffix: '  ' })).toBe('INC-202611-004.pdf');
+    expect(handler._reportFilename(undefined, 'a', start, end, 'doc', { incidentNumber: 'INC-1', suffix: 'MIMS-MSP' })).toBe('INC-1 (MIMS-MSP).doc');
+  });
+
+  it('falls back to the window-based name when there is no incident number, and never renames an investigation report', () => {
+    expect(handler._reportFilename('rca', 'prdmeduapp', start, end, 'md', { incidentNumber: '', suffix: 'MIMS-CPD' })).toBe('rca-prdmeduapp-202611061300-202611061500.md');
+    expect(handler._reportFilename('rca', 'prdmeduapp', start, end, 'md', { incidentNumber: '—', suffix: 'X' })).toBe('rca-prdmeduapp-202611061300-202611061500.md');
+    expect(handler._reportFilename('investigation', 'prdmeduapp', start, end, 'md', { incidentNumber: 'INC-1', suffix: 'MIMS-CPD' })).toBe('investigation-prdmeduapp-202611061300-202611061500.md');
+  });
+
+  it('never lets the incident number or suffix steer the path', () => {
+    const name = handler._reportFilename('rca', 'a', start, end, 'pdf', { incidentNumber: '..\\..\\evil/INC-9', suffix: '../x)(' });
+    expect(name).not.toMatch(/[\\/]/);
+    expect(name.startsWith('.')).toBe(false);
+    expect(name).toBe('evilINC-9 (x).pdf');
   });
 
   it('never lets kind or appName steer the path', () => {

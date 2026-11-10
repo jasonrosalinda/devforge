@@ -5,7 +5,7 @@ import type { IncidentPayload, ReportKind } from '@shared/types/electron';
 import type { RcaStatus } from '@/components/azure/rcaDialog';
 import {
     buildRcaPrintHtml, buildRcaWordHtml, formatSgt, formatSgtRange, splitQuickSummary,
-    buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
+    buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText, parseRcaFields,
 } from '@/components/azure/rcaHtml';
 import { acceptsRcaEvent, newRunId, rcaOutputOf } from '@/lib/rca-report';
 
@@ -26,13 +26,15 @@ export interface RcaGiven {
  * `getPayload` supplies the incident window and Azure identifiers; `extra.reportMarkdown`
  * hands over a telemetry report already collected, so the RCA does not pull Azure again.
  */
-export function useRcaReport({ appKey, getPayload }: { appKey: string; getPayload: () => IncidentPayload }) {
+export function useRcaReport({ appKey, getPayload, fileSuffix }: { appKey: string; getPayload: () => IncidentPayload; fileSuffix?: string | undefined }) {
     const [status, setStatus] = useState<RcaStatus>('idle');
     const [text, setText] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [stages, setStages] = useState<string[]>([]);
     const [draft, setDraft] = useState('');
     const output = rcaOutputOf(draft, text);
+    // The RCA's file name: the incident number in the report, then the app's suffix.
+    const naming = (markdown: string) => ({ incidentNumber: parseRcaFields(markdown).incidentNumber, fileSuffix });
 
     const reset = useCallback(() => {
         setStatus('idle');
@@ -85,7 +87,7 @@ export function useRcaReport({ appKey, getPayload }: { appKey: string; getPayloa
     const exportMd = useCallback(async (kind: ReportKind = 'rca', markdown: string = output) => {
         try {
             const { startMs, endMs } = getPayload();
-            const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown, kind });
+            const result = await window.electronAPI.incidentReport.saveRca({ appName: appKey, startMs, endMs, markdown, kind, ...naming(markdown) });
             if (!result.success) throw new Error(result.error ?? 'Save failed');
             await navigator.clipboard.writeText(markdown);
             toast.success(kind === 'rca' ? 'RCA saved & markdown copied' : 'Report saved & markdown copied');
@@ -104,7 +106,7 @@ export function useRcaReport({ appKey, getPayload }: { appKey: string; getPayloa
                 window: formatSgtRange(startMs, endMs),
                 generated: formatSgt(Date.now()),
             });
-            const result = await window.electronAPI.incidentReport.exportRcaPdf({ appName: appKey, startMs, endMs, html, kind });
+            const result = await window.electronAPI.incidentReport.exportRcaPdf({ appName: appKey, startMs, endMs, html, kind, ...naming(markdown) });
             if (!result.success) throw new Error(result.error ?? 'PDF export failed');
             toast.success(kind === 'rca' ? 'RCA PDF saved' : 'Report PDF saved');
         } catch (e: any) {
@@ -120,7 +122,7 @@ export function useRcaReport({ appKey, getPayload }: { appKey: string; getPayloa
                 window: formatSgtRange(startMs, endMs),
                 generated: formatSgt(Date.now()),
             });
-            const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html, kind });
+            const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html, kind, ...naming(markdown) });
             if (!result.success) throw new Error(result.error ?? 'Word export failed');
             toast.success(kind === 'rca' ? 'RCA Word document saved' : 'Report Word document saved');
         } catch (e: any) {

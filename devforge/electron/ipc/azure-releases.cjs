@@ -124,6 +124,8 @@ function parseKuduDeployments(records) {
       by,
       build: meta?.buildNumber ? String(meta.buildNumber) : undefined,
       commit: meta?.commitId ? String(meta.commitId).slice(0, 8) : undefined,
+      // Azure DevOps posts Build.SourceBranchName: the last segment only ("2026.11" for release/2026.11).
+      branch: meta?.branch ? String(meta.branch) : undefined,
       message: meta ? undefined : (p.message || undefined),
     });
   }
@@ -156,7 +158,7 @@ function mergeReleases(...lists) {
     const prev = merged[merged.length - 1];
     if (prev && Date.parse(ev.at) - Date.parse(prev.at) < COLLAPSE_MS) {
       if (ev.source === 'swap') prev.source = 'swap';
-      for (const k of ['by', 'build', 'commit', 'message']) if (!prev[k] && ev[k]) prev[k] = ev[k];
+      for (const k of ['by', 'build', 'commit', 'branch', 'message']) if (!prev[k] && ev[k]) prev[k] = ev[k];
       continue;
     }
     merged.push({ ...ev });
@@ -232,7 +234,33 @@ async function fetchReleases(token, { subscriptionId, resourceGroup, siteResId, 
   return { events, last: events[events.length - 1] ?? null, sources };
 }
 
+function siteResourceId(subscriptionId, site) {
+  if (site.type === 'appservice') {
+    return `/subscriptions/${subscriptionId}/resourceGroups/${site.resourceGroup}/providers/Microsoft.Web/sites/${site.name}`;
+  }
+  return `/subscriptions/${subscriptionId}/resourceGroups/${site.resourceGroup}/providers/Microsoft.App/containerApps/${site.name}`;
+}
+
+/** Releases for one configured app entry, per site: its frontend and, when it has one, its API. */
+async function fetchAppReleases(token, { subscriptionId, app, startIso, endIso }) {
+  const forSite = (site) => fetchReleases(token, {
+    subscriptionId,
+    resourceGroup: site.resourceGroup,
+    siteResId: siteResourceId(subscriptionId, site),
+    isAppService: site.type === 'appservice',
+    startIso,
+    endIso,
+  }).catch(() => null);
+  const [fe, api] = await Promise.all([
+    forSite({ ...app, type: app.type || 'appservice' }),
+    app.apiName ? forSite({ type: app.apiType || 'appservice', resourceGroup: app.resourceGroup, name: app.apiName }) : null,
+  ]);
+  return { fe, api };
+}
+
 module.exports = {
+  siteResourceId,
+  fetchAppReleases,
   COLLAPSE_MS,
   LOOKBACK_MS,
   MAX_ACTIVITY_PAGES,

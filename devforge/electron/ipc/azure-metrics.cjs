@@ -126,7 +126,7 @@ const {
 const { fetchSnatCharts } = require('./azure-snat.cjs');
 // Restart events — same detector plumbing, but per site rather than per plan.
 const { fetchRestartCharts } = require('./azure-restarts.cjs');
-const { fetchReleases } = require('./azure-releases.cjs');
+const { fetchAppReleases, siteResourceId: resourceId } = require('./azure-releases.cjs');
 // Application Crashes detector — a crash-count timeline plus captured stack traces.
 const { fetchCrashData } = require('./azure-crashmonitoring.cjs');
 const { getPageViewInsights } = require('./azure-pageviews.cjs');
@@ -154,13 +154,6 @@ function summarize(data) {
     p99: Math.round(p99 * 100) / 100,
     series,
   };
-}
-
-function resourceId(subscriptionId, app) {
-  if (app.type === 'appservice') {
-    return `/subscriptions/${subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.Web/sites/${app.name}`;
-  }
-  return `/subscriptions/${subscriptionId}/resourceGroups/${app.resourceGroup}/providers/Microsoft.App/containerApps/${app.name}`;
 }
 
 function sqlDbResourceId(subscriptionId, app) {
@@ -2605,30 +2598,10 @@ const handler = (_mainWindow) => {
       const { cred } = sharedAzure();
       const token = await getToken(cred);
       const { startTime, endTime } = buildTimespan(range, customStart, customEnd);
-      const startIso = startTime.toISOString();
-      const endIso = endTime.toISOString();
-
-      const forSite = async (siteApp) => {
-        try {
-          return await fetchReleases(token, {
-            subscriptionId: config.subscriptionId,
-            resourceGroup: siteApp.resourceGroup,
-            siteResId: resourceId(config.subscriptionId, siteApp),
-            isAppService: siteApp.type === 'appservice',
-            startIso,
-            endIso,
-          });
-        } catch { return null; }
-      };
-
-      const [fe, api] = await Promise.all([
-        forSite({ ...app, type: app.type || 'appservice' }),
-        app.apiName
-          ? forSite({ type: app.apiType || 'appservice', resourceGroup: app.resourceGroup, name: app.apiName })
-          : Promise.resolve(null),
-      ]);
-
-      const result = { fe, api };
+      const result = await fetchAppReleases(token, {
+        subscriptionId: config.subscriptionId, app, startIso: startTime.toISOString(), endIso: endTime.toISOString(),
+      });
+      const { fe, api } = result;
       const anyOk = (r) => r && Object.values(r.sources).includes('ok');
       if (anyOk(fe) || anyOk(api)) setCached(cacheKey, result);
       return result;

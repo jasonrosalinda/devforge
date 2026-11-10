@@ -81,6 +81,10 @@ export interface IAppInvestigationAPI {
         /** Screenshots attached as evidence: PNG/JPEG/GIF/WEBP data URIs, at most 5, each under 4 MB. */
         images?: Array<{ name: string; dataUrl: string }> | undefined;
     }) => Promise<InvestigationResult>;
+    /** The release branch (and commit) live at `endMs`, resolved in the repo from the Azure release's commit or branch. */
+    deployedRef: (payload: { repoPath: string; endMs: number; release: { commit?: string | undefined; branch?: string | undefined } | null }) => Promise<{
+        success: boolean; branch?: string; sha?: string | null; basis?: 'commit' | 'branch-at-end' | 'checked-out'; note?: string; code?: string; error?: string;
+    }>;
     cancel: () => Promise<{ success: boolean; running: boolean }>;
     openCitation: (payload: { root: string; file: string; line: number }) => Promise<{ success: boolean; error?: string }>;
     onChunk: (cb: (data: { runId?: string | null; chunk: string }) => void) => () => void;

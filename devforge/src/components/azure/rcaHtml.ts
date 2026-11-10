@@ -69,8 +69,9 @@ const META_FIELDS = [
 export const RCA_META_FIELDS = META_FIELDS;
 
 /**
- * The tracker: the QA-style record appended after section 7 — what was seen, what it
- * turned out to be, what was done and what proved it worked.
+ * The tracker: the QA-style record kept beside the RCA, not inside it (it is left out of the
+ * PDF, Word and Copy for Teams exports) — what was seen, what it turned out to be, what was
+ * done and what proved it worked.
  *
  * The engineer owns it, but the AI drafts it: a generated run fills any field left empty,
  * working from the same telemetry as the report and from whatever the engineer has already
@@ -96,26 +97,12 @@ export const EMPTY_TRACKER_FIELDS: RcaTrackerFields = {
   detection: '', rootCauseIdentified: '', correctiveAction: '', preventiveAction: '', outcome: '',
 };
 
-/** True when no tracker field carries anything. */
-export function isTrackerEmpty(tracker: RcaTrackerFields): boolean {
-  return TRACKER_FIELDS.every(f => !(tracker?.[f.key] ?? '').trim());
-}
-
 /** The tracker as plain text for the clipboard — "Label: value" per filled field. */
 export function trackerCopyText(tracker: RcaTrackerFields): string {
   return TRACKER_FIELDS
     .filter(f => (tracker?.[f.key] ?? '').trim())
     .map(f => `${f.label}: ${tracker[f.key].trim()}`)
     .join('\n');
-}
-
-/** The tracker as markdown — one labelled line per filled field. '' when untouched. */
-export function composeTrackerMarkdown(tracker: RcaTrackerFields): string {
-  if (isTrackerEmpty(tracker)) return '';
-  const lines = TRACKER_FIELDS
-    .filter(f => (tracker[f.key] ?? '').trim())
-    .map(f => `**${f.label}:** ${(tracker[f.key] ?? '').trim()}`);
-  return `## Tracker\n\n${lines.join('  \n')}`;
 }
 
 /**
@@ -179,7 +166,7 @@ export function parseTrackerFields(markdown: string): Partial<RcaTrackerFields> 
  * out rather than printed as bare headings — a heading with nothing under it reads
  * as missing analysis instead of an unanswered field.
  */
-export function composeRcaMarkdown(fields: RcaFields, summary = '', tracker?: RcaTrackerFields): string {
+export function composeRcaMarkdown(fields: RcaFields, summary = ''): string {
   const parts: string[] = [];
   const s = (v: string) => (v ?? '').trim();
 
@@ -199,9 +186,7 @@ export function composeRcaMarkdown(fields: RcaFields, summary = '', tracker?: Rc
     if (!isHtmlEmpty(fields[sec.key])) parts.push(`## ${sec.n}. ${sec.label}\n\n${s(fields[sec.key])}`);
   }
 
-  const trackerMd = tracker ? composeTrackerMarkdown(tracker) : '';
-  if (trackerMd) parts.push(trackerMd);
-
+  // The Tracker is deliberately not part of the report: it has its own tab and Copy buttons.
   return parts.join('\n\n') + '\n';
 }
 

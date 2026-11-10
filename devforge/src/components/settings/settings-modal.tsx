@@ -228,6 +228,18 @@ const [newMonitorId, setNewMonitorId] = useState('');
                   <span className="text-[10px] text-muted-foreground">Platform name shown on cards and reports. Defaults to the resource group.</span>
                 </div>
 
+                {/* The RCA's file name is its incident number plus this, e.g. "INC-202611-004 (MIMS-CPD)". */}
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs">Incident file suffix <span className="text-muted-foreground">(optional)</span></Label>
+                  <Input
+                    value={editingApp.incidentSuffix ?? ''}
+                    onChange={e => { const v = e.target.value; setEditingApp(a => { if (!a) return null; const n = { ...a }; if (v) n.incidentSuffix = v; else delete n.incidentSuffix; return n; }); }}
+                    placeholder="MIMS-CPD"
+                    className="text-xs"
+                  />
+                  <span className="text-[10px] text-muted-foreground">Ends this app&apos;s RCA PDF, Word and Markdown file names: INC-202611-004 (MIMS-CPD).</span>
+                </div>
+
                 {/* Platform URLs */}
                 <div className="flex flex-col gap-1">
                   <Label className="text-xs">Urls <span className="text-muted-foreground">(optional)</span></Label>
@@ -415,7 +427,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                         <Input
                           value={editingApp[key] ?? ''}
                           onChange={e => setSourcePath(key, e.target.value)}
-                          placeholder="C:\GitProjects\my-app"
+                          placeholder="C:\GitProjects\my-app or https://github.com/org/my-app"
                           className="text-xs font-mono h-7"
                         />
                         {isElectron() && (
@@ -428,7 +440,7 @@ const [newMonitorId, setNewMonitorId] = useState('');
                       </div>
                     </div>
                   ))}
-                  <span className="text-[10px] text-muted-foreground">Local clone of each repository. App Investigation lets Claude read it (never write) to tie an incident to code and commits.</span>
+                  <span className="text-[10px] text-muted-foreground">A local clone, or a GitHub URL that devForge clones and keeps fetched for you. App Investigation lets Claude read it (never write) to tie an incident to code and commits.</span>
                 </div>
 
                 <Separator />

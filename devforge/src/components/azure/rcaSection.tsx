@@ -7,7 +7,7 @@ import { RichTextField } from './richTextField';
 import { Input } from '@/components/ui/input';
 import {
   parseRcaFields, parseTrackerFields, composeRcaMarkdown, isRcaFieldsEmpty, stripMarkdown,
-  htmlToPlainText, plainTextToHtml, isTrackerEmpty, trackerCopyText,
+  htmlToPlainText, plainTextToHtml, trackerCopyText,
   EMPTY_RCA_FIELDS, EMPTY_TRACKER_FIELDS, TRACKER_FIELDS,
   RCA_SECTIONS, RCA_META_FIELDS,
   type RcaFields, type RcaTrackerFields,
@@ -108,7 +108,8 @@ export function RcaSection({
     }));
   }, [defaultTitle, defaultServices, period]);
 
-  const draft = composeRcaMarkdown(fields, '', trackerFields);
+  // The draft feeds PDF, Word and Copy for Teams, so it carries the RCA only, not the Tracker.
+  const draft = composeRcaMarkdown(fields);
   const draftRef = useRef('');
   useEffect(() => {
     if (draftRef.current === draft) return;
@@ -119,7 +120,8 @@ export function RcaSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
-  const hasContent = !isRcaFieldsEmpty(fields) || !isTrackerEmpty(trackerFields);
+  // Tracker text alone gives the exports nothing to write, so it does not enable them.
+  const hasContent = !isRcaFieldsEmpty(fields);
 
   return (
     <div className="px-4 pb-3">
