@@ -14,6 +14,14 @@ export const PERF_4XX_COLOR  = PERF_COLORS.fourXx;
 export const PERF_5XX_COLOR  = PERF_COLORS.fiveXx;
 export const PERF_LINE_COLOR = PERF_COLORS.line;
 
+/** Share of `count` made by bots, as "37%". "<1%" when bots made some but it rounds to
+ *  zero, so a few bots never read as none; '' when there are no requests to share. */
+export function botShareLabel(bots: number, count: number): string {
+  if (count <= 0) return '';
+  const pct = Math.round((bots / count) * 100);
+  return `${bots > 0 && pct === 0 ? '<1' : pct}%`;
+}
+
 /** HTTP reason phrase plus a one-line description for the codes that actually
  *  show up as 4xx/5xx failures on a web app. Not the full IANA registry — just
  *  enough that a code in the failure table reads as a fact ("404 — Not Found —

@@ -408,6 +408,9 @@ export interface EndpointPerfRow {
   p95: number
   p99: number
   maxMs: number
+  /** Of `count`, the requests from an automated client (bot, crawler, script), by user
+   *  agent. Absent on results cached before it was added. */
+  bots?: number
 }
 
 /**
@@ -751,6 +754,25 @@ export interface FiveXxRequest {
   itemCount: number
 }
 
+/** One (status code, endpoint, role) group in a window, sampling-corrected. */
+export interface StatusBreakdownRow {
+  /** '(none)' for a failure that carried no code. */
+  code: string
+  /** Query-stripped operation name, e.g. 'GET /api/x'. */
+  endpoint: string
+  /** cloud_RoleName: tells apart FE and API when they share an App Insights resource. */
+  role: string
+  count: number
+  /** Of `count`, the requests from an automated client (bot, crawler, script), by user agent. */
+  bots: number
+}
+
+export interface StatusBreakdownResult {
+  /** Busiest first, top 10. */
+  rows: StatusBreakdownRow[]
+  error?: string
+}
+
 export interface FiveXxRequestsResult {
   /** Newest first, capped (1,000); `total` is the true count in the window. */
   rows: FiveXxRequest[]
@@ -776,5 +798,7 @@ export interface IAzureMetricsAPI {
   fetchEndpointDetail: (opts: { appKey: string; endpoint: string; site: 'fe' | 'api'; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<EndpointDepsResult>
   /** The 5xx request records behind an Incident Timeline burst. */
   fetchFiveXxRequests: (opts: { appKey: string; site: 'fe' | 'api'; config?: unknown; startIso: string; endIso: string }) => Promise<FiveXxRequestsResult>
+  /** The codes, endpoints and roles behind an active 4xx/5xx remark's peak bucket. */
+  fetchStatusBreakdown: (opts: { appKey: string; site: 'fe' | 'api'; cls: '4xx' | '5xx'; config?: unknown; startIso: string; endIso: string }) => Promise<StatusBreakdownResult>
   onPartial?: (cb: (data: { key: string; result: AppMetrics }) => void) => (() => void)
 }

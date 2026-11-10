@@ -9,10 +9,12 @@ interface CopyButtonProps {
     value: string;
     label?: string;
     disabled?: boolean;
+    /** Shown beside the icon, making it a labelled outline button rather than an icon. */
+    text?: string;
 }
 
 /** Copies text and flips to a tick briefly, so the click is acknowledged twice. */
-export function CopyButton({ value, label = "Copy to clipboard", disabled }: CopyButtonProps) {
+export function CopyButton({ value, label = "Copy to clipboard", disabled, text }: CopyButtonProps) {
     const [copied, setCopied] = useState(false);
 
     const copy = async () => {
@@ -29,13 +31,14 @@ export function CopyButton({ value, label = "Copy to clipboard", disabled }: Cop
     return (
         <Hint label={label}>
             <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                variant={text ? "outline" : "ghost"}
+                size={text ? "sm" : "icon"}
+                className={text ? undefined : "h-7 w-7 text-muted-foreground hover:text-foreground"}
                 onClick={copy}
                 disabled={disabled || !value}
             >
                 {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {text}
             </Button>
         </Hint>
     );

@@ -21,6 +21,8 @@ export interface StoryLine {
   actions: StoryAction[];
   /** Sort key — incidents read in the order they happened. */
   at: number;
+  /** Detail listed under the line, one bullet each. */
+  items?: string[];
 }
 
 /** A release this long before an incident is worth naming as a possible cause. */
@@ -57,10 +59,12 @@ export function recurrenceMs(starts: number[]): number | null {
 
 const SOURCE: Record<ReleaseEvent['source'], string> = { swap: 'swap', deploy: 'deploy', revision: 'revision' };
 
-export function buildRemarkStory({ lanes, nowActive, hasApi }: {
+export function buildRemarkStory({ lanes, nowActive, nowItems = [], hasApi }: {
   lanes: TimelineLane[];
-  /** Remarks active in the trailing bucket (`activeRemarks`). */
+  /** Remarks active in the trailing bucket (`activeRemarkList` + `nowRemarkText`). */
   nowActive: string[];
+  /** Detail listed under the "Right now" line: the active 4xx/5xx codes and endpoints. */
+  nowItems?: string[];
   hasApi: boolean;
 }): StoryLine[] {
   const lane = (key: TimelineLane['key']) => lanes.find(l => l.key === key)?.items ?? [];
@@ -162,13 +166,13 @@ export function buildRemarkStory({ lanes, nowActive, hasApi }: {
 
   incidents.sort((a, b) => a.at - b.at);
 
-  const now: StoryLine = nowActive.length
-    ? { tone: 'critical', at: -Infinity, text: `Right now: ${nowActive.join(', ')}.`, actions: [] }
-    : { tone: 'ok', at: -Infinity, text: 'Right now: all clear.', actions: [] };
-
-  const lines = [now, ...incidents];
+  // "Right now" only when something is active; an all-clear there just repeats the line below.
+  const lines: StoryLine[] = nowActive.length
+    ? [{ tone: 'critical', at: -Infinity, text: `Right now: ${nowActive.join(', ')}.`, actions: [], ...(nowItems.length ? { items: nowItems } : {}) }, ...incidents]
+    : [...incidents];
   if (!incidents.length) {
-    lines.push({ tone: 'ok', at: Infinity, text: 'Nothing else in this window: no downtime, 5xx bursts, restarts, crashes or unusual spikes.', actions: [] });
+    // "Other" only when a "Right now" line sits above it.
+    lines.push({ tone: 'ok', at: Infinity, text: `No ${nowActive.length ? 'other ' : ''}issues in this window. There was no downtime and there were no 5xx bursts, restarts, crashes or unusual spikes.`, actions: [] });
   }
   if (releases.length) {
     const shown = releases.slice(-3);

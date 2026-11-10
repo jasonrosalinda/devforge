@@ -78,6 +78,8 @@ export interface IAppInvestigationAPI {
         interpretation: InvestigationInterpretation;
         config: unknown;
         repoPath: string;
+        /** Screenshots attached as evidence: PNG/JPEG/GIF/WEBP data URIs, at most 5, each under 4 MB. */
+        images?: Array<{ name: string; dataUrl: string }> | undefined;
     }) => Promise<InvestigationResult>;
     cancel: () => Promise<{ success: boolean; running: boolean }>;
     openCitation: (payload: { root: string; file: string; line: number }) => Promise<{ success: boolean; error?: string }>;

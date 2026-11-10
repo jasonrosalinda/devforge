@@ -7,11 +7,11 @@ import type { EndpointDepsState } from '@/hooks/useAzureMetrics';
 import { UI } from '@/lib/chart-colors';
 import {
   perfChartRows, perfSummary, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals,
-  PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR, httpStatusLabel,
+  PERF_OK_COLOR, PERF_4XX_COLOR, PERF_5XX_COLOR, PERF_LINE_COLOR, httpStatusLabel, botShareLabel,
 } from './performance';
 
 /** Row layout, shared by the header and the endpoint rows so the columns line up. */
-const GRID = '1fr 58px 58px 46px 46px 58px 58px';
+const GRID = '1fr 58px 58px 40px 46px 46px 58px 58px';
 /**
  * Endpoint rows rendered before the "show more" cut.
  *
@@ -261,6 +261,7 @@ export function PerformancePanel({
         <span>endpoint</span>
         <span style={{ textAlign: 'right' }} title="Requests per minute across the window">rpm</span>
         <span style={{ textAlign: 'right' }} title="Total requests in the window">requests</span>
+        <span style={{ textAlign: 'right' }} title="Share of these requests made by bots, crawlers and scripts, judged by user agent. A bot posing as a browser counts as human.">bot</span>
         <span style={{ textAlign: 'right' }} title="Client errors">4xx</span>
         <span style={{ textAlign: 'right' }} title="Server errors">5xx</span>
         <span style={{ textAlign: 'right' }} title="Average response time">avg</span>
@@ -289,6 +290,11 @@ export function PerformancePanel({
             <span style={{ color: on ? UI.text : 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: on ? 4 : 0 }}>{e.url}</span>
             {num(e.rpm, PERF_LINE_COLOR, 'Requests per minute')}
             {num(e.count, UI.textDim, 'Total requests')}
+            {/* '—' for a result cached before the bot count existed; dimmed at 0% like the other zeros. */}
+            <span className="tabular-nums" style={{ color: e.bots ? UI.textDim : UI.border, textAlign: 'right' }}
+              title={e.bots != null ? `${e.bots.toLocaleString()} of ${e.count.toLocaleString()} requests from bots, by user agent` : 'Refresh to load the bot share'}>
+              {e.bots != null ? botShareLabel(e.bots, e.count) || '—' : '—'}
+            </span>
             {/* Dimmed at zero rather than blank: a dash reads as "not measured", and a
                 clean endpoint is worth seeing at a glance. */}
             {num(e.fourXx, e.fourXx ? PERF_4XX_COLOR : UI.border, '4xx responses')}

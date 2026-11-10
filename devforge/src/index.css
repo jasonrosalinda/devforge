@@ -425,6 +425,9 @@ input[type="time"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 .ps-analysis-content ul, .ps-analysis-content ol { margin: .4rem 0; padding-left: 1.25rem; }
 .ps-analysis-content li { margin: .15rem 0; }
 .ps-analysis-content code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .85em; background: hsl(var(--muted)); padding: .1em .35em; border-radius: 4px; }
+/* Current / Fix code blocks in Recommended Fix: scroll sideways, never wrap code. */
+.ps-analysis-content pre { background: hsl(var(--muted) / .5); border: 1px solid hsl(var(--border)); border-radius: 6px; padding: .5rem .7rem; margin: .3rem 0 .6rem; overflow-x: auto; }
+.ps-analysis-content pre code { background: none; padding: 0; font-size: 11px; white-space: pre; }
 .ps-analysis-content table { width: 100%; border-collapse: collapse; margin: .4rem 0; font-size: 11px; }
 .ps-analysis-content th, .ps-analysis-content td { border: 1px solid hsl(var(--border)); padding: 4px 7px; text-align: left; vertical-align: top; }
 .ps-analysis-content th { background: hsl(var(--muted)); font-weight: 600; }

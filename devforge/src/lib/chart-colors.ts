@@ -18,20 +18,26 @@
  * `backgroundColor` option, say — put it through `resolveCssColor` below.
  */
 
+// The *Max shades double as the metrics' colours in Copy for Teams, so each is one
+// Teams keeps on paste. Tested by pasting a swatch table: blue-600/700, cyan-600/700,
+// teal-600/700, indigo-600/700, lime-500, amber, yellow and orange kept their colour;
+// blue-500, sky-500/600, cyan-500, teal-500, indigo-500, violet, purple and slate came
+// through white. No red or pink, which read as an alarm, and no green, which means
+// healthy here.
 export const CHART_COLORS = {
-  cpuAvg: '#c4b5fd',
-  cpuMax: '#a78bfa',
-  memAvg: '#fdba74',
-  memMax: '#f97316',
+  cpuAvg: '#bfdbfe',     // blue-200
+  cpuMax: '#2563eb',     // blue-600
+  memAvg: '#fdba74',     // orange-300
+  memMax: '#f97316',     // orange-500
   avail: '#3fb950',
   // Database. CPU and memory get separate hues for the same reason the app's do
-  // (purple vs orange) — two shades of one colour are unreadable once four lines
+  // (blue vs orange) — two shades of one colour are unreadable once four lines
   // overlap. None of these appear in INSTANCE_PALETTE below, which the per-instance
-  // health lines draw from: #2dd4bf and #22d3ee are in it, so the teal is 0d9488.
+  // health lines draw from.
   dbCpuAvg: '#5eead4',   // teal-300
   dbCpuMax: '#0d9488',   // teal-600
-  dbMemAvg: '#a5b4fc',   // indigo-300
-  dbMemMax: '#4f46e5',   // indigo-600
+  dbMemAvg: '#fef08a',   // yellow-200
+  dbMemMax: '#eab308',   // yellow-500
 };
 
 export const INSTANCE_PALETTE = [

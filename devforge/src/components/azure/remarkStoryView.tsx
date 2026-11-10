@@ -32,6 +32,11 @@ export function RemarkStoryView({ lines, onAction }: { lines: StoryLine[]; onAct
                   {a.label}
                 </button>
               ))}
+              {l.items?.length ? (
+                <ul className="mt-0.5 list-disc pl-4 font-normal text-foreground">
+                  {l.items.map((it, j) => <li key={j}>{it}</li>)}
+                </ul>
+              ) : null}
             </span>
           </li>
         );

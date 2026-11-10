@@ -23,11 +23,27 @@ const story = (items: Parameters<typeof lanes>[0], nowActive: string[] = [], has
   buildRemarkStory({ lanes: lanes(items), nowActive, hasApi });
 
 describe('buildRemarkStory', () => {
-  it('reads a quiet window as quiet', () => {
+  it('reads a quiet window as quiet, without a "Right now: all clear" line', () => {
     expect(story({}).map(l => [l.tone, l.text])).toEqual([
-      ['ok', 'Right now: all clear.'],
-      ['ok', 'Nothing else in this window: no downtime, 5xx bursts, restarts, crashes or unusual spikes.'],
+      ['ok', 'No issues in this window. There was no downtime and there were no 5xx bursts, restarts, crashes or unusual spikes.'],
     ]);
+  });
+
+  it('says "No other issues" when a "Right now" line sits above the all-clear', () => {
+    expect(story({}, ['memory pressure']).at(-1)!.text)
+      .toBe('No other issues in this window. There was no downtime and there were no 5xx bursts, restarts, crashes or unusual spikes.');
+  });
+
+  it('lists the active codes under the "Right now" line, and nothing when there are none', () => {
+    const items = ['404 × 20 on GET /ph/course/assets/ic_expiry.svg (100% bot)'];
+    const [now] = buildRemarkStory({ lanes: lanes({}), nowActive: ['FE 4xx surge (peak 11.5% at 09:10)'], nowItems: items, hasApi: true });
+    expect(now).toMatchObject({ tone: 'critical', text: 'Right now: FE 4xx surge (peak 11.5% at 09:10).', items });
+    expect(story({}, ['memory pressure'])[0]!.items).toBeUndefined();
+  });
+
+  it('has no "Right now" line when only past incidents are left', () => {
+    expect(story({ http5xx: [burst(0, 5, 0.06)] }, [], false).map(l => l.text))
+      .toEqual(['5xx above 5% 08:00–08:05 (5 min), peak 6.0%.']);
   });
 
   it('opens with what is active right now', () => {
@@ -84,7 +100,6 @@ describe('buildRemarkStory', () => {
       { startMs: at(60), endMs: at(65), title: '', color: '', severity: 'Warning', cause: 'CPU' },
     ] });
     expect(lines.map(l => l.text)).toEqual([
-      'Right now: all clear.',
       '2 warning-level spikes (CPU, Memory), first at 08:05.',
       'Critical spike 08:30–08:40: CPU + DB CPU together.',
     ]);
@@ -96,7 +111,7 @@ describe('buildRemarkStory', () => {
       http5xx: [burst(30, 10, 0.1)],
       releases: [release(0), release(200, 'api', 'deploy')],
     });
-    expect(lines.map(l => l.text.split(' ')[0])).toEqual(['Right', 'FE', 'Down', '2']);
+    expect(lines.map(l => l.text.split(' ')[0])).toEqual(['FE', 'Down', '2']);
     expect(lines.at(-1)).toMatchObject({ tone: 'info', text: '2 releases in range: 08:00 FE swap, 11:20 API deploy.' });
     expect(lines.at(-1)!.actions.map(a => a.label)).toEqual(['Verdict 08:00', 'Verdict 11:20']);
   });

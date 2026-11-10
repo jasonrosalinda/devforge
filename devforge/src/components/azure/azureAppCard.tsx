@@ -1,25 +1,22 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, ScanSearch, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, Loader2 } from 'lucide-react';
 import { marked } from 'marked';
 import { Hint } from '@/components/ui/hint';
 import { toast } from 'sonner';
-import { RcaDialog } from './rcaDialog';
-import { RcaSection } from './rcaSection';
-import { formatSgtRange } from './rcaHtml';
-import { useRcaReport } from '@/hooks/useRcaReport';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
 import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCounters, RestartResult, CrashResult, ReleaseResult, ExceptionLocationSeries, ExceptionSiteRow } from '@shared/types/azureMetrics.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
-import { activeRemarks, buildRemarks } from './azureAppRemarks';
-import { buildRemarkStory } from './remarkStory';
+import { activeRemarkList, breakdownTarget, buildRemarks, collectRemarks, formatStatusBreakdown, nowRemarkItems, nowRemarkText } from './azureAppRemarks';
+import { buildRemarkStory, type StoryTone } from './remarkStory';
 import { RemarkStoryView } from './remarkStoryView';
 import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
-import { RestartRows } from './restartSection';
-import { CrashMonitoringRows } from './crashMonitoringSection';
+import { RestartRows, restartTotals } from './restartSection';
+import { CrashMonitoringRows, crashTotals } from './crashMonitoringSection';
+import { buildSiteTeamsCopy, instanceColors, snatColors, uptimeColors, type SiteCopySection } from './siteTeamsCopy';
 import { IncidentTimeline, buildTimelineLanes } from './incidentTimeline';
 import { ReleaseVerdictDialog, type ReleaseVerdictTarget } from './releaseVerdictDialog';
 import { FiveXxRequestsDialog, type FiveXxTarget } from './fiveXxRequestsDialog';
@@ -897,6 +894,12 @@ interface AzureAppCardProps {
 
 
 const AI_STATUS_COLORS = { healthy: UI.success, warning: UI.warning, critical: UI.error } as const;
+/** Width (px) of the Copy for Teams metrics table. */
+const TEAMS_COPY_WIDTH = 760;
+/** Width (px) the Copy for Teams chart is rendered at. Teams ignores the width attribute
+ *  and fits a pasted image into roughly 590x170, so only the aspect ratio decides how big
+ *  it shows: this width over the 320px chart plus legend (~3.4:1) fills that box. */
+const TEAMS_CHART_WIDTH = 1180;
 
 /**
  * Wrapped in memo because the page holds every card's async state in one place: a restart
@@ -978,7 +981,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [cardCollapsed, setCardCollapsed] = useState(false);
   const [verdictTarget, setVerdictTarget] = useState<ReleaseVerdictTarget | null>(null);
   const [fiveXxTarget, setFiveXxTarget] = useState<FiveXxTarget | null>(null);
-  const [rcaSectionOpen, setRcaSectionOpen] = useState(false);
   const [visibleBlocks, setVisibleBlocks] = useState({
     remarks: true, cpu: true, memory: true, database: true, users: true, pageload: true,
     exceptions: true, instances: true, uptimerobot: true, snat: true,
@@ -990,9 +992,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   const [selectedErrType, setSelectedErrType] = useState<string | null>(null);
   const [errAPIExpanded, setErrAPIExpanded] = useState(false);
   const [selectedErrAPIType, setSelectedErrAPIType] = useState<string | null>(null);
-  const [incidentReportLoading, setIncidentReportLoading] = useState(false);
-  const [incidentReportError, setIncidentReportError] = useState<string | null>(null);
-  const [rcaOpen, setRcaOpen] = useState(false);
 
   useEffect(() => {
     setUrExpanded(false);
@@ -1011,76 +1010,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   }, [metrics.cpu.avg]);
 
 
-  // Shared payload for both the incident-report download and the Claude RCA.
-  const buildIncidentPayload = useCallback(() => {
-    const appCfg = azureSettings?.apps?.find((a) => a.name === appKey);
-    const effectiveStart = rangeStart ? new Date(rangeStart).getTime() : Date.now() - 24 * 3600_000;
-    const effectiveEnd   = rangeEnd   ? new Date(rangeEnd).getTime()   : Date.now();
-    const uptimeRobotIncidents = urMonitors.flatMap(mon =>
-      (mon.logs ?? [])
-        .filter(l => l.type === 1)
-        .filter(l => {
-          const logStart = l.datetime * 1000;
-          const logEnd   = (l.datetime + l.duration) * 1000;
-          return logEnd >= effectiveStart && logStart <= effectiveEnd;
-        })
-        .map(l => ({
-          monitor:  mon.friendly_name || mon.url,
-          start:    l.datetime * 1000,
-          end:      (l.datetime + l.duration) * 1000,
-          duration: l.duration,
-          reason:   l.reason?.detail ?? '',
-        }))
-    );
-    return {
-      subscriptionId: azureSettings.subscriptionId,
-      resourceGroup: appCfg?.resourceGroup,
-      appName: appKey,
-      appType: appCfg?.type ?? 'appservice',
-      appInsightsAppId: appCfg?.appInsightsAppId,
-      apiName: appCfg?.apiName,
-      apiInsightsAppId: appCfg?.apiInsightsAppId,
-      apiType: appCfg?.apiType,
-      // Needed for the report's server-side database metrics (Category 15).
-      dbName: appCfg?.dbName,
-      dbServerName: appCfg?.dbServerName,
-      logAnalyticsWorkspaceId: appCfg?.logAnalyticsWorkspaceId,
-      appGatewayResourceId: appCfg?.appGatewayResourceId,
-      frontDoorResourceId: appCfg?.frontDoorResourceId,
-      loadBalancerResourceId: appCfg?.loadBalancerResourceId,
-      startMs: effectiveStart,
-      endMs: effectiveEnd,
-      uptimeRobotIncidents,
-    };
-  }, [appKey, azureSettings, rangeStart, rangeEnd, urMonitors]);
-
-  const handleIncidentReport = useCallback(async () => {
-    setIncidentReportLoading(true);
-    setIncidentReportError(null);
-    try {
-      const result = await window.electronAPI.incidentReport.generate(buildIncidentPayload() as any);
-      if (!result.success) setIncidentReportError(result.error ?? 'Unknown error');
-      else toast.success('Incident report saved', result.path ? { description: result.path } : undefined);
-    } catch (e: any) {
-      setIncidentReportError(e?.message ?? 'Unknown error');
-    } finally {
-      setIncidentReportLoading(false);
-    }
-  }, [buildIncidentPayload]);
-
-  // The RCA run and its exports live in useRcaReport, shared with App Investigation.
-  const rca = useRcaReport({ appKey, getPayload: buildIncidentPayload });
-  const { status: rcaStatus, reset: resetRca } = rca;
-
-  // Opens the dialog on its input step — the analysis only starts when the user
-  // presses Generate, so they can supply their own findings first.
-  const openRcaDialog = useCallback(() => {
-    setRcaOpen(true);
-    // A run keeps going when the dialog is dismissed — reopening shows its progress
-    // rather than resetting state out from under the in-flight analysis.
-    if (rcaStatus === 'running') return;
-    resetRca();
-  }, [rcaStatus, resetRca]);
 
   // Eagerly fetch details when the request insights are available (top dependency % needs them)
   useEffect(() => {
@@ -1186,33 +1115,42 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     const endLabel = endRaw ? fmtFullSgt(new Date(endRaw)) : '—';
     const appName = metrics.label || appKey;
 
-    const heuristicRemarks = buildRemarks(metrics, rangeStart, rangeEnd, visibleBlocks, urMonitors);
-    const severityColor: Record<string, string> = { ok: UI.success, warning: UI.warning, critical: UI.error };
-    const remarksText = aiRemark ? aiRemark.remarks : heuristicRemarks.text;
-    const remarksColor = aiRemark
-      ? AI_STATUS_COLORS[aiRemark.status]
-      : (severityColor[heuristicRemarks.severity] ?? '#333');
+    // The same lines the Remarks panel shows: the AI verdict when generated, else the
+    // remark story. Colours are CSS vars, which mean nothing once pasted, so resolve them.
+    const toneColor: Record<StoryTone, string> = { ok: UI.success, info: UI.info, warning: UI.warning, critical: UI.error };
+    const remarkLines = (aiRemark
+      ? [{ text: aiRemark.remarks, color: AI_STATUS_COLORS[aiRemark.status], items: [] as string[] }]
+      : remarkStory.map(l => ({ text: l.text, color: toneColor[l.tone], items: l.items ?? [] })))
+      .map(l => ({ ...l, color: resolveCssColor(l.color, '#333') }));
 
     // Metrics get their own table (Average/P99/Max are literal there); SNAT and
     // UptimeRobot are status summaries wedged into the same three columns, so they
     // read as a separate "Status" table rather than odd rows inside the metrics one.
-    const rows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
-    const statusRows: Array<{ name: string; avg: string; p99: string; max: string }> = [];
+    // `colors` (Average, P99, Max): each metric's chart line colour. Only the strong shade —
+    // Teams turns pale colours white on paste (see CHART_COLORS).
+    const TEAMS_CPU = CHART_COLORS.cpuMax, TEAMS_MEM = CHART_COLORS.memMax, TEAMS_DB_CPU = CHART_COLORS.dbCpuMax, TEAMS_DB_MEM = CHART_COLORS.dbMemMax;
+    type CopyRow = { name: string; avg: string; p99: string; max: string; colors?: [string | undefined, string | undefined, string | undefined] };
+    const rows: CopyRow[] = [];
+    const statusRows: CopyRow[] = [];
     if (visibleBlocks.cpu) rows.push({
       name: 'CPU',
       avg: `${(+metrics.cpu.avg).toFixed(2)}%`, p99: `${(+metrics.cpu.p99).toFixed(2)}%`, max: `${(+metrics.cpu.max).toFixed(2)}%`,
+      colors: [TEAMS_CPU, TEAMS_CPU, TEAMS_CPU],
     });
     if (visibleBlocks.memory) rows.push({
       name: 'Memory',
       avg: `${(+metrics.memory.avg).toFixed(2)}${metrics.memUnit}`, p99: `${(+metrics.memory.p99).toFixed(2)}${metrics.memUnit}`, max: `${(+metrics.memory.max).toFixed(2)}${metrics.memUnit}`,
+      colors: [TEAMS_MEM, TEAMS_MEM, TEAMS_MEM],
     });
     if (visibleBlocks.database && (metrics.dbCpu?.series?.length ?? 0) > 0) rows.push({
       name: 'DB CPU',
       avg: `${(+metrics.dbCpu!.avg).toFixed(2)}%`, p99: `${(+metrics.dbCpu!.p99).toFixed(2)}%`, max: `${(+metrics.dbCpu!.max).toFixed(2)}%`,
+      colors: [TEAMS_DB_CPU, TEAMS_DB_CPU, TEAMS_DB_CPU],
     });
     if (visibleBlocks.database && (metrics.dbMemory?.series?.length ?? 0) > 0) rows.push({
       name: 'DB Memory',
       avg: `${(+metrics.dbMemory!.avg).toFixed(2)}%`, p99: `${(+metrics.dbMemory!.p99).toFixed(2)}%`, max: `${(+metrics.dbMemory!.max).toFixed(2)}%`,
+      colors: [TEAMS_DB_MEM, TEAMS_DB_MEM, TEAMS_DB_MEM],
     });
     // The same set and the same split the Instances row shows (summarizeInstances).
     const instanceRows = visibleBlocks.instances ? deriveInstanceRows(metrics, rangeEnd) : [];
@@ -1223,6 +1161,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         avg: `${s.running.length.toLocaleString()} running`,
         p99: `${s.stopped.length.toLocaleString()} stopped`,
         max: `${s.total.toLocaleString()} total`,
+        colors: instanceColors(s.running.length, s.stopped.length, s.total),
       });
     }
     // Mirrors the gating on the SnatPortsRows usages below: one combined row when
@@ -1238,6 +1177,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           max: peakAllocated != null
             ? `Peak - ${peakUsed != null ? peakUsed.toLocaleString() : '—'} / ${peakAllocated.toLocaleString()} - Allocated`
             : snat ? 'no port data' : '—',
+          colors: snatColors(pendingTotal, failedTotal),
         });
       };
       if (metrics.apiSharesPlan === true) {
@@ -1260,6 +1200,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         avg: '—',
         p99: `${totalIncidents} incident${totalIncidents !== 1 ? 's' : ''}`,
         max: uptimePct != null ? `${uptimePct.toFixed(2)}% uptime` : '—',
+        colors: uptimeColors(totalIncidents, uptimePct),
       });
     }
 
@@ -1369,28 +1310,40 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           ]
         : [];
 
+      const valueCell = (v: string, color?: string) =>
+        `<td align="right" style="padding:4px 10px;${color ? `color:${color};` : ''}">${v}</td>`;
       const toTableRows = (list: typeof rows) => list.map(r =>
-        `<tr><td style="padding:4px 10px;"><b>${r.name}</b></td><td align="right" style="padding:4px 10px;">${r.avg}</td><td align="right" style="padding:4px 10px;">${r.p99}</td><td align="right" style="padding:4px 10px;">${r.max}</td></tr>`,
+        `<tr><td style="padding:4px 10px;"><b>${r.name}</b></td>` +
+        valueCell(r.avg, r.colors?.[0]) + valueCell(r.p99, r.colors?.[1]) + valueCell(r.max, r.colors?.[2]) + `</tr>`,
       ).join('');
       const htmlBody =
         `<div style="display:block;font-family:sans-serif;font-size:13px;">` +
         `<p style="font-weight:700;font-size:14px;margin:0;">Health Check Status - ${endLabel}</p>` +
         `<p style="margin:0;">App Service Plan: <b>${appName}</b></p>` +
         `<p style="margin:0;">&nbsp;</p>` +
-        `<p style="margin:0;"><img src="${dataUrl}" style="width:100%;display:block;"/></p>` +
-        `<table border="1" cellspacing="0" ${tableStyle}>` +
+        // Teams ignores these widths (see TEAMS_CHART_WIDTH); they size it for other paste targets.
+        // Keep it outside the table: an image inside a cell pastes inline and trips the
+        // "paste limit exceeded" error instead of being uploaded as an image.
+        `<p style="margin:0;"><img src="${dataUrl}" width="${TEAMS_COPY_WIDTH}" style="width:${TEAMS_COPY_WIDTH}px;display:block;"/></p>` +
+        `<table border="1" cellspacing="0" width="${TEAMS_COPY_WIDTH}" style="border-collapse:collapse;font-family:sans-serif;font-size:13px;width:${TEAMS_COPY_WIDTH}px;">` +
         `<tr><td style="padding:4px 10px;"><b>Metrics</b></td><td align="right" style="padding:4px 10px;"><b>Average</b></td><td align="right" style="padding:4px 10px;"><b>P99</b></td><td align="right" style="padding:4px 10px;"><b>Max</b></td></tr>` +
         toTableRows(rows) +
-        `</table>` +
+        // One table so the status rows share the metrics columns; a blank row separates them.
         (statusRows.length
-          ? `<table border="1" cellspacing="0" ${tableStyle}>` +
-            toTableRows(statusRows) +
-            `</table>`
+          ? `<tr><td colspan="4" style="padding:4px 10px;">&nbsp;</td></tr>` + toTableRows(statusRows)
           : '') +
+        `</table>` +
         perfCharts +
         perfTable +
         `<p style="margin:0;">&nbsp;</p>` +
-        `<p style="margin:0;"><b style="color:#555;">Remarks: </b><b style="color:${remarksColor};">${remarksText || '—'}</b></p>` +
+        `<p style="margin:0;"><b style="color:#555;">Remarks:</b></p>` +
+        (remarkLines.length
+          // A line's detail (the active 4xx/5xx codes) nests under it in the normal text colour.
+          ? `<ul style="margin:0;padding-left:20px;">${remarkLines.map(l =>
+              `<li><span style="color:${l.color};">${l.text}</span>` +
+              (l.items.length ? `<ul style="margin:0;padding-left:20px;">${l.items.map(it => `<li>${it}</li>`).join('')}</ul>` : '') +
+              `</li>`).join('')}</ul>`
+          : `<p style="margin:0;">—</p>`) +
         `</div>`;
       const plainText = [
         `Health Check Status - ${endLabel}`,
@@ -1401,7 +1354,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         ...(statusRows.length ? ['', ...statusRows.map(r => `${r.name} | ${r.avg} | ${r.p99} | ${r.max}`)] : []),
         ...perfLines,
         '',
-        `Remarks: ${remarksText || '—'}`,
+        'Remarks:',
+        ...(remarkLines.length ? remarkLines.flatMap(l => [`- ${l.text}`, ...l.items.map(it => `    - ${it}`)]) : ['—']),
       ].join('\n');
 
       await navigator.clipboard.write([
@@ -1418,6 +1372,113 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     } finally {
       setIsTeamsCopying(false);
     }
+  };
+
+  // Copy for Teams for one side alone: its chart, its request and response figures,
+  // and its exception, restart and crash counts. '—' marks a figure not loaded yet.
+  const [siteCopying, setSiteCopying] = useState<'fe' | 'api' | null>(null);
+  const copySiteForTeams = async (site: 'fe' | 'api') => {
+    const card = cardRef.current;
+    if (!card || siteCopying) return;
+    setSiteCopying(site);
+    const isFe = site === 'fe';
+    const label = isFe ? 'Frontend' : 'API';
+    // A collapsed card or section has no chart in the DOM; open it and let it paint.
+    if (cardCollapsed || !(isFe ? feSectionOpen : apiSectionOpen)) {
+      setCardCollapsed(false);
+      (isFe ? setFeSectionOpen : setApiSectionOpen)(true);
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    }
+    try {
+      const insights = isFe ? metrics.requestInsights : metrics.apiRequestInsights;
+      const f = hasPerfData(insights?.performance) ? perfSummary(insights?.performance) : null;
+      const hasExc = (isFe ? metrics.appInsightsConfigured : apiHasInsights) && !!insights && !insights.error;
+      const excTotal = hasExc ? excBucketCounts(insights).total : null;
+      const r = isFe ? restarts : apiRestarts;
+      const c = isFe ? crashes : apiCrashes;
+      const rt = r ? restartTotals(r) : null;
+      const crashTotal = c ? crashTotals(c).total : null;
+      const ok = resolveCssColor(UI.success), warn = resolveCssColor(UI.warning), bad = resolveCssColor(UI.error);
+
+      const sections: SiteCopySection[] = [];
+      if (f) sections.push(
+        { section: 'Request', rows: [
+          { name: 'total',      value: f.total.toLocaleString() },
+          { name: 'successful', value: `${f.successful.toLocaleString()} (${fmtPct(f.successful, f.total)})`, color: PERF_COLORS.ok },
+          { name: '4xx',        value: `${f.fourXx.toLocaleString()} (${fmtPct(f.fourXx, f.total)})`, color: f.fourXx > 0 ? PERF_COLORS.fourXx : undefined },
+          { name: '5xx',        value: `${f.fiveXx.toLocaleString()} (${fmtPct(f.fiveXx, f.total)})`, color: f.fiveXx > 0 ? PERF_COLORS.fiveXx : undefined },
+        ] },
+        { section: 'Response', rows: [
+          { name: 'P95 peak', value: fmtDuration(f.peakP95) },
+          { name: 'average',  value: fmtDuration(f.avgMs) },
+          { name: 'slowest',  value: fmtDuration(f.slowest) },
+        ] },
+      );
+      sections.push({ section: 'Health', rows: [
+        { name: 'Exceptions', value: excTotal != null ? excTotal.toLocaleString() : '—',
+          color: excTotal == null ? undefined : excTotal === 0 ? ok : excTotal <= 10 ? warn : bad },
+        // Restarts and crashes come from App Service Diagnostics, so other app types have none.
+        ...(metrics.type === 'appservice' ? [
+          { name: 'Restarts', value: rt ? `${rt.total.toLocaleString()} restart${rt.total === 1 ? '' : 's'}${rt.byCause.length ? ` (${rt.byCause.map(b => `${b.cause} ×${b.count}`).join(', ')})` : ''}` : '—',
+            color: rt ? (rt.total === 0 ? ok : warn) : undefined },
+          { name: 'Crashes', value: crashTotal != null ? `${crashTotal.toLocaleString()} crash${crashTotal === 1 ? '' : 'es'}` : '—',
+            color: crashTotal == null ? undefined : crashTotal === 0 ? ok : bad },
+        ] : []),
+      ] });
+
+      const endRaw = rangeEnd ?? metrics.cpu.series.at(-1)?.t;
+      const endLabel = endRaw
+        ? new Date(endRaw).toLocaleString('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' SGT'
+        : '—';
+
+      // The side's chart, when its Performance block is on screen to capture.
+      const chartEl = card.querySelector(`[data-teams-perf-chart="${site}"]`) as HTMLElement | null;
+      let imageBlob: Blob | null = null;
+      let imageUrl: string | null = null;
+      if (chartEl) {
+        const html2canvas = await loadHtml2Canvas();
+        const canvas: HTMLCanvasElement = await html2canvas(chartEl, {
+          backgroundColor: resolveCssColor(UI.background), scale: 2, logging: false, useForeignObject: false,
+        });
+        imageBlob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+        imageUrl = canvas.toDataURL('image/png');
+      }
+
+      const { html, text } = buildSiteTeamsCopy({ title: `${label} - ${metrics.label || appKey} - ${endLabel}`, imageUrl, sections });
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          ...(imageBlob ? { 'image/png': imageBlob } : {}),
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+        }),
+      ]);
+      toast.success(`${label} copied for Teams`);
+    } catch (err: any) {
+      console.error('Copy for Teams failed:', err);
+      toast.error('Copy for Teams failed', { description: err?.message });
+    } finally {
+      setSiteCopying(null);
+    }
+  };
+
+  /** The Copy for Teams icon in a Frontend / API header. Stops the click from folding the section. */
+  const siteCopyButton = (site: 'fe' | 'api') => {
+    const label = site === 'fe' ? 'Frontend' : 'API';
+    return (
+      <Hint label={`Copy ${label} for Teams: chart, requests, response times, exceptions, restarts and crashes`}>
+        <button
+          type="button"
+          aria-label={`Copy ${label} for Teams`}
+          onClick={e => { e.stopPropagation(); void copySiteForTeams(site); }}
+          disabled={siteCopying !== null}
+          // text-primary: the same icon colour as the card's own Copy for Teams button.
+          className="rounded p-0.5 text-primary hover:bg-muted disabled:opacity-50"
+          data-html2canvas-ignore="true"
+        >
+          {siteCopying === site ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Share2 className="h-3.5 w-3.5" />}
+        </button>
+      </Hint>
+    );
   };
 
   const hasUrIncidents = !urLoading && urMonitors.some(m => (m.logs ?? []).some(l => l.type === 1));
@@ -1460,12 +1521,39 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
   }) : []),
   // eslint-disable-next-line react-hooks/exhaustive-deps -- the ms values derive from rangeStart/rangeEnd
   [visibleBlocks.timeline, visibleBlocks.remarks, rangeStart, rangeEnd, metrics, releaseApiName, releases, apiReleases, restarts, apiRestarts, crashes, apiCrashes, urMonitors]);
+  // What is active in the trailing bucket. Kept as remarks, not text, so an active
+  // 4xx/5xx can be asked about: which codes, on which endpoints, at its peak.
+  const nowRemarks = useMemo(
+    () => activeRemarkList(collectRemarks(metrics, rangeEnd, urMonitors), visibleBlocks),
+    [metrics, rangeEnd, urMonitors, visibleBlocks]);
+  const breakdownTargets = nowRemarks.map(breakdownTarget).filter(t => t != null);
+  // Keyed on the peak windows, so a refresh that leaves the peak where it was asks nothing new.
+  const breakdownKey = breakdownTargets.map(t => t.key).join(',');
+  const [breakdowns, setBreakdowns] = useState<Record<string, string[]>>({});
+  // The settings object is rebuilt far more often than it changes, so it isn't an effect dependency.
+  const settingsRef = useRef(azureSettings);
+  settingsRef.current = azureSettings;
+  useEffect(() => {
+    const fetchBreakdown = window.electronAPI?.azureMetrics?.fetchStatusBreakdown;
+    if (!breakdownKey || !fetchBreakdown) return;
+    let cancelled = false;
+    for (const t of breakdownTargets) {
+      fetchBreakdown({ appKey, site: 'fe', cls: t.cls, config: settingsRef.current, startIso: t.startIso, endIso: t.endIso })
+        // A failed lookup leaves the remark as it was: the percentage and time still stand.
+        .then(res => { if (!cancelled && !res.error) setBreakdowns(b => ({ ...b, [t.key]: formatStatusBreakdown(res.rows) })); })
+        .catch(() => { /* same: keep the plain remark */ });
+    }
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- breakdownKey encodes breakdownTargets
+  }, [breakdownKey, appKey]);
+
   // The remark story reads those same lanes, plus what is active in the trailing bucket.
   const remarkStory = useMemo(() => buildRemarkStory({
     lanes: timelineLanes,
-    nowActive: activeRemarks(metrics, rangeEnd, visibleBlocks, urMonitors),
+    nowActive: nowRemarks.map(r => nowRemarkText(r, !!releaseApiName)),
+    nowItems: nowRemarks.flatMap(r => nowRemarkItems(r, breakdowns)),
     hasApi: !!releaseApiName,
-  }), [timelineLanes, metrics, rangeEnd, visibleBlocks, urMonitors, releaseApiName]);
+  }), [timelineLanes, nowRemarks, breakdowns, releaseApiName]);
 
   if (loading) {
     return (
@@ -1495,17 +1583,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
     }))
   );
 
-  // The RCA's Incident Period is the outage itself, not the chart window: first
-  // downtime start → last downtime end. UptimeRobot is the reference — it watches
-  // from outside Azure — with Azure's own detected downtime as the fallback when no
-  // monitor is configured for this app.
-  const incidentIntervals = urDowntimeIntervals.length > 0 ? urDowntimeIntervals : downtimeIntervals;
-  const incidentPeriod = incidentIntervals.length > 0
-    ? formatSgtRange(
-        Math.min(...incidentIntervals.map(i => i.start)),
-        Math.max(...incidentIntervals.map(i => i.end)),
-      )
-    : '';
 
   // Map instance name → palette color matching chart line order
   const instanceColorMap = new Map<string, string>(
@@ -1771,38 +1848,8 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          {/* Blocks changes what the card shows; the three buttons after it act on it. */}
+          {/* Blocks changes what the card shows; the button after it acts on it. */}
           <span className="h-5 w-px bg-border" aria-hidden data-html2canvas-ignore="true" />
-          <Hint label={incidentReportLoading ? 'Generating the incident report…' : 'Download a Markdown incident report — written to be fed straight to an AI agent'}>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1.5 px-2.5 text-xs"
-            onClick={() => handleIncidentReport()}
-            disabled={incidentReportLoading}
-            data-html2canvas-ignore="true"
-            style={undefined}
-          >
-            {incidentReportLoading
-              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              : <Sparkles className="w-3.5 h-3.5" />}
-            {incidentReportLoading ? 'Generating…' : 'AI report'}
-          </Button>
-          </Hint>
-          <Hint label={rcaStatus === 'running' ? 'Downtime RCA analysis running…' : 'Open the downtime RCA — add investigation notes, then have Claude draft the report'}>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1.5 px-2.5 text-xs"
-            onClick={openRcaDialog}
-            data-html2canvas-ignore="true"
-          >
-            {rcaStatus === 'running'
-              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              : <ScanSearch className="w-3.5 h-3.5" />}
-            {rcaStatus === 'running' ? 'RCA running…' : 'RCA'}
-          </Button>
-          </Hint>
           <Hint label="Copy for Teams — status header, chart image and metrics table in one paste">
             <Button
               variant="outline"
@@ -1833,12 +1880,6 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
       {metrics.error && (
         <div className="mx-4 mb-2 px-3 py-2 rounded-md text-xs border border-destructive/30 bg-destructive/10 text-destructive">
           {metrics.error}
-        </div>
-      )}
-      {incidentReportError && (
-        <div className="mx-4 mb-2 px-3 py-2 rounded-md text-xs border border-destructive/30 bg-destructive/10 text-destructive flex items-center justify-between">
-          <span>Incident report failed: {incidentReportError}</span>
-          <button onClick={() => setIncidentReportError(null)} className="ml-2 hover:opacity-70">✕</button>
         </div>
       )}
       {/* Chart — edge to edge */}
@@ -1918,7 +1959,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
           <div
             data-teams-chart-tall
             aria-hidden="true"
-            style={{ position: 'absolute', top: 0, left: '100%', width: '100%', pointerEvents: 'none' }}
+            style={{ position: 'absolute', top: 0, left: '100%', width: TEAMS_CHART_WIDTH, pointerEvents: 'none' }}
           >
             <CombinedChart {...chartProps} height={320} />
             <MetricLegend hidden={hiddenMetrics} onToggle={onLegendToggle} items={legendItems} />
@@ -2360,7 +2401,10 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </span>
-                    <SiteReleaseLabel loading={releasesLoading} result={releases} onClick={event => setVerdictTarget({ site: 'fe', event })} />
+                    <span className="flex items-center gap-2">
+                      <SiteReleaseLabel loading={releasesLoading} result={releases} onClick={event => setVerdictTarget({ site: 'fe', event })} />
+                      {siteCopyButton('fe')}
+                    </span>
                   </div>
                 </td>
               </tr>
@@ -2530,7 +2574,10 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                         ? <ChevronDown size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />
                         : <ChevronRight size={11} style={{ marginLeft: 3, display: 'inline', verticalAlign: 'middle' }} />}
                     </span>
-                    <SiteReleaseLabel loading={releasesLoading} result={apiReleases} onClick={event => setVerdictTarget({ site: 'api', event })} />
+                    <span className="flex items-center gap-2">
+                      <SiteReleaseLabel loading={releasesLoading} result={apiReleases} onClick={event => setVerdictTarget({ site: 'api', event })} />
+                      {siteCopyButton('api')}
+                    </span>
                   </div>
                 </td>
               </tr>
@@ -2694,7 +2741,7 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 title={!remarksReady ? 'Available once all data has loaded' : aiRemarkLoading ? 'Generating AI remarks…' : 'Generate AI remarks (Claude health verdict)'}
                 data-html2canvas-ignore="true"
               >
-                <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-info' : 'text-muted-foreground'}`} />
+                <Sparkles className={`w-3.5 h-3.5 ${aiRemarkLoading ? 'animate-pulse text-info' : 'text-primary'}`} />
               </button>
             </div>
             <div className="border-t border-border px-3 py-2">
@@ -2717,44 +2764,11 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
         </div>
       )}
 
-      <RcaSection
-        open={rcaSectionOpen}
-        onToggle={() => setRcaSectionOpen(v => !v)}
-        status={rcaStatus}
-        markdown={rca.text}
-        stages={rca.stages}
-        error={rca.error}
-        onGenerate={(notes, given) => void rca.run(notes, 'business', given)}
-        onDraftChange={rca.setDraft}
-        defaultTitle={`${platformName} Downtime`}
-        defaultServices={(platformUrls.length ? platformUrls : [platformName, appConfig?.apiName].filter(Boolean)).join(', ')}
-        period={incidentPeriod}
-        periodSource={urDowntimeIntervals.length > 0 ? 'uptimerobot' : downtimeIntervals.length > 0 ? 'azure' : 'none'}
-        onExportPdf={() => void rca.exportPdf()}
-        onExportWord={() => void rca.exportWord()}
-        onCopyTeams={() => void rca.copyTeams()}
-        onCopySummary={() => void rca.copySummary()}
-      />
       </>
       )}
 
     </Card>
     </div>
-
-    <RcaDialog
-      open={rcaOpen}
-      onOpenChange={setRcaOpen}
-      title={platformName}
-      status={rcaStatus}
-      markdown={rca.text}
-      stages={rca.stages}
-      error={rca.error}
-      onExport={() => void rca.exportMd()}
-      onExportPdf={() => void rca.exportPdf()}
-      onCopyTeams={() => void rca.copyTeams()}
-      onCopySummary={() => void rca.copySummary()}
-      onGenerate={(notes) => void rca.run(notes)}
-    />
 
     <ReleaseVerdictDialog
       target={verdictTarget}

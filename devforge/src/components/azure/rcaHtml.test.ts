@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
-  splitQuickSummary, buildRcaPrintHtml, formatSgt, formatSgtRange,
+  splitQuickSummary, buildRcaPrintHtml, formatSgt, formatSgtRange, downtimePeriod,
   buildQuickSummaryTeamsHtml, buildQuickSummaryTeamsText,
   parseRcaFields, composeRcaMarkdown, isRcaFieldsEmpty, EMPTY_RCA_FIELDS,
   stripMarkdown, buildRcaWordHtml, htmlToPlainText, plainTextToHtml, isHtmlEmpty,
-  composeTrackerMarkdown, isTrackerEmpty, parseTrackerFields, EMPTY_TRACKER_FIELDS,
+  composeTrackerMarkdown, isTrackerEmpty, parseTrackerFields, EMPTY_TRACKER_FIELDS, trackerCopyText,
   type RcaTrackerFields,
 } from './rcaHtml';
 
@@ -91,6 +91,15 @@ describe('formatSgt', () => {
   it('formats a range with both ends in SGT', () => {
     const r = formatSgtRange(Date.parse('2026-07-29T16:00:00Z'), Date.parse('2026-07-30T15:59:00Z'));
     expect(r).toBe('2026-07-30 00:00 SGT → 2026-07-30 23:59 SGT');
+  });
+
+  it('spans downtime from the earliest start to the latest end, in any order', () => {
+    const t = (iso: string) => Date.parse(iso);
+    expect(downtimePeriod([
+      { start: t('2026-07-30T06:00:00Z'), end: t('2026-07-30T06:10:00Z') },
+      { start: t('2026-07-30T02:00:00Z'), end: t('2026-07-30T02:05:00Z') },
+    ])).toBe('2026-07-30 10:00 SGT → 2026-07-30 14:10 SGT');
+    expect(downtimePeriod([])).toBe('');
   });
 });
 
@@ -636,5 +645,16 @@ describe('parseTrackerFields', () => {
   it('returns nothing for a report with no Tracker block, or no report at all', () => {
     expect(parseTrackerFields('## 7. Current Status\nResolved.')).toEqual({});
     expect(parseTrackerFields('')).toEqual({});
+  });
+});
+
+describe('trackerCopyText', () => {
+  it('copies each filled field as "Label: value", one per line, skipping blanks', () => {
+    const t: RcaTrackerFields = { ...EMPTY_TRACKER_FIELDS, detection: ' Slow home page ', outcome: '0 errors' };
+    expect(trackerCopyText(t)).toBe('Detection / Symptoms: Slow home page\nMeasurable Outcome: 0 errors');
+  });
+
+  it('is empty for an untouched tracker', () => {
+    expect(trackerCopyText({ ...EMPTY_TRACKER_FIELDS })).toBe('');
   });
 });

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetchCrashes: (opts) => ipcRenderer.invoke('azure-metrics:fetch-crashes', opts),
         fetchEndpointDetail: (opts) => ipcRenderer.invoke('azure-metrics:fetch-endpoint-detail', opts),
         fetchFiveXxRequests: (opts) => ipcRenderer.invoke('azure-metrics:fetch-5xx-requests', opts),
+        fetchStatusBreakdown: (opts) => ipcRenderer.invoke('azure-metrics:fetch-status-breakdown', opts),
         onPartial: (cb) => {
             const fn = (_e, data) => cb(data);
             ipcRenderer.on('azure-metrics:partial', fn);

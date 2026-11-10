@@ -101,6 +101,14 @@ export function isTrackerEmpty(tracker: RcaTrackerFields): boolean {
   return TRACKER_FIELDS.every(f => !(tracker?.[f.key] ?? '').trim());
 }
 
+/** The tracker as plain text for the clipboard — "Label: value" per filled field. */
+export function trackerCopyText(tracker: RcaTrackerFields): string {
+  return TRACKER_FIELDS
+    .filter(f => (tracker?.[f.key] ?? '').trim())
+    .map(f => `${f.label}: ${tracker[f.key].trim()}`)
+    .join('\n');
+}
+
 /** The tracker as markdown — one labelled line per filled field. '' when untouched. */
 export function composeTrackerMarkdown(tracker: RcaTrackerFields): string {
   if (isTrackerEmpty(tracker)) return '';
@@ -515,6 +523,13 @@ export function buildQuickSummaryTeamsText(summary: string, meta: { appName: str
 /** Analysis window formatted in SGT — matches the report's own header format. */
 export function formatSgtRange(startMs: number, endMs: number): string {
   return `${formatSgt(startMs)} → ${formatSgt(endMs)}`;
+}
+
+/** The RCA's Incident Period: first downtime start → last downtime end, '' when none. */
+export function downtimePeriod(intervals: ReadonlyArray<{ start: number; end: number }>): string {
+  return intervals.length
+    ? formatSgtRange(Math.min(...intervals.map(i => i.start)), Math.max(...intervals.map(i => i.end)))
+    : '';
 }
 
 export function formatSgt(ms: number): string {

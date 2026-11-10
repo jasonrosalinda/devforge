@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRemarks } from './appRemarks';
+import { breakdownTarget, buildRemarks, collectRemarks, formatStatusBreakdown, nowRemarkItems, nowRemarkText, type MetricRemark } from './appRemarks';
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 
 const STEP_MS = 15 * 60 * 1000;
@@ -103,6 +103,88 @@ describe('buildRemarks — 5xx/4xx rate across mismatched series grains', () => 
 
     const { text, severity } = buildRemarks(metrics, ts(0), rangeEnd);
     expect(severity).toBe('critical');
-    expect(text).toContain('5xx errors (peak 6.0%)');
+    // ts(1) is 00:15 UTC = 08:15 SGT, the bucket the 6% sits in.
+    expect(text).toContain('5xx errors (peak 6.0% at 08:15)');
+  });
+});
+
+describe('collectRemarks — 4xx peak time and window', () => {
+  // 15m buckets; the range ends 5 min into the last one, so only that bucket is examined.
+  const metrics = (fourXx: number[]) => ({
+    cpu: cpuSeries(3, null),
+    memory: cpuSeries(3, null),
+    requestsSeries: [0, 1, 2].map(i => ({ t: ts(i), count: 100 })),
+    http4xxSeries: fourXx.map((count, i) => ({ t: ts(i), count })),
+  } as unknown as AppMetrics);
+  const fourXx = (m: AppMetrics, end: string) => collectRemarks(m, end).find(r => r.kind === '4xx surge')!;
+
+  it('names the peak bucket in SGT and carries it as the window to ask App Insights about', () => {
+    const end = new Date(new Date(ts(2)).getTime() + 5 * 60 * 1000).toISOString();
+    const r = fourXx(metrics([0, 0, 9]), end);
+    expect(r.severity).toBe('critical');
+    expect(r.display).toBe('4xx surge (peak 9.0% at 08:30)');
+    expect(r.peakWindow).toEqual({ startIso: ts(2), endIso: ts(3) });
+    expect(breakdownTarget(r)).toEqual({ key: `4xx|${ts(2)}|${ts(3)}`, cls: '4xx', startIso: ts(2), endIso: ts(3) });
+  });
+
+  it('has no peak window when there is no rate at all', () => {
+    const r = fourXx({ cpu: cpuSeries(3, null), memory: cpuSeries(3, null) } as unknown as AppMetrics, ts(2));
+    expect(r.display).toBeUndefined();
+    expect(r.peakWindow).toBeUndefined();
+    expect(breakdownTarget(r)).toBeNull();
+  });
+});
+
+describe('formatStatusBreakdown', () => {
+  const row = (code: string, endpoint: string, count: number, bots = 0, role = 'medu-fe') => ({ code, endpoint, role, count, bots });
+
+  it('lists each code and endpoint, busiest first, at most five, with its bot share', () => {
+    expect(formatStatusBreakdown([
+      row('404', 'GET /a', 50), row('401', 'POST /login', 30, 3), row('404', 'GET /b', 70, 70),
+      row('429', 'GET /c', 5), row('400', 'POST /d', 2), row('403', 'GET /e', 1),
+    ])).toEqual([
+      '404 × 70 on GET /b (100% bot)',
+      '404 × 50 on GET /a (0% bot)',
+      '401 × 30 on POST /login (10% bot)',
+      '429 × 5 on GET /c (0% bot)',
+      '400 × 2 on POST /d (0% bot)',
+    ]);
+  });
+
+  it('says <1% rather than 0% when a few bots are in a big count', () => {
+    expect(formatStatusBreakdown([row('404', 'GET /a', 1000, 2)])).toEqual(['404 × 1,000 on GET /a (<1% bot)']);
+  });
+
+  it('names the role only when the rows span more than one', () => {
+    expect(formatStatusBreakdown([row('404', 'GET /a', 3, 0, 'medu-fe'), row('401', 'GET /api/x', 2, 2, 'medu-api')]))
+      .toEqual(['404 × 3 on GET /a [medu-fe] (0% bot)', '401 × 2 on GET /api/x [medu-api] (100% bot)']);
+  });
+
+  it('says plainly when App Insights saw none of them', () => {
+    expect(formatStatusBreakdown([])).toEqual(['no matching requests in App Insights for that bucket']);
+  });
+});
+
+describe('nowRemarkText and nowRemarkItems', () => {
+  const surge: MetricRemark = {
+    kind: '4xx surge', display: '4xx surge (peak 5.3% at 14:30)', lastBadAt: ts(1), severity: 'critical',
+    peakWindow: { startIso: ts(1), endIso: ts(2) },
+  };
+
+  it('prefixes the site when the app has an API', () => {
+    expect(nowRemarkText(surge, true)).toBe('FE 4xx surge (peak 5.3% at 14:30)');
+    expect(nowRemarkText(surge, false)).toBe('4xx surge (peak 5.3% at 14:30)');
+  });
+
+  it('lists the breakdown once it is in, nothing before', () => {
+    expect(nowRemarkItems(surge, {})).toEqual([]);
+    expect(nowRemarkItems(surge, { [`4xx|${ts(1)}|${ts(2)}`]: ['404 × 120 on GET /b (100% bot)'] }))
+      .toEqual(['404 × 120 on GET /b (100% bot)']);
+  });
+
+  it('leaves non-HTTP remarks as they are', () => {
+    const cpu: MetricRemark = { kind: 'CPU spike', display: 'CPU spike (1 spike)', lastBadAt: ts(1), severity: 'critical' };
+    expect(nowRemarkText(cpu, true)).toBe('CPU spike (1 spike)');
+    expect(nowRemarkItems(cpu, {})).toEqual([]);
   });
 });

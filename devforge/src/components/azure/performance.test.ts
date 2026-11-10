@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { perfChartRows, perfSummary, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals } from './performance';
+import { perfChartRows, perfSummary, perfTotals, hasPerfData, msColor, depTotals, depChartRows, depKey, chartTotals, botShareLabel } from './performance';
 import { UI } from '@/lib/chart-colors';
 import type { EndpointPerfRow, EndpointPerformance } from '@shared/types/azureMetrics.types';
 
@@ -238,5 +238,15 @@ describe('perfSummary', () => {
   it('is all zeroes for an app with no request telemetry', () => {
     const s = perfSummary(undefined);
     expect(s).toMatchObject({ total: 0, fourXx: 0, fiveXx: 0, successful: 0, peakP95: 0, avgMs: 0, slowest: 0 });
+  });
+});
+
+describe('botShareLabel', () => {
+  it('rounds to a whole percent, says <1% for a few bots, nothing for no requests', () => {
+    expect(botShareLabel(20, 20)).toBe('100%');
+    expect(botShareLabel(37, 100)).toBe('37%');
+    expect(botShareLabel(0, 50)).toBe('0%');
+    expect(botShareLabel(2, 1000)).toBe('<1%');
+    expect(botShareLabel(0, 0)).toBe('');
   });
 });

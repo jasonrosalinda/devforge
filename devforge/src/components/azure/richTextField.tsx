@@ -16,9 +16,19 @@ interface RichTextFieldProps {
 }
 
 /** Files bigger than this bloat the report past what a mail client will carry. */
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
-const readAsDataUrl = (file: File) =>
+/** Image files on a paste or drop. A copied screenshot arrives as a clipboard item, which
+ *  Chromium does not always also list under `files`. */
+export const imageFilesFrom = (data: { items?: ArrayLike<DataTransferItem> | null; files?: ArrayLike<File> | null }): File[] => {
+  const fromItems = Array.from(data.items ?? [])
+    .filter(i => i.kind === 'file' && i.type.startsWith('image/'))
+    .map(i => i.getAsFile())
+    .filter((f): f is File => !!f);
+  return fromItems.length ? fromItems : Array.from(data.files ?? []).filter(f => f.type.startsWith('image/'));
+};
+
+export const readAsDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const fr = new FileReader();
     fr.onload = () => resolve(String(fr.result));

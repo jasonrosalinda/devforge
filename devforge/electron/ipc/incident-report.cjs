@@ -2780,10 +2780,16 @@ const handler = (_mainWindow) => {
 
       // Opus gives the deeper analysis on this much telemetry but is slower, so a
       // timeout degrades to Sonnet rather than returning nothing after 15 minutes.
+      // App Investigation hands over a finished analysis (its report and findings), so
+      // there the RCA only writes it up and Sonnet alone is enough.
       const OPUS_MS = 900000, SONNET_MS = 420000;
-      stage(`Running Claude root-cause analysis (Opus, up to ${OPUS_MS / 60000}m)`);
+      const fromInvestigation = typeof opts.reportMarkdown === 'string' && opts.reportMarkdown.trim() !== '';
       let rca;
-      try {
+      if (fromInvestigation) {
+        stage(`Running Claude root-cause analysis (Sonnet, up to ${SONNET_MS / 60000}m)`);
+        rca = await runClaudeRCA({ promptBody, onChunk, model: 'sonnet', timeoutMs: SONNET_MS });
+      } else try {
+        stage(`Running Claude root-cause analysis (Opus, up to ${OPUS_MS / 60000}m)`);
         rca = await runClaudeRCA({ promptBody, onChunk, model: 'opus', timeoutMs: OPUS_MS });
       } catch (opusErr) {
         // A missing CLI fails identically on every model — surface it immediately
@@ -2910,5 +2916,7 @@ handler._buildAiRemarksPrompt = buildAiRemarksPrompt;
 handler._rcaCommand = rcaCommand;
 handler._AI_REMARKS_SYSTEM_PROMPT = AI_REMARKS_SYSTEM_PROMPT;
 handler._assignIncidentNumber = assignIncidentNumber;
+// App Investigation writes its report in this same layout, so it fills the same RCA form.
+handler._businessReportSpec = businessReportSpec;
 
 module.exports = handler;

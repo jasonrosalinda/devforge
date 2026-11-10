@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { _fetchFiveXxRequests: fetchFiveXxRequests } = require('./azure-metrics.cjs');
+const { _fetchFiveXxRequests: fetchFiveXxRequests, _fetchStatusBreakdown: fetchStatusBreakdown } = require('./azure-metrics.cjs');
 
 const cred = { getToken: async () => ({ token: 'tok' }) };
 const START = '2026-10-28T09:00:00.000Z';
@@ -58,5 +58,36 @@ describe('fetchFiveXxRequests', () => {
   it('reads an empty answer as zero', async () => {
     vi.stubGlobal('fetch', reply({ tables: [] }));
     expect(await fetchFiveXxRequests('app-1', cred, START, END)).toEqual({ total: 0, rows: [] });
+  });
+});
+
+describe('fetchStatusBreakdown', () => {
+  it('groups one class by code, endpoint and role over exactly the window', async () => {
+    const fetch = reply({ tables: [{ rows: [] }] });
+    vi.stubGlobal('fetch', fetch);
+    await fetchStatusBreakdown('app-1', cred, '4xx', START, END);
+    const body = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(body.timespan).toBe(`${START}/${END}`);
+    expect(body.query).toContain('where rc >= 400 and rc < 500');
+    expect(body.query).toContain('summarize count=sum(itemCount), bots=sumif(itemCount, isnotempty(ua) and (ua contains "bot"');
+    expect(body.query).toContain('by resultCode, nameClean, cloud_RoleName');
+    expect(body.query).toContain('top 10 by count desc');
+
+    await fetchStatusBreakdown('app-1', cred, '5xx', START, END);
+    // Same 5xx definition as the card: includes failures with no usable code.
+    expect(JSON.parse(fetch.mock.calls[1][1].body).query).toContain('rc >= 500 or (success == false');
+  });
+
+  it('maps rows and labels a missing code', async () => {
+    vi.stubGlobal('fetch', reply({ tables: [{ rows: [['404', 'GET /a', 'medu-fe', 120, 90], ['', null, null, null, null]] }] }));
+    expect(await fetchStatusBreakdown('app-1', cred, '4xx', START, END)).toEqual({ rows: [
+      { code: '404', endpoint: 'GET /a', role: 'medu-fe', count: 120, bots: 90 },
+      { code: '(none)', endpoint: '', role: '', count: 0, bots: 0 },
+    ] });
+  });
+
+  it('throws the API error so the handler can return it', async () => {
+    vi.stubGlobal('fetch', reply({ error: { message: 'bad' } }, false, 403));
+    await expect(fetchStatusBreakdown('app-1', cred, '4xx', START, END)).rejects.toThrow(/^403:/);
   });
 });

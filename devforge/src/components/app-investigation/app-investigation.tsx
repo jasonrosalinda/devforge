@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import {
-    AlertTriangle, BookOpen, Check, Cloud, FileCode2, FileDown, FileText, FolderGit2, FolderOpen, GitCommitHorizontal,
+    AlertTriangle, BookOpen, Check, Cloud, FileCode2, FileDown, FileText, FileType2, FolderGit2, FolderOpen, GitCommitHorizontal, ImagePlus,
     Loader2, Search, Settings2, ShieldAlert, Share2, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react';
 import type { InvestigationCategory, InvestigationProgress } from '@shared/types/app-investigation.types';
@@ -14,11 +14,13 @@ import { parseCitation } from '@/lib/safe-markdown';
 import {
     deleteInvestigation, loadInvestigationHistory, metaOf, saveInvestigation, type InvestigationHistoryEntry,
 } from '@/lib/app-investigation-history';
-import { newRunId } from '@/lib/rca-report';
+import { newRunId, splitInvestigationReport } from '@/lib/rca-report';
 import type { AzureAppEntry } from '@/types/settings.types';
 import { toDatetimeLocal } from '@/components/app-health-check/styles';
-import { formatSgtRange } from '@/components/azure/rcaHtml';
+import { downtimePeriod, formatSgtRange } from '@/components/azure/rcaHtml';
+import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
 import { RcaSection } from '@/components/azure/rcaSection';
+import { MAX_IMAGE_BYTES, imageFilesFrom, readAsDataUrl } from '@/components/azure/richTextField';
 import { AnalysisCard, type AnalysisState } from '@/components/shared/analysis-card';
 import { Segmented } from '@/components/telemetry/telemetry-ask';
 import { Button } from '@/components/ui/button';
@@ -26,6 +28,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toast } from '@/components/ui/toast';
 
 type RangePreset = '1h' | '6h' | '24h' | '3d';
@@ -50,7 +53,17 @@ const REFUSAL_TITLE: Record<string, string> = {
     UNKNOWN_APP: 'No matching app',
 };
 
-const REPORT_HEADINGS_HINT = 'Summary · Timeline · Azure Evidence · Code Suspects · Root Cause · Recommended Fix · Gaps & Next Checks';
+type ReportTab = 'findings' | 'rca' | 'tracker';
+
+const MAX_IMAGES = 5;
+/** "705×573" for an attachment chip, or '' when the image will not decode. */
+const imageSize = (src: string) => new Promise<string>(resolve => {
+    const img = new Image();
+    img.onload = () => resolve(`${img.naturalWidth}×${img.naturalHeight}`);
+    img.onerror = () => resolve('');
+    img.src = src;
+});
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
 const repoFor = (app: AzureAppEntry | undefined, target: 'app' | 'api') =>
     (target === 'api' ? app?.apiSourcePath : app?.sourcePath) ?? '';
@@ -67,7 +80,39 @@ export default function AppInvestigation() {
     const [preset, setPreset] = useState<RangePreset>('24h');
     const [repoOverride, setRepoOverride] = useState('');
     const [reportOpen, setReportOpen] = useState(true);
-    const [rcaOpen, setRcaOpen] = useState(false);
+    const [tab, setTab] = useState<ReportTab>('findings');
+    // Screenshots sent with the run as evidence. Main re-checks type, size and count.
+    const [images, setImages] = useState<Array<{ name: string; dataUrl: string; size?: string }>>([]);
+    const addImages = async (files: File[]) => {
+        let count = images.length;
+        for (const f of files) {
+            if (count >= MAX_IMAGES) { toast.error(`At most ${MAX_IMAGES} screenshots per investigation.`); break; }
+            if (!IMAGE_TYPES.includes(f.type)) { toast.error(`${f.name || 'That file'} isn’t a PNG, JPEG, GIF or WEBP image.`); continue; }
+            if (f.size > MAX_IMAGE_BYTES) { toast.error(`${f.name || 'That image'} is over 4 MB.`); continue; }
+            const dataUrl = await readAsDataUrl(f);
+            count++;
+            const size = await imageSize(dataUrl);
+            setImages(prev => prev.length >= MAX_IMAGES ? prev : [...prev, { name: f.name || 'image.png', dataUrl, ...(size ? { size } : {}) }]);
+        }
+    };
+    // A screenshot pasted anywhere on this page is attached, not only in the description.
+    // The RCA's rich-text fields embed their own (they cancel the paste first), and the
+    // page is skipped while its tab is hidden, since hidden tabs stay mounted.
+    const rootRef = useRef<HTMLDivElement>(null);
+    const addImagesRef = useRef(addImages);
+    addImagesRef.current = addImages;
+    useEffect(() => {
+        const onPaste = (e: ClipboardEvent) => {
+            const root = rootRef.current;
+            if (e.defaultPrevented || !e.clipboardData || !root || root.closest('[hidden]')) return;
+            const files = imageFilesFrom(e.clipboardData);
+            if (!files.length) return;
+            e.preventDefault();
+            void addImagesRef.current(files);
+        };
+        document.addEventListener('paste', onPaste);
+        return () => document.removeEventListener('paste', onPaste);
+    }, []);
     const [history, setHistory] = useState<InvestigationHistoryEntry[]>(loadInvestigationHistory);
     const [currentId, setCurrentId] = useState<string | null>(null);
 
@@ -83,6 +128,19 @@ export default function AppInvestigation() {
     const busy = state.status === 'interpreting' || state.status === 'running';
 
     // ── RCA, in App Health Check's business format ──────────────────────────
+    // The investigation's window once interpreted, else the picked preset up to now.
+    const rcaWindow = useMemo(() => {
+        const endMs = i?.endMs ?? Date.now();
+        return { startMs: i?.startMs ?? endMs - PRESET_MS[preset], endMs };
+    }, [i?.startMs, i?.endMs, preset]);
+    // Incident Period as App Health Check measures it: UptimeRobot downtime in the window.
+    const { monitors: urMonitors } = useUptimeRobotMonitor(
+        settings.apiKeys.uptimeRobotApiKey, app?.uptimeRobotMonitorIds,
+        new Date(rcaWindow.startMs).toISOString(), new Date(rcaWindow.endMs).toISOString(),
+    );
+    const rcaPeriod = downtimePeriod(urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1)
+        .map(l => ({ start: l.datetime * 1000, end: (l.datetime + l.duration) * 1000 }))));
+
     const getPayload = useCallback(() => ({
         subscriptionId: settings.azure.subscriptionId,
         resourceGroup: app?.resourceGroup,
@@ -98,10 +156,20 @@ export default function AppInvestigation() {
         appGatewayResourceId: app?.appGatewayResourceId,
         frontDoorResourceId: app?.frontDoorResourceId,
         loadBalancerResourceId: app?.loadBalancerResourceId,
-        startMs: i?.startMs ?? Date.now() - PRESET_MS['24h'],
-        endMs: i?.endMs ?? Date.now(),
-    }), [settings.azure.subscriptionId, app, i?.startMs, i?.endMs]);
+        startMs: rcaWindow.startMs,
+        endMs: rcaWindow.endMs,
+    }), [settings.azure.subscriptionId, app, rcaWindow]);
     const rca = useRcaReport({ appKey: app?.name ?? '', getPayload });
+    // A report only fills blank fields, so the next incident starts on a fresh form once
+    // one has been filled. Notes typed before anything filled it are kept.
+    const [rcaFormKey, setRcaFormKey] = useState(0);
+    const filledByReport = useRef(false);
+    useEffect(() => { if (state.status === 'done') filledByReport.current = true; }, [state.status]);
+    const freshRca = () => {
+        if (filledByReport.current) setRcaFormKey(k => k + 1);
+        filledByReport.current = false;
+        rca.reset();
+    };
 
     const doAsk = (q = query) => {
         const text = q.trim();
@@ -109,15 +177,17 @@ export default function AppInvestigation() {
         setQuery(text);
         setRepoOverride('');
         setCurrentId(null);
-        rca.reset();
+        freshRca();
         const end = Date.now();
         void interpret({ query: text, config: settings.azure, selectedAppKey: selectedAppKey || null, fallbackWindow: { startMs: end - PRESET_MS[preset], endMs: end } });
     };
 
     const doRun = () => {
         if (!i || !repoPath) return;
+        freshRca();
         setReportOpen(true);
-        void run({ config: settings.azure, repoPath });
+        setTab('findings');
+        void run({ config: settings.azure, repoPath, images });
     };
 
     // Save each finished run once, the moment it lands.
@@ -151,19 +221,15 @@ export default function AppInvestigation() {
         else if (!res.canceled && res.error) toast.error(res.error);
     };
 
+    // One run writes both: the findings, then the RCA that fills the RCA and Tracker tabs.
+    const parts = useMemo(() => splitInvestigationReport(state.report), [state.report]);
     const analysis: AnalysisState = state.status === 'running'
-        ? { status: 'running', markdown: state.stream, error: null }
+        ? { status: 'running', markdown: splitInvestigationReport(state.stream).findings, error: null }
         : state.status === 'done'
-            ? { status: 'done', markdown: state.report, error: null }
+            ? { status: 'done', markdown: parts.findings, error: null }
             : { status: 'error', markdown: '', error: state.error };
     const showReport = state.status === 'running' || state.status === 'done' || (state.status === 'error' && !!i);
 
-    const rcaNotes = useMemo(() => [
-        'Findings from a read-only App Investigation of this incident (Azure telemetry plus the application source code and git history).',
-        `Incident as reported: ${state.query}`,
-        '',
-        state.report,
-    ].join('\n'), [state.query, state.report]);
 
     if (!isElectron()) return <p className="text-sm text-muted-foreground">App Investigation runs in the desktop app only.</p>;
     if (!apps.length) {
@@ -175,21 +241,48 @@ export default function AppInvestigation() {
     }
 
     return (
-        <div className="grid min-h-0 gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div ref={rootRef} className="grid min-h-0 gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
             <div className="flex min-w-0 flex-col gap-4">
                 {/* ── 1. the question ─────────────────────────────────────── */}
                 <Card>
                     <CardContent className="flex flex-col gap-3 p-4">
-                        <textarea
-                            value={query}
-                            onChange={e => setQuery(e.target.value)}
-                            onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doAsk(); } }}
-                            rows={3}
-                            maxLength={2000}
-                            placeholder="Describe the incident: which app, what went wrong, roughly when. e.g. “MEDU users got 500s around 2pm yesterday”"
-                            aria-label="Incident description"
-                            className="w-full resize-y rounded-md border bg-background p-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        />
+                        {/* One box, as in a chat composer: attached screenshots sit as chips
+                            above the text. Drop files anywhere on it. */}
+                        <div
+                            className="flex flex-col rounded-md border bg-background focus-within:ring-1 focus-within:ring-ring"
+                            onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }}
+                            onDrop={e => {
+                                const files = Array.from(e.dataTransfer.files);
+                                if (files.length) { e.preventDefault(); void addImages(files); }
+                            }}
+                        >
+                            {images.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 px-2 pt-2">
+                                    {images.map((img, n) => (
+                                        <span key={n} className="flex max-w-[220px] items-center gap-1.5 rounded-md border bg-muted/40 py-0.5 pl-0.5 pr-1 text-xs">
+                                            <img src={img.dataUrl} alt="" className="h-5 w-5 flex-shrink-0 rounded-sm object-cover" />
+                                            <span className="truncate font-medium" title={img.name}>{img.name}</span>
+                                            {img.size && <span className="flex-shrink-0 text-muted-foreground">{img.size}</span>}
+                                            <button type="button" disabled={busy} aria-label={`Remove ${img.name}`}
+                                                onClick={() => setImages(prev => prev.filter((_, k) => k !== n))}
+                                                className="flex-shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-50">
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            <textarea
+                                value={query}
+                                onChange={e => setQuery(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doAsk(); } }}
+                                rows={3}
+                                maxLength={2000}
+                                placeholder="Describe the incident: which app, what went wrong, roughly when. e.g. “MEDU users got 500s around 2pm yesterday”. Paste or drop screenshots here."
+                                aria-label="Incident description"
+                                className="w-full resize-y bg-transparent p-3 text-sm focus-visible:outline-none"
+                            />
+                        </div>
                         <div className="flex flex-wrap items-center gap-2">
                             <Hint label="Used when the description doesn’t name an app">
                                 <div>
@@ -204,6 +297,18 @@ export default function AppInvestigation() {
                                     <Segmented value={preset} onChange={v => setPreset(v as RangePreset)}
                                         options={(['1h', '6h', '24h', '3d'] as const).map(p => ({ value: p, label: p }))} />
                                 </div>
+                            </Hint>
+                            <Hint label={`Attach screenshots as evidence — an error page, a chart, an alert (up to ${MAX_IMAGES}, 4 MB each). You can also paste or drop them into the description.`}>
+                                <Button variant="outline" size="sm" disabled={busy || images.length >= MAX_IMAGES} onClick={() => {
+                                    const input = document.createElement('input');
+                                    input.type = 'file';
+                                    input.accept = IMAGE_TYPES.join(',');
+                                    input.multiple = true;
+                                    input.onchange = () => void addImages(Array.from(input.files ?? []));
+                                    input.click();
+                                }}>
+                                    <ImagePlus /> Screenshot
+                                </Button>
                             </Hint>
                             <div className="flex-1" />
                             <Button size="sm" onClick={() => doAsk()} disabled={!query.trim() || busy}>
@@ -272,10 +377,20 @@ export default function AppInvestigation() {
                     />
                 )}
 
-                {/* ── 3. the report ───────────────────────────────────────── */}
-                {showReport && (
+                {/* ── 3. the report: Findings, RCA and Tracker tabs ───────── */}
+                {app && (
                     <div className="-mx-6">
                         <AnalysisCard
+                            tabs={
+                                <Tabs value={tab} onValueChange={v => setTab(v as ReportTab)}>
+                                    <TabsList>
+                                        <TabsTrigger value="findings">Findings</TabsTrigger>
+                                        <TabsTrigger value="rca">RCA</TabsTrigger>
+                                        <TabsTrigger value="tracker">Tracker</TabsTrigger>
+                                    </TabsList>
+                                </Tabs>
+                            }
+                            showBody={tab === 'findings' && showReport}
                             state={analysis}
                             heading="Investigation report"
                             icon={<Search className="h-4 w-4 text-primary" />}
@@ -292,41 +407,38 @@ export default function AppInvestigation() {
                                 : state.status === 'done' && state.meta && (
                                     <ReportFooter
                                         meta={state.meta}
-                                        onSave={() => void rca.exportMd('investigation', state.report)}
-                                        onPdf={() => void rca.exportPdf('investigation', state.report)}
-                                        onCopy={() => void rca.copyTeams(state.report)}
-                                        onReset={() => { reset(); setCurrentId(null); }}
+                                        onSave={() => void rca.exportMd('investigation', parts.findings)}
+                                        onPdf={() => void rca.exportPdf('investigation', parts.findings)}
+                                        onWord={() => void rca.exportWord('investigation', parts.findings)}
+                                        onCopy={() => void rca.copyTeams(parts.findings)}
+                                        onReset={() => { reset(); setCurrentId(null); freshRca(); setImages([]); }}
                                     />
                                 )}
-                        />
-                    </div>
-                )}
-
-                {/* ── 4. RCA in App Health Check's format ─────────────────── */}
-                {state.status === 'done' && app && (
+                        >
+                    {tab === 'findings' && !showReport && (
+                        <p className="text-muted-foreground">Run an investigation to see its findings here. The RCA and Tracker tabs can be filled in before a run.</p>
+                    )}
+                {/* RCA and Tracker, in App Health Check's format. Mounted throughout (hidden
+                    on Findings, and while the card is collapsed) so edits survive; keyed per
+                    app so another app's draft never carries over. A finished investigation's
+                    RCA part fills the blank fields. */}
+                    <div className={tab === 'findings' ? 'hidden' : '-mx-4'}>
                     <RcaSection
-                        open={rcaOpen}
-                        onToggle={() => setRcaOpen(o => !o)}
-                        status={rca.status}
-                        markdown={rca.text}
-                        stages={rca.stages}
-                        error={rca.error}
-                        onGenerate={(notes, given) => void rca.run(
-                            [notes.trim(), rcaNotes].filter(Boolean).join('\n\n'),
-                            'business',
-                            given,
-                            state.azureReport ? { reportMarkdown: state.azureReport } : {},
-                        )}
+                        key={`${app.name}:${rcaFormKey}`}
+                        view={tab === 'tracker' ? 'tracker' : 'rca'}
+                        markdown={state.status === 'done' ? parts.rca : ''}
                         onDraftChange={rca.setDraft}
-                        defaultTitle={`${appLabel(app)} Incident`}
+                        defaultTitle={`${appLabel(app)} Downtime`}
                         defaultServices={(app.platformUrls?.length ? app.platformUrls : [appLabel(app), app.apiName].filter(Boolean)).join(', ')}
-                        period={i ? formatSgtRange(i.startMs, i.endMs) : ''}
-                        periodSource="none"
+                        period={rcaPeriod}
+                        periodSource={rcaPeriod ? 'uptimerobot' : 'none'}
                         onExportPdf={() => void rca.exportPdf()}
                         onExportWord={() => void rca.exportWord()}
                         onCopyTeams={() => void rca.copyTeams()}
-                        onCopySummary={() => void rca.copySummary()}
                     />
+                    </div>
+                        </AnalysisCard>
+                    </div>
                 )}
             </div>
 
@@ -341,7 +453,7 @@ export default function AppInvestigation() {
                                 setQuery(h.query);
                                 setCurrentId(h.id);
                                 setRepoOverride('');
-                                rca.reset();
+                                freshRca();
                                 restore({ query: h.query, interpretation: h.interpretation, report: h.report, meta: metaOf(h) });
                             }}>
                             <span className="line-clamp-2 font-medium">{h.interpretation.question || h.query}</span>
@@ -511,9 +623,9 @@ function Trail({ items }: { items: InvestigationProgress[] }) {
     );
 }
 
-function ReportFooter({ meta, onSave, onPdf, onCopy, onReset }: {
+function ReportFooter({ meta, onSave, onPdf, onWord, onCopy, onReset }: {
     meta: NonNullable<ReturnType<typeof useAppInvestigation>['state']['meta']>;
-    onSave: () => void; onPdf: () => void; onCopy: () => void; onReset: () => void;
+    onSave: () => void; onPdf: () => void; onWord: () => void; onCopy: () => void; onReset: () => void;
 }) {
     return (
         <div className="mt-4 flex flex-col gap-2 border-t pt-3">
@@ -531,11 +643,11 @@ function ReportFooter({ meta, onSave, onPdf, onCopy, onReset }: {
                     </Hint>
                 )}
                 {meta.deniedTools.length > 0 && <span>· {meta.deniedTools.length} blocked tool call(s)</span>}
-                <span className="hidden xl:inline">· {REPORT_HEADINGS_HINT}</span>
                 <div className="flex-1" />
                 <Hint label="Save the report as markdown and copy it"><Button variant="ghost" size="sm" onClick={onSave}><FileText /> .md</Button></Hint>
                 <Hint label="Save the report as PDF"><Button variant="ghost" size="sm" onClick={onPdf}><FileDown /> PDF</Button></Hint>
-                <Hint label="Copy the report, formatted for Teams"><Button variant="ghost" size="sm" onClick={onCopy}><Share2 /> Teams</Button></Hint>
+                <Hint label="Save the report as a Word document you can edit"><Button variant="ghost" size="sm" onClick={onWord}><FileType2 /> Word</Button></Hint>
+                <Hint label="Copy the report, formatted for Teams"><Button variant="ghost" size="sm" onClick={onCopy}><Share2 /> Copy for Teams</Button></Hint>
                 <Hint label="Start a new investigation"><Button variant="outline" size="sm" onClick={onReset}><BookOpen /> New</Button></Hint>
             </div>
             <p className="text-[11px] text-muted-foreground">Click a <code className="rounded bg-muted px-1">file:line</code> citation to open it in VS Code.</p>

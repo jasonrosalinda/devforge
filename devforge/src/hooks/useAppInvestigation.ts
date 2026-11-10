@@ -59,7 +59,7 @@ export default function useAppInvestigation() {
         setState(s => (s.interpretation ? { ...s, interpretation: { ...s.interpretation, ...patch } } : s));
     }, []);
 
-    const run = useCallback(async (args: { config: AzureSettings; repoPath: string }) => {
+    const run = useCallback(async (args: { config: AzureSettings; repoPath: string; images?: Array<{ name: string; dataUrl: string }> }) => {
         const { query, interpretation } = state;
         if (!interpretation) return;
         const runId = newRunId();
@@ -74,7 +74,7 @@ export default function useAppInvestigation() {
             if (mine(d)) setState(s => ({ ...s, trail: [...s.trail, d].slice(-MAX_TRAIL) }));
         });
         try {
-            const res = await window.electronAPI.appInvestigation.run({ runId, query, interpretation, config: args.config, repoPath: args.repoPath });
+            const res = await window.electronAPI.appInvestigation.run({ runId, query, interpretation, config: args.config, repoPath: args.repoPath, images: args.images });
             if (runIdRef.current !== runId) return;
             if (res.success) {
                 setState(s => ({

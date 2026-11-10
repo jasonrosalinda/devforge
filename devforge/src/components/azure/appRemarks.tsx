@@ -1,5 +1,6 @@
 import type { AppMetrics } from '@shared/types/azureMetrics.types';
 import type { UptimeRobotMonitor, UptimeRobotLog } from '@/hooks/useUptimeRobotMonitor';
+import { botShareLabel } from './performance';
 
 export type RemarkKind =
   | 'CPU spike'
@@ -16,7 +17,13 @@ export interface MetricRemark {
   display?: string | undefined;
   lastBadAt: string | null;
   severity: RemarkSeverity;
+  /** 4xx/5xx only: the bucket with the highest rate, [start, start + interval). What the
+   *  card asks App Insights about to name the codes and endpoints. */
+  peakWindow?: { startIso: string; endIso: string } | undefined;
 }
+
+/** HH:mm in SGT — the same clock the remark story and the timeline use. */
+const sgtHm = (iso: string) => new Date(new Date(iso).getTime() + 8 * 3600 * 1000).toISOString().slice(11, 16);
 
 export interface RemarkResult {
   text: string;
@@ -202,15 +209,53 @@ function httpRateStats(
   errSeries: Array<{ t: string; count: number }> | null | undefined,
   requestsSeries: AppMetrics['requestsSeries'],
   thresholdRate: number,
-): { lastBadAt: string | null; peakRate: number | null } {
+): { lastBadAt: string | null; peakRate: number | null; peakAt: string | null } {
   const rates = httpRateBuckets(errSeries, requestsSeries);
   let peakRate = 0;
+  let peakAt: string | null = null;
   let lastBadAt: string | null = null;
   for (const { t, rate } of rates) {
-    if (rate > peakRate) peakRate = rate;
+    if (rate > peakRate) { peakRate = rate; peakAt = t; }
     if (rate > thresholdRate) lastBadAt = t;
   }
-  return { lastBadAt, peakRate: rates.length ? peakRate : null };
+  return { lastBadAt, peakRate: rates.length ? peakRate : null, peakAt };
+}
+
+/** "peak 5.3% at 14:30" plus the window App Insights is asked about. */
+function httpPeak(
+  stats: { peakRate: number | null; peakAt: string | null },
+  intervalMs: number | null,
+  rangeEnd: string | undefined,
+): { label: string | null; peakWindow?: MetricRemark['peakWindow'] } {
+  if (stats.peakRate == null) return { label: null };
+  const pctText = `${(stats.peakRate * 100).toFixed(1)}%`;
+  if (!stats.peakAt) return { label: `peak ${pctText}` };
+  const endIso = intervalMs
+    ? new Date(new Date(stats.peakAt).getTime() + intervalMs).toISOString()
+    : rangeEnd ?? stats.peakAt;
+  return { label: `peak ${pctText} at ${sgtHm(stats.peakAt)}`, peakWindow: { startIso: stats.peakAt, endIso } };
+}
+
+/** How many of the breakdown's (code, endpoint) groups a remark lists. */
+export const BREAKDOWN_ITEMS = 5;
+
+/**
+ * The status-code breakdown as remark list items, busiest first, at most five:
+ * "404 × 120 on GET /x (100% bot)". The bot share is by user agent. When the rows span
+ * more than one cloud role (FE and API sharing an App Insights resource), each item names
+ * its role. Empty rows mean App Insights saw none of these failures: an ARM-counted 4xx
+ * that never reached the app (IIS static 404, IP block) has no request record, so that's
+ * said plainly.
+ */
+export function formatStatusBreakdown(rows: Array<{ code: string; endpoint: string; role: string; count: number; bots: number }>): string[] {
+  if (!rows.length) return ['no matching requests in App Insights for that bucket'];
+  const multiRole = new Set(rows.map(r => r.role)).size > 1;
+  const botShare = (bots: number, count: number) => (count > 0 ? ` (${botShareLabel(bots, count)} bot)` : '');
+  return [...rows]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, BREAKDOWN_ITEMS)
+    .map(r =>
+      `${r.code} × ${r.count.toLocaleString()}${r.endpoint ? ` on ${r.endpoint}` : ''}${multiRole && r.role ? ` [${r.role}]` : ''}${botShare(r.bots, r.count)}`);
 }
 
 function urDowntimeStats(urMonitors: UptimeRobotMonitor[] | undefined): {
@@ -333,9 +378,6 @@ export function collectRemarks(
     severity: severityFromLastBad(respLastBad, rangeEnd, intervalMs),
   });
 
-  const fmtPct = (rate: number | null): string | null =>
-    rate == null ? null : `${(rate * 100).toFixed(1)}%`;
-
   // Both sides of the rate — errors and the requests they're a share of — are
   // narrowed to the same trailing window, so the percentage stays a rate over
   // that window rather than errors-in-the-window over requests-all-day.
@@ -343,24 +385,24 @@ export function collectRemarks(
 
   const fiveXxWindow = sliceToTrailingWindow(m.failedRequestsSeries, rangeEnd, intervalMs);
   const fiveXxStats = httpRateStats(fiveXxWindow, requestsWindow, HTTP_5XX_RATE);
+  const fiveXxPeak = httpPeak(fiveXxStats, intervalMs, rangeEnd);
   remarks.push({
     kind: '5xx errors',
-    display: fmtPct(fiveXxStats.peakRate)
-      ? `5xx errors (peak ${fmtPct(fiveXxStats.peakRate)})`
-      : undefined,
+    display: fiveXxPeak.label ? `5xx errors (${fiveXxPeak.label})` : undefined,
     lastBadAt: fiveXxStats.lastBadAt,
     severity: severityFromLastBad(fiveXxStats.lastBadAt, rangeEnd, intervalMs),
+    peakWindow: fiveXxPeak.peakWindow,
   });
 
   const fourXxWindow = sliceToTrailingWindow(m.http4xxSeries, rangeEnd, intervalMs);
   const fourXxStats = httpRateStats(fourXxWindow, requestsWindow, HTTP_4XX_RATE);
+  const fourXxPeak = httpPeak(fourXxStats, intervalMs, rangeEnd);
   remarks.push({
     kind: '4xx surge',
-    display: fmtPct(fourXxStats.peakRate)
-      ? `4xx surge (peak ${fmtPct(fourXxStats.peakRate)})`
-      : undefined,
+    display: fourXxPeak.label ? `4xx surge (${fourXxPeak.label})` : undefined,
     lastBadAt: fourXxStats.lastBadAt,
     severity: severityFromLastBad(fourXxStats.lastBadAt, rangeEnd, intervalMs),
+    peakWindow: fourXxPeak.peakWindow,
   });
 
   if (urMonitors?.length) {
@@ -381,17 +423,34 @@ export function collectRemarks(
   return remarks;
 }
 
-/** The remarks active in the trailing bucket — "right now" — as display text, minus the
- *  kinds whose block is hidden. The remark story's opening line. */
-export function activeRemarks(
-  m: AppMetrics,
-  rangeEnd?: string,
-  visibleBlocks?: VisibleBlocks,
-  urMonitors?: UptimeRobotMonitor[],
-): string[] {
-  return collectRemarks(m, rangeEnd, urMonitors)
-    .filter(r => r.severity === 'critical' && visibleBlocks?.[KIND_TO_BLOCK[r.kind]] !== false)
-    .map(r => r.display ?? r.kind);
+/** The remarks active in the trailing bucket ("right now"), minus the kinds whose block
+ *  is hidden. The remark story's opening line, via `nowRemarkText`. */
+export function activeRemarkList(remarks: MetricRemark[], visibleBlocks?: VisibleBlocks): MetricRemark[] {
+  return remarks.filter(r => r.severity === 'critical' && visibleBlocks?.[KIND_TO_BLOCK[r.kind]] !== false);
+}
+
+const HTTP_CLASS: Partial<Record<RemarkKind, '4xx' | '5xx'>> = { '4xx surge': '4xx', '5xx errors': '5xx' };
+
+/** What to ask App Insights about for an active 4xx/5xx remark, or null for any other kind. */
+export function breakdownTarget(r: MetricRemark): { key: string; cls: '4xx' | '5xx'; startIso: string; endIso: string } | null {
+  const cls = HTTP_CLASS[r.kind];
+  if (!cls || !r.peakWindow) return null;
+  const { startIso, endIso } = r.peakWindow;
+  return { key: `${cls}|${startIso}|${endIso}`, cls, startIso, endIso };
+}
+
+/** One "Right now" entry. A 4xx/5xx remark names its site when the app has an API
+ *  (these series are the frontend site's). */
+export function nowRemarkText(r: MetricRemark, hasApi: boolean): string {
+  const text = r.display ?? r.kind;
+  return HTTP_CLASS[r.kind] ? `${hasApi ? 'FE ' : ''}${text}` : text;
+}
+
+/** A 4xx/5xx remark's codes and endpoints, listed under the "Right now" line once the
+ *  breakdown is in; nothing for any other remark or before it arrives. */
+export function nowRemarkItems(r: MetricRemark, breakdowns: Record<string, string[]>): string[] {
+  const target = breakdownTarget(r);
+  return target ? breakdowns[target.key] ?? [] : [];
 }
 
 export function buildRemarks(

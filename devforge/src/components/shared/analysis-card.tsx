@@ -12,6 +12,7 @@ export type AnalysisState = { status: 'running' | 'done' | 'error'; markdown: st
 // the labels differ.
 export function AnalysisCard({
     state, heading, icon, open, onToggle, onRetry, retryHint, runningLabel, writingLabel, progress, onCancel, footer, onReportClick,
+    tabs, showBody = true, children,
 }: {
     state: AnalysisState;
     heading: string;
@@ -27,6 +28,12 @@ export function AnalysisCard({
     footer?: React.ReactNode;
     /** Click handler on the rendered report, for delegated links such as code citations. */
     onReportClick?: ((e: React.MouseEvent<HTMLDivElement>) => void) | undefined;
+    /** A tab strip shown at the top of the card body. */
+    tabs?: React.ReactNode;
+    /** False hides the report and its footer, e.g. while another tab is showing. */
+    showBody?: boolean;
+    /** Extra content after the report. It stays mounted while the card is collapsed. */
+    children?: React.ReactNode;
 }) {
     return (
         <Card className="my-4 mx-6 shadow-none">
@@ -44,8 +51,10 @@ export function AnalysisCard({
                     </Hint>
                 </CardTitle>
             </CardHeader>
-            {open && (
-                <CardContent className="text-xs">
+            {(open || children) && (
+                <CardContent className={open ? 'text-xs' : 'hidden'}>
+                    {tabs && <div className="mb-3">{tabs}</div>}
+                    {showBody && (<>
                     {state.status === 'running' && (
                         <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-2 text-muted-foreground">
@@ -84,6 +93,8 @@ export function AnalysisCard({
                         <div className="ps-analysis-content" onClick={onReportClick} dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(state.markdown) }} />
                     )}
                     {footer}
+                    </>)}
+                    {children}
                 </CardContent>
             )}
         </Card>

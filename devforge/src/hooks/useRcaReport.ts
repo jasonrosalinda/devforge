@@ -112,17 +112,17 @@ export function useRcaReport({ appKey, getPayload }: { appKey: string; getPayloa
         }
     }, [appKey, getPayload, output]);
 
-    const exportWord = useCallback(async () => {
+    const exportWord = useCallback(async (kind: ReportKind = 'rca', markdown: string = output) => {
         try {
             const { startMs, endMs } = getPayload();
-            const html = buildRcaWordHtml(output, {
+            const html = buildRcaWordHtml(markdown, {
                 appName: appKey,
                 window: formatSgtRange(startMs, endMs),
                 generated: formatSgt(Date.now()),
             });
-            const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html });
+            const result = await window.electronAPI.incidentReport.exportRcaDoc({ appName: appKey, startMs, endMs, html, kind });
             if (!result.success) throw new Error(result.error ?? 'Word export failed');
-            toast.success('RCA Word document saved');
+            toast.success(kind === 'rca' ? 'RCA Word document saved' : 'Report Word document saved');
         } catch (e: any) {
             toast.error('Word export failed', { description: e?.message });
         }

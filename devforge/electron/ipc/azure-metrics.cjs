@@ -801,6 +801,50 @@ async function fetchFiveXxRequests(appId, credential, startIso, endIso, limit = 
   };
 }
 
+// Where the caller's user agent lives. App Insights spells the header three ways
+// depending on SDK version and falls back to its own parsed `client_Browser`, so all
+// four are tried in order.
+const CLIENT_UA_EXPR =
+  `extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser)`;
+// An automated client, by its user agent. One definition, so the bot list and the
+// 4xx/5xx breakdown's bot share agree on what a bot is. A bot posing as a browser
+// passes as human here.
+const BOT_UA_PRED =
+  `isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS")`;
+
+/** Which status codes, on which endpoints and roles, made up one class (4xx or 5xx) of
+ *  failures in a window, busiest first, with how many of each came from bots. It's what
+ *  a "4xx surge" or "5xx errors" remark names, so the remark can say "404 on GET /x
+ *  (100% bot)", not just a percentage. Same class predicates as every count on the
+ *  card. Sampling-corrected (sum of itemCount). */
+async function fetchStatusBreakdown(appId, credential, cls, startIso, endIso, limit = 10) {
+  const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  const query =
+    `requests | extend rc=toint(resultCode) | where ${cls === '4xx' ? RC_4XX_EXPR : RC_5XX_EXPR} | ${NAME_CLEAN_EXPR} | ${CLIENT_UA_EXPR} ` +
+    `| summarize count=sum(itemCount), bots=sumif(itemCount, ${BOT_UA_PRED}) by resultCode, nameClean, cloud_RoleName | top ${limit} by count desc`;
+  const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${txt}`.slice(0, 300));
+  }
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  const rows = data.tables?.[0]?.rows ?? [];
+  return {
+    rows: rows.map(([code, endpoint, role, count, bots]) => ({
+      code: (code == null ? '' : String(code)) || '(none)',
+      endpoint: endpoint == null ? '' : String(endpoint),
+      role: role == null ? '' : String(role),
+      count: Number(count) || 0,
+      bots: Number(bots) || 0,
+    })),
+  };
+}
+
 /** The App Insights app id for one site of a configured app: the id from Settings, else
  *  looked up through ARM (App Service only — a Container App has no linked resource). */
 async function resolveSiteAppId(app, site, token, subscriptionId) {
@@ -1061,18 +1105,15 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     `| extend ip=iff(isnotempty(dimIp) and dimIp != "::1", dimIp, iff(isnotempty(client_IP) and client_IP != "::1", client_IP, "")) ` +
     `| where isnotempty(ip)`;
 
-  // Where the caller's user agent lives. App Insights spells the header three ways
-  // depending on SDK version and falls back to its own parsed `client_Browser`, so all
-  // four are tried in order. Hoisted for the same reason as clientIpExpr: the top-agent
-  // ranking, the bot filter and the per-client agent list have to agree on it, or a
-  // client's agents cannot be reconciled with the agent list beside them.
-  const clientUaExpr =
-    `extend ua=coalesce(tostring(customDimensions["User-Agent"]), tostring(customDimensions["user-agent"]), tostring(customDimensions["http.user_agent"]), client_Browser)`;
+  // The same user-agent source everywhere (CLIENT_UA_EXPR): the top-agent ranking, the
+  // bot filter and the per-client agent list have to agree on it, or a client's agents
+  // cannot be reconciled with the agent list beside them.
+  const clientUaExpr = CLIENT_UA_EXPR;
 
   // Group B: client-based + SNAT + SQL/HTTP timeouts (6 queries → 1 HTTP call)
   const groupBKqls = [
     `requests | ${clientUaExpr} | where isnotempty(ua) | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
-    `requests | ${clientUaExpr} | where isnotempty(ua) and (ua contains "bot" or ua contains "crawl" or ua contains "spider" or ua contains "facebookexternalhit" or ua contains "Scrapy" or ua contains "python-requests" or ua contains "Go-http" or ua contains "curl" or ua contains "wget" or ua contains "HeadlessChrome" or ua contains "PhantomJS") | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
+    `requests | ${clientUaExpr} | where ${BOT_UA_PRED} | summarize n=count() by ua | top 10 by n desc | project userAgent=ua, count=n, rpm=round(todouble(n)/${spanMins},2)`,
     // High-frequency bursts identify by IP OR agent, unlike clientIpExpr which requires
     // an IP — a caller Azure could not resolve an address for is still a burst worth
     // seeing, so this one falls back to the agent as the identifier.
@@ -1257,9 +1298,11 @@ async function getRequestInsights(appId, credential, range, customStart, customE
     // busy one: an endpoint taking three requests and 500ing all three is the first
     // thing to look at, and sorting by traffic would bury it below fifty healthy rows.
     `requests | extend rc=toint(resultCode) | ${nameCleanExpr} ` +
-    `| join kind=inner (${perfKeyUnion}) on nameClean ` +
-    `| summarize ${perfAggregates}, p99=round(percentile(duration,99),1), maxMs=round(max(duration),1) by nameClean ` +
-    `| project url=nameClean, count, rpm=round(todouble(count)/${spanMins},2), fourXx=c4, fiveXx=c5, avgMs, p95, p99, maxMs ` +
+    `| join kind=inner (${perfKeyUnion}) on nameClean | ${CLIENT_UA_EXPR} ` +
+    // bots: of count, the requests from an automated client by user agent (BOT_UA_PRED).
+    // Last, so the columns before it keep their positions.
+    `| summarize ${perfAggregates}, p99=round(percentile(duration,99),1), maxMs=round(max(duration),1), bots=countif(${BOT_UA_PRED}) by nameClean ` +
+    `| project url=nameClean, count, rpm=round(todouble(count)/${spanMins},2), fourXx=c4, fiveXx=c5, avgMs, p95, p99, maxMs, bots ` +
     `| order by fiveXx desc, fourXx desc, count desc`,
     // E1 — every request in the window as one timeline. This is what the chart draws before
     // any row is picked, so the section opens on the shape of the whole app's traffic rather
@@ -1450,11 +1493,12 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   // ── Group E parse ──────────────────────────────────────────────────────────
   const eRows = (i) => (Array.isArray(groupERows) && Array.isArray(groupERows[i]) ? groupERows[i] : null);
-  const perfEndpoints = (eRows(0) ?? []).map(([url, count, rpmVal, fourXx, fiveXx, avgMs, p95, p99, maxMs]) => ({
+  const perfEndpoints = (eRows(0) ?? []).map(([url, count, rpmVal, fourXx, fiveXx, avgMs, p95, p99, maxMs, bots]) => ({
     url: str(url) || '(unknown)',
     count: num(count), rpm: num(rpmVal),
     fourXx: num(fourXx), fiveXx: num(fiveXx),
     avgMs: num(avgMs), p95: num(p95), p99: num(p99), maxMs: num(maxMs),
+    bots: num(bots),
   }));
   // The app-wide timeline behind the section's default chart. Empty rather than absent when
   // the query returns nothing, so the panel can tell "no traffic" from "no such query" —
@@ -2409,21 +2453,31 @@ const handler = (_mainWindow) => {
 
   // The 5xx records behind a burst on the Incident Timeline. Not cached: it is opened
   // on demand for one window, and a retry after a transient failure must really retry.
-  ipcMain.handle('azure-metrics:fetch-5xx-requests', async (_event, { appKey, site, config, startIso, endIso }) => {
-    if (!config?.subscriptionId || !config?.apps?.length) return { rows: [], total: 0, error: 'No Azure configuration' };
+  // Resolves one site's App Insights app id, then runs `run(appId, cred)`. Any failure
+  // comes back as `{ ...empty, error }` so the renderer always gets its usual shape.
+  async function withSiteAppId({ appKey, site, config }, empty, run) {
+    if (!config?.subscriptionId || !config?.apps?.length) return { ...empty, error: 'No Azure configuration' };
     const app = config.apps.find(a => a.name === appKey);
-    if (!app) return { rows: [], total: 0, error: `App "${appKey}" not found` };
-    if (site === 'api' && !app.apiName) return { rows: [], total: 0, error: 'This app has no API configured' };
+    if (!app) return { ...empty, error: `App "${appKey}" not found` };
+    if (site === 'api' && !app.apiName) return { ...empty, error: 'This app has no API configured' };
     try {
       const { cred } = sharedAzure();
       const token = await getToken(cred);
       const appId = await resolveSiteAppId(app, site, token, config.subscriptionId);
-      if (!appId) return { rows: [], total: 0, error: 'No App Insights resource for this site — add its Application ID in Settings → Azure' };
-      return await fetchFiveXxRequests(appId, cred, startIso, endIso);
+      if (!appId) return { ...empty, error: 'No App Insights resource for this site — add its Application ID in Settings → Azure' };
+      return await run(appId, cred);
     } catch (err) {
-      return { rows: [], total: 0, error: err.message || String(err) };
+      return { ...empty, error: err.message || String(err) };
     }
-  });
+  }
+
+  ipcMain.handle('azure-metrics:fetch-5xx-requests', (_event, opts) =>
+    withSiteAppId(opts, { rows: [], total: 0 }, (appId, cred) => fetchFiveXxRequests(appId, cred, opts.startIso, opts.endIso)));
+
+  // The codes and endpoints behind an active 4xx/5xx remark. Not cached, for the same reason.
+  ipcMain.handle('azure-metrics:fetch-status-breakdown', (_event, opts) =>
+    withSiteAppId(opts, { rows: [] }, (appId, cred) =>
+      fetchStatusBreakdown(appId, cred, opts.cls === '4xx' ? '4xx' : '5xx', opts.startIso, opts.endIso)));
 
   // SNAT port allocations come from App Service Diagnostics, not Azure Monitor, so
   // they have their own handler rather than riding along with fetch-app-details:
@@ -2670,6 +2724,7 @@ handler._fetchMonitorMetrics = fetchMonitorMetrics;
 handler._fetchAppMetrics = fetchAppMetrics;
 handler._clearLookups = () => _lookupCache.clear();
 handler._fetchFiveXxRequests = fetchFiveXxRequests;
+handler._fetchStatusBreakdown = fetchStatusBreakdown;
 // Shared with azure-kpi.cjs (Service KPI), so both read resources the same way.
 handler._getToken = getToken;
 handler._resourceId = resourceId;
