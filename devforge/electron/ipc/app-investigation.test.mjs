@@ -9,7 +9,7 @@ const {
     guardQuery, parseSgt, buildInterpretPrompt, parseInterpretation, normalizeInterpretation,
     buildGitSeedArgs, gatherGitSeed, resolveDeployedRef, liveRelease, formatReleases, buildInvestigationPrompt, resolveCitation, resolveRepoRoot, isGithubUrl, incidentOpts,
     HEADINGS, FINDINGS_HEADINGS, DIRECTIVE, INTERPRET_FLAGS, OUT_OF_SCOPE_PHRASE, MAX_WINDOW_MS, writeAttachments, MAX_IMAGES,
-    capAzureReport, API_REPORT_LINES, AZURE_REPORT_LINES,
+    capAzureReport, API_REPORT_LINES, AZURE_REPORT_LINES, deployedWorktree, buildCodeMap, locateMentioned,
 } = require('./app-investigation.cjs').__test__;
 const { stripReportPreamble, FILE_READ_AGENT_FLAGS } = require('./claude-cli.cjs');
 
@@ -420,6 +420,39 @@ describe('resolveDeployedRef', () => {
     });
 });
 
+describe('deployedWorktree', () => {
+    const { execFileSync } = require('child_process');
+    const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+
+    it('reads the deployed commit and leaves the engineer\'s checked-out branch alone', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-wt-'));
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-wt-base-'));
+        const run = (args) => execFileSync('git', args, { cwd: dir, env }).toString().trim();
+        run(['init', '-q', '-b', 'release/v1']);
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'released');
+        run(['add', '.']); run(['commit', '-q', '-m', 'release']);
+        const released = run(['rev-parse', 'HEAD']);
+        run(['checkout', '-q', '-b', 'feature/x']);
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'feature work');
+        run(['commit', '-q', '-am', 'feature']);
+
+        const wt = await deployedWorktree(dir, released, base);
+        expect(fs.readFileSync(path.join(wt, 'a.txt'), 'utf8')).toBe('released');
+        expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('feature work');
+        expect(run(['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('feature/x');
+
+        // A second run reuses the folder and moves it to the new ref.
+        const again = await deployedWorktree(dir, run(['rev-parse', 'feature/x']), base);
+        expect(again).toBe(wt);
+        expect(fs.readFileSync(path.join(wt, 'a.txt'), 'utf8')).toBe('feature work');
+
+        expect(await deployedWorktree(dir, 'deadbeefdeadbeef', fs.mkdtempSync(path.join(os.tmpdir(), 'inv-wt-bad-')))).toBeNull();
+        run(['worktree', 'remove', '--force', wt]);
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(base, { recursive: true, force: true });
+    });
+});
+
 describe('buildInvestigationPrompt', () => {
     const interpretation = {
         appKey: 'prdmeduapp', target: 'api', category: 'errors', symptoms: ['HTTP 500', 'SqlException'],
@@ -742,5 +775,48 @@ describe('GitHub URL repositories', () => {
         expect(r).toMatchObject({ success: true, meta: { branch: 'origin/release/2026.11' } });
         expect(filesAtRun).toContain('release.txt');
         expect(runClaudeCli.mock.calls[0][0].promptBody).not.toContain('Files on disk are the checked-out branch');
+    });
+});
+
+describe('code map', () => {
+    const paths = [
+        'Medu.Web/Controllers/UserController.cs', 'Medu.Web/Controllers/HomeController.cs',
+        'Medu.Web/Services/UserService.cs', 'Medu.Web/bin/Debug/Medu.Web.dll', 'Medu.Web/obj/x.cs',
+        'Medu.Web/wwwroot/lib/jquery.js', 'Medu.Web/Migrations/001.cs', 'Medu.Web/appsettings.json',
+        'Medu.Tests/UserControllerTests.cs', 'README.md', 'Medu.Web/Views/Home/Index.cshtml',
+    ];
+
+    it('lists source folders with their files and skips build output, vendored code, migrations and tests', () => {
+        const map = buildCodeMap(paths);
+        expect(map).toContain('Medu.Web/Controllers/: HomeController.cs, UserController.cs');
+        expect(map).toContain('Medu.Web/Services/: UserService.cs');
+        expect(map).toContain('Medu.Web/: appsettings.json');
+        expect(map).toContain('Index.cshtml');
+        expect(map).not.toMatch(/bin\/|obj\/|jquery|Migrations|README/);
+        expect(map).toContain('(1 test files not listed)');
+    });
+
+    it('caps a crowded folder and says how many are left', () => {
+        const many = Array.from({ length: 45 }, (_, n) => `src/Handlers/H${String(n).padStart(2, '0')}.cs`);
+        expect(buildCodeMap(many)).toContain('(+15 more)');
+        expect(buildCodeMap([])).toBe('(no source files)');
+    });
+
+    it('resolves source files the telemetry names to repository paths', () => {
+        const report = 'thrown at UserController.cs:91 in GetUser; also userservice.cs and missing.cs';
+        expect(locateMentioned(paths, report)).toEqual(['Medu.Web/Controllers/UserController.cs', 'Medu.Web/Services/UserService.cs']);
+        expect(locateMentioned(paths, 'no files here')).toEqual([]);
+    });
+
+    it('puts the map and the located files in the prompt', () => {
+        const prompt = buildInvestigationPrompt({
+            interpretation: { question: 'q', category: 'other', symptoms: [], startMs: 0, endMs: 3600000, target: 'app' },
+            query: 'q', app: { name: 'MEDU' }, repoRoot: '/r', azureReport: 'x',
+            seed: { branch: 'release/v1', head: 'abc', commits: '-', stat: '-', patches: '-' },
+            codeMap: 'Medu.Web/Controllers/: UserController.cs', located: ['Medu.Web/Controllers/UserController.cs'],
+        });
+        expect(prompt).toContain('## CODE MAP');
+        expect(prompt).toContain('Files the telemetry names:\n- Medu.Web/Controllers/UserController.cs');
+        expect(prompt).toContain('Medu.Web/Controllers/: UserController.cs');
     });
 });
