@@ -3,7 +3,7 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const {
-  parseActivitySwaps, parseKuduDeployments, parseRevisions, mergeReleases, fetchReleases, MAX_ACTIVITY_PAGES,
+  parseActivitySwaps, parseActivityChanges, parseKuduDeployments, parseRevisions, mergeReleases, fetchReleases, MAX_ACTIVITY_PAGES,
 } = require('./azure-releases.cjs');
 
 const SITE = '/subscriptions/sub/resourceGroups/PRDMEDU-RG/providers/Microsoft.Web/sites/prdmeduapp';
@@ -200,14 +200,14 @@ describe('fetchReleases', () => {
       return fail(500);
     }));
     const r = await fetchReleases('tok', opts);
-    expect(r).toEqual({ events: [], last: null, sources: { activityLog: 'error', kudu: 'error' } });
+    expect(r).toEqual({ events: [], last: null, sources: { activityLog: 'error', kudu: 'error' }, changes: [] });
   });
 
   it('follows nextLink up to the page cap and keeps earlier pages when a later one fails', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     let pages = 0;
     vi.stubGlobal('fetch', vi.fn(async (url) => {
-      if (url.includes('/deployments')) return ok({ value: [] });
+      if (url.includes('/deployments') || url.startsWith(`https://management.azure.com${SITE}?`)) return ok({ value: [] });
       pages++;
       return ok({ value: [activity({ correlationId: `c${pages}`, eventTimestamp: `2026-10-${String(pages).padStart(2, '0')}T00:00:00Z` })], nextLink: 'https://management.azure.com/next' });
     }));
@@ -217,13 +217,34 @@ describe('fetchReleases', () => {
 
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async (url) => {
-      if (url.includes('/deployments')) return ok({ value: [] });
+      if (url.includes('/deployments') || url.startsWith(`https://management.azure.com${SITE}?`)) return ok({ value: [] });
       calls++;
       return calls === 1 ? ok({ value: [activity()], nextLink: 'https://management.azure.com/next' }) : fail(500);
     }));
     const r2 = await fetchReleases('tok', opts);
     expect(r2.sources.activityLog).toBe('ok');
     expect(r2.events).toHaveLength(1);
+  });
+
+  it('returns restarts, config writes and changes to its own plan, with who made them', async () => {
+    const PLAN = '/subscriptions/sub/resourceGroups/PRDMEDU-RG/providers/Microsoft.Web/serverfarms/prdmedu-plan';
+    const rec = (op, resourceId, at, caller = 'ops@mims.com', correlationId = at) => ({
+      eventTimestamp: at, operationName: { value: op }, resourceId, status: { value: 'Succeeded' }, correlationId, caller,
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (url.includes('eventtypes')) return ok({ value: [
+        rec('Microsoft.Web/sites/restart/action', SITE, '2026-10-20T06:00:00Z'),
+        rec('Microsoft.Web/serverfarms/write', PLAN, '2026-10-20T05:00:00Z', '7d1f0c2a-1111-2222-3333-444455556666'),
+        rec('Microsoft.Web/serverfarms/write', `${PLAN}2`, '2026-10-20T05:30:00Z'),
+      ] });
+      if (url.includes('/deployments')) return ok({ value: [] });
+      return ok({ properties: { serverFarmId: PLAN } });
+    }));
+    const r = await fetchReleases('tok', opts);
+    expect(r.changes).toEqual([
+      { at: '2026-10-20T05:00:00.000Z', kind: 'plan', label: expect.stringMatching(/plan change/), by: 'automation (service principal)' },
+      { at: '2026-10-20T06:00:00.000Z', kind: 'restart', label: 'Restart', by: 'ops@mims.com' },
+    ]);
   });
 
   it('reads revisions for a Container App', async () => {
@@ -240,5 +261,36 @@ describe('fetchReleases', () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('down'); }));
     const r = await fetchReleases('tok', { ...opts, isAppService: false });
     expect(r.sources).toEqual({ revisions: 'error' });
+  });
+});
+
+describe('parseActivityChanges', () => {
+  const rec = (op, resourceId, extra = {}) => ({
+    eventTimestamp: '2026-10-20T06:00:00Z', operationName: { value: op }, resourceId, status: { value: 'Succeeded' }, correlationId: 'c1', caller: 'a@b.com', ...extra,
+  });
+
+  it('keeps production site changes only: not slots, not other sites, not unsuccessful', () => {
+    const out = parseActivityChanges([
+      rec('Microsoft.Web/sites/config/write', `${SITE}/config/appsettings`),
+      rec('microsoft.web/sites/stop/action', SITE, { correlationId: 'c2' }),
+      rec('Microsoft.Web/sites/slots/restart/action', `${SITE}/slots/staging`, { correlationId: 'c3' }),
+      rec('Microsoft.Web/sites/restart/action', `${SITE}2`, { correlationId: 'c4' }),
+      rec('Microsoft.Web/sites/restart/action', SITE, { correlationId: 'c5', status: { value: 'Started' } }),
+      rec('Microsoft.Web/sites/config/write', `${SITE}/config/appsettings`),
+    ], SITE);
+    expect(out.map(c => c.kind)).toEqual(['config', 'stop']);
+  });
+
+  it('counts one portal save (appsettings + slotConfigNames) as one change', () => {
+    const out = parseActivityChanges([
+      rec('Microsoft.Web/sites/config/write', `${SITE}/config/appsettings`, { correlationId: 'a' }),
+      rec('Microsoft.Web/sites/config/write', `${SITE}/config/slotConfigNames`, { correlationId: 'b', eventTimestamp: '2026-10-20T06:00:20Z' }),
+      rec('Microsoft.Web/sites/config/write', `${SITE}/config/appsettings`, { correlationId: 'c', eventTimestamp: '2026-10-20T09:00:00Z' }),
+    ], SITE);
+    expect(out.map(c => c.at)).toEqual(['2026-10-20T06:00:00.000Z', '2026-10-20T09:00:00.000Z']);
+  });
+
+  it('ignores plan changes when the plan is unknown', () => {
+    expect(parseActivityChanges([rec('Microsoft.Web/serverfarms/write', '/x/serverfarms/p')], SITE)).toEqual([]);
   });
 });

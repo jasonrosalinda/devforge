@@ -156,7 +156,8 @@ export function useRcaReport({ appKey, getPayload, fileSuffix }: { appKey: strin
             await navigator.clipboard.write([
                 new ClipboardItem({
                     'text/html': new Blob([htmlBody], { type: 'text/html' }),
-                    'text/plain': new Blob([markdown], { type: 'text/plain' }),
+                    // A pasted image as base64 text is useless, so the plain copy leaves it out.
+                    'text/plain': new Blob([markdown.replace(/!\[[^\]]*\]\(data:[^)]*\)\n*/g, '')], { type: 'text/plain' }),
                 }),
             ]);
             toast.success('Copied for Teams');

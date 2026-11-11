@@ -623,6 +623,16 @@ export interface ReleaseEvent {
   message?: string
 }
 
+/** A production change that is not a release, from the Activity Log: who restarted,
+ *  stopped, reconfigured or rescaled the site. Values of changed settings are never logged. */
+export interface ActivityChange {
+  at: string
+  kind: 'restart' | 'stop' | 'start' | 'config' | 'site' | 'plan'
+  label: string
+  /** A person's UPN, or "automation (service principal)". */
+  by?: string
+}
+
 /** Where each source stood: `denied` is a 401/403 (no Reader role), not "no releases". */
 export type ReleaseSourceStatus = 'ok' | 'denied' | 'error'
 
@@ -632,9 +642,20 @@ export interface ReleaseResult {
   events: ReleaseEvent[]
   last: ReleaseEvent | null
   sources: Partial<Record<'activityLog' | 'kudu' | 'revisions', ReleaseSourceStatus>>
+  /** App Service only; absent on a Container App. */
+  changes?: ActivityChange[]
 }
 
 /** Per site, like restarts: the FE and the API ship on their own schedules. */
+/** One downstream target's failures in a window: calls, failed, and by result code. */
+export interface DownstreamFailure {
+  target: string
+  type: string
+  calls: number
+  failed: number
+  codes: Array<{ code: string; count: number }>
+}
+
 export interface ReleaseFetchResult {
   fe: ReleaseResult | null
   api: ReleaseResult | null
@@ -796,6 +817,8 @@ export interface IAzureMetricsAPI {
   fetchRestarts: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<RestartFetchResult>
   fetchReleases: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<ReleaseFetchResult>
   fetchCrashes: (opts: { appKey: string; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined; granularity?: string | undefined }) => Promise<CrashFetchResult>
+  /** Failing downstream calls by target and result code, for one site and window. */
+  fetchDownstream: (opts: { appKey: string; site: 'fe' | 'api'; config?: unknown; startIso: string; endIso: string }) => Promise<{ rows: DownstreamFailure[]; hiddenBrowserBlocked?: number; error?: string }>
   /** One endpoint's downstream calls. Per endpoint and on demand — see the handler. */
   fetchEndpointDetail: (opts: { appKey: string; endpoint: string; site: 'fe' | 'api'; range: string; config?: unknown; customStart?: string | undefined; customEnd?: string | undefined }) => Promise<EndpointDepsResult>
   /** The 5xx request records behind an Incident Timeline burst. */

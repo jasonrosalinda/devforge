@@ -59,6 +59,21 @@ function createWindow() {
 
     mainWindow.once('ready-to-show', () => mainWindow.show());
 
+    // A load that fails never paints, so ready-to-show never fires and the app sat invisible
+    // with only DevTools open (seen when Chromium's network service crashed mid-load).
+    // Retry the load a few times, and show the window regardless after a while.
+    let shownOnce = false;
+    let retries = 0;
+    mainWindow.once('show', () => { shownOnce = true; });
+    mainWindow.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+        // -3 is ERR_ABORTED: another navigation replaced this one, nothing failed.
+        if (!isMainFrame || code === -3 || mainWindow.isDestroyed()) return;
+        console.error(`❌ Window failed to load ${url}: ${desc} (${code})${retries < 3 ? ', retrying' : ''}`);
+        if (retries++ < 3) setTimeout(() => { if (!mainWindow.isDestroyed()) mainWindow.loadURL(url); }, 1000 * retries);
+        else mainWindow.show();
+    });
+    setTimeout(() => { if (!shownOnce && !mainWindow.isDestroyed()) mainWindow.show(); }, 15000);
+
     // Renderer reports the resolved theme so the native window buttons follow it.
     ipcMain.removeHandler('window:set-titlebar-theme');
     ipcMain.handle('window:set-titlebar-theme', (_e, theme) => {

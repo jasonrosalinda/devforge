@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCitation, renderSafeMarkdown } from "./safe-markdown";
+import { citationRoot, parseCitation, renderSafeMarkdown } from "./safe-markdown";
 
 describe("parseCitation", () => {
     it.each([
@@ -58,5 +58,20 @@ describe("renderSafeMarkdown", () => {
 
     it("keeps code blocks escaped", () => {
         expect(renderSafeMarkdown("```\n<b>x</b>\n```")).toContain("&lt;b&gt;x&lt;/b&gt;");
+    });
+});
+
+describe('citationRoot', () => {
+    const two = { repoRoot: 'C:/wt/app', otherRepoRoot: 'C:/wt/api', otherTarget: 'api' as const };
+    it('opens an @api/ citation in the second repository, without the prefix', () => {
+        expect(parseCitation('@api/Controllers/UserController.cs:91')).toEqual({ file: '@api/Controllers/UserController.cs', line: 91 });
+        expect(citationRoot('@api/Controllers/UserController.cs', two, 'app')).toEqual({ root: 'C:/wt/api', file: 'Controllers/UserController.cs' });
+    });
+    it('opens a plain or main-prefixed citation in the main repository', () => {
+        expect(citationRoot('src/a.ts', two, 'app')).toEqual({ root: 'C:/wt/app', file: 'src/a.ts' });
+        expect(citationRoot('@app/src/a.ts', two, 'app')).toEqual({ root: 'C:/wt/app', file: 'src/a.ts' });
+    });
+    it('leaves an unknown prefix alone in a one-repository run', () => {
+        expect(citationRoot('@api/x.cs', { repoRoot: 'C:/r' }, 'app')).toEqual({ root: 'C:/r', file: '@api/x.cs' });
     });
 });

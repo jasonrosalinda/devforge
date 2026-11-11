@@ -24,14 +24,14 @@ import type { RemarkResult, RemarkSeverity } from './appRemarks';
 // threshold, so a smaller number is easier for a residual to clear). CPU is
 // watched closely since it's the most common actionable signal; DB Memory
 // needs a much larger deviation before it's worth flagging at all.
-const CPU_SENSITIVITY = 2.0;
-const MEMORY_SENSITIVITY = 4.0;
-const DB_CPU_SENSITIVITY = 2.5;
-const DB_MEMORY_SENSITIVITY = 5.0;
+export const CPU_SENSITIVITY = 2.0;
+export const MEMORY_SENSITIVITY = 4.0;
+export const DB_CPU_SENSITIVITY = 2.5;
+export const DB_MEMORY_SENSITIVITY = 5.0;
 // 4xx/5xx rates are spikier by nature (one retry storm from one client can move
 // them hard) — parked between CPU and Memory rather than separately tuned per
 // the four request-error signals until there's a reason to split them further.
-const ERROR_RATE_SENSITIVITY = 3.0;
+export const ERROR_RATE_SENSITIVITY = 3.0;
 const DEFAULT_MIN_SAMPLES = 10;
 
 /** A statistical flag only stands when the reading is also high enough to matter:
@@ -50,6 +50,11 @@ export const DB_CPU_SPIKE_FLOOR: SpikeFloor = CPU_SPIKE_FLOOR;
  *  line (status.ts). Memory reported in MB always clears `minPct`, so for those
  *  apps the floor does nothing. */
 export const MEMORY_SPIKE_FLOOR: SpikeFloor = { minPct: 80, minRise: 10 };
+/** Error rates are mostly 0%, so the robust spread is near zero and one 0.1% bucket
+ *  scored as a spike: a quiet afternoon came out as six Warning episodes. A rate counts
+ *  from 5% — the 5xx burst rule (HTTP_5XX_RATE in appRemarks) — or 5 points over its
+ *  window average. */
+export const ERROR_RATE_SPIKE_FLOOR: SpikeFloor = { minPct: 5, minRise: 5 };
 // Guards only against literal divide-by-zero on a perfectly flat/linear series.
 const ROBUST_STDEV_EPSILON = 1e-9;
 const MAD_TO_STDEV = 1.4826;
@@ -166,10 +171,17 @@ export interface NamedMetricInput {
 /** Same keyed-by-timestamp alignment CombinedChart uses (azureMetricChart.tsx) for
  *  dbCpu/dbMemory: none of these share CPU's resource, so a missing bucket must
  *  not shift every later point the way positional indexing would. */
-function byTimeDetection(series: MetricSeries['series'], det: AnomalyDetectorResult): Map<string, MetricSample> {
-  const m = new Map<string, MetricSample>();
-  series.forEach((p, i) => m.set(p.t, { pct: p.v, flag: det.flags[i] ?? 0, score: det.scores[i] ?? 0 }));
+function byTimeDetection(series: MetricSeries['series'], det: AnomalyDetectorResult): Map<number, MetricSample> {
+  const m = new Map<number, MetricSample>();
+  series.forEach((p, i) => m.set(timeKey(p.t), { pct: p.v, flag: det.flags[i] ?? 0, score: det.scores[i] ?? 0 }));
   return m;
+}
+
+/** ARM writes `…T09:00:00.000Z`, App Insights `…T09:00:00Z`: keyed by the instant, not the
+ *  string. Keyed by string, the FE/API error rates never joined CPU's buckets, so this
+ *  detector silently ignored 4xx and 5xx. */
+function timeKey(t: string): number {
+  return Date.parse(t);
 }
 
 /** The resource-pressure signals `signalsFiring`/the pure-pressure severity
@@ -257,7 +269,8 @@ export function detectCorrelatedAnomalies(
 
   const rows: CorrelatedAnomalyRow[] = [];
   cpu.series.forEach(p => {
-    const cpuSample = cpuByTime.get(p.t)!;
+    const key = timeKey(p.t);
+    const cpuSample = cpuByTime.get(key)!;
     const metrics: Record<string, MetricSample> = { CPU: cpuSample };
     // Pressure-only count, used solely by the no-5xx fallback below — 4xx/5xx
     // are deliberately excluded here (see PRESSURE_METRIC_NAMES).
@@ -265,7 +278,7 @@ export function detectCorrelatedAnomalies(
     let scoreSum = cpuSample.score;
 
     for (const { name, map } of extraByTime) {
-      const sample = map.get(p.t);
+      const sample = map.get(key);
       if (sample) {
         metrics[name] = sample;
         if (sample.flag > 0 && PRESSURE_METRIC_NAMES.has(name)) signalsFiring++;
@@ -493,10 +506,10 @@ export function buildExtras(m: AppMetrics): NamedMetricInput[] {
     { name: 'Memory', series: m.memory.series, sensitivity: MEMORY_SENSITIVITY, floor: MEMORY_SPIKE_FLOOR },
     { name: 'DB CPU', series: m.dbCpu?.series, sensitivity: DB_CPU_SENSITIVITY, floor: DB_CPU_SPIKE_FLOOR },
     { name: 'DB Memory', series: m.dbMemory?.series, sensitivity: DB_MEMORY_SENSITIVITY, floor: MEMORY_SPIKE_FLOOR },
-    { name: 'FE 4xx', series: errorRateSeries(feOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY },
-    { name: 'FE 5xx', series: errorRateSeries(feOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY },
-    { name: 'API 4xx', series: errorRateSeries(apiOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY },
-    { name: 'API 5xx', series: errorRateSeries(apiOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY },
+    { name: 'FE 4xx', series: errorRateSeries(feOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY, floor: ERROR_RATE_SPIKE_FLOOR },
+    { name: 'FE 5xx', series: errorRateSeries(feOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY, floor: ERROR_RATE_SPIKE_FLOOR },
+    { name: 'API 4xx', series: errorRateSeries(apiOverall, 'c4'), sensitivity: ERROR_RATE_SENSITIVITY, floor: ERROR_RATE_SPIKE_FLOOR },
+    { name: 'API 5xx', series: errorRateSeries(apiOverall, 'c5'), sensitivity: ERROR_RATE_SENSITIVITY, floor: ERROR_RATE_SPIKE_FLOOR },
   ];
 }
 

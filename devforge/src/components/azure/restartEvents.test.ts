@@ -154,6 +154,10 @@ describe('parseRestartHeadline', () => {
       { cause: 'Platform Healing Your App', count: 1 },
     ]);
   });
+
+  it('reads a figure wrapped in double backticks', () => {
+    expect(parseRestartHeadline('We analyzed ``3`` Kudu Kill Events.')).toEqual([{ cause: expect.stringMatching(/^Kudu Kill/), count: 3 }]);
+  });
 });
 
 describe('prose fallback', () => {

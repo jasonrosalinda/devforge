@@ -899,3 +899,41 @@ export function CombinedChart({
     </ResponsiveContainer>
   );
 }
+
+/**
+ * Workers serving requests per bucket — capacity over time. Steps, not a smoothed line: a
+ * worker count changes in whole units at a moment (a scale-in, a recycle, a kill), and a
+ * slope between 3 and 2 would claim 2.5 workers existed. FE solid, API dashed.
+ */
+const WORKER_FE = INSTANCE_PALETTE[0] ?? UI.info;
+const WORKER_API = INSTANCE_PALETTE[3] ?? UI.info;
+
+export function WorkerCountChart({
+  rows, height = 110, syncId,
+}: {
+  rows: Array<{ t: string; fe: number | null; api: number | null }>;
+  height?: number;
+  syncId?: string | undefined;
+}) {
+  if (!rows.length) return null;
+  const hasApi = rows.some(r => r.api != null);
+  const max = Math.max(1, ...rows.flatMap(r => [r.fe ?? 0, r.api ?? 0]));
+  const spanMs = rows.length > 1 ? Date.parse(rows[rows.length - 1]!.t) - Date.parse(rows[0]!.t) : 0;
+  return (
+    <ResponsiveContainer width="100%" height={height} debounce={100}>
+      <AreaChart data={rows} {...syncProps(syncId)} margin={{ top: 4, right: 25, bottom: 0, left: -16 }}>
+        <XAxis dataKey="t" tickFormatter={(v: string) => formatTick(v, spanMs)} tick={{ fill: UI.textMuted, fontSize: 10 }} minTickGap={40} />
+        <YAxis allowDecimals={false} domain={[0, max + 1]} tick={{ fill: UI.textMuted, fontSize: 10 }} />
+        <Tooltip
+          contentStyle={{ background: UI.surface, border: `1px solid ${UI.border}`, borderRadius: 6, fontSize: 12 }}
+          labelStyle={{ color: UI.textMuted }}
+          labelFormatter={(label: unknown) => new Date(String(label)).toLocaleString('en-GB', { ...SGT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+          formatter={(val: unknown, key: unknown) => [`${val} worker${val === 1 ? '' : 's'}`, key === 'api' ? 'API' : hasApi ? 'Frontend' : 'Workers']}
+        />
+        <ReleaseMarkers stamps={rows.map(r => r.t)} />
+        <Area type="stepAfter" dataKey="fe" stroke={WORKER_FE} fill={WORKER_FE} fillOpacity={0.12} strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls={false} />
+        {hasApi && <Area type="stepAfter" dataKey="api" stroke={WORKER_API} fill="none" strokeDasharray="5 3" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls={false} />}
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}

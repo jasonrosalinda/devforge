@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fetchSnat: (opts) => ipcRenderer.invoke('azure-metrics:fetch-snat', opts),
         fetchRestarts: (opts) => ipcRenderer.invoke('azure-metrics:fetch-restarts', opts),
         fetchReleases: (opts) => ipcRenderer.invoke('azure-metrics:fetch-releases', opts),
+        fetchDownstream: (opts) => ipcRenderer.invoke('azure-metrics:fetch-downstream', opts),
         fetchCrashes: (opts) => ipcRenderer.invoke('azure-metrics:fetch-crashes', opts),
         fetchEndpointDetail: (opts) => ipcRenderer.invoke('azure-metrics:fetch-endpoint-detail', opts),
         fetchFiveXxRequests: (opts) => ipcRenderer.invoke('azure-metrics:fetch-5xx-requests', opts),

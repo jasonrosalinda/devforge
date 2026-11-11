@@ -1,7 +1,8 @@
 import { createContext, useContext } from 'react';
-import { ReferenceLine } from 'recharts';
+import { ReferenceArea, ReferenceLine } from 'recharts';
 import type { ReleaseEvent, ReleaseResult } from '@shared/types/azureMetrics.types';
 import { RELEASE_COLORS } from '@/lib/chart-colors';
+import { circled, type EvidenceMarker } from '@/lib/evidence-markers';
 import { formatSgt } from './rcaHtml';
 
 /**
@@ -19,9 +20,24 @@ export interface ReleaseMarkerSet {
   api: ReleaseEvent[];
   /** Labels name the site only when the card has two of them. */
   hasApi: boolean;
+  /** App Investigation only: its numbered Evidences bullets, drawn at their moments. */
+  evidence?: EvidenceMarker[] | undefined;
 }
 
 const NONE: ReleaseMarkerSet = { fe: [], api: [], hasApi: false };
+const EVIDENCE_COLOR = 'hsl(var(--primary))';
+
+/** Each evidence marker snapped to this chart's buckets; dropped when it falls outside. Pure; exported for tests. */
+export function evidenceMarks(markers: readonly EvidenceMarker[] | undefined, stamps: readonly string[]): Array<{ n: number; x: string; x2: string | null; label: string }> {
+  const out: Array<{ n: number; x: string; x2: string | null; label: string }> = [];
+  for (const m of markers ?? []) {
+    const x = snapToStamp(stamps, m.atMs);
+    if (!x) continue;
+    const x2 = m.endMs != null ? snapToStamp(stamps, m.endMs) : null;
+    out.push({ n: m.n, x, x2: x2 && x2 !== x ? x2 : null, label: m.label });
+  }
+  return out;
+}
 
 export const ReleaseMarkersContext = createContext<ReleaseMarkerSet>(NONE);
 
@@ -102,9 +118,23 @@ export function ReleaseMarkers({ stamps, yAxisId, showLabel = false }: {
   showLabel?: boolean;
 }) {
   const set = useContext(ReleaseMarkersContext);
-  if (!set.fe.length && !set.api.length) return null;
+  if (!set.fe.length && !set.api.length && !set.evidence?.length) return null;
+  const axis = yAxisId ? { yAxisId } : {};
   return (
     <>
+      {/* Numbered on every chart, not only the large one: the number is what ties the mark to its bullet. */}
+      {evidenceMarks(set.evidence, stamps).map(m => [
+        m.x2 && <ReferenceArea key={`eva_${m.n}`} {...axis} x1={m.x} x2={m.x2} fill={EVIDENCE_COLOR} fillOpacity={0.04} strokeOpacity={0} ifOverflow="hidden" />,
+        <ReferenceLine
+          key={`ev_${m.n}`}
+          x={m.x}
+          {...axis}
+          stroke={EVIDENCE_COLOR}
+          strokeWidth={1}
+          strokeOpacity={0.7}
+          label={{ value: circled(m.n), position: 'insideTopRight' as const, fill: EVIDENCE_COLOR, fontSize: 11, fontWeight: 600 }}
+        />,
+      ])}
       {markerLines(set, stamps).map(m => (
         <ReferenceLine
           key={`${m.site}_${m.x}`}

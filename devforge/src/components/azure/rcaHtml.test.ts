@@ -439,6 +439,13 @@ describe('buildRcaWordHtml', () => {
     expect(html).toContain('1. Background');
   });
 
+  it('keeps the investigation charts image (a data URL) in the PDF and Word exports', () => {
+    const md = '## Summary\n\nx\n\n## Evidences\n\n![Evidence charts](data:image/png;base64,iVBORw0KGgo=)\n\n- a';
+    for (const html of [buildRcaWordHtml(md, meta), buildRcaPrintHtml(md, meta)]) {
+      expect(html).toContain('<img src="data:image/png;base64,iVBORw0KGgo=" alt="Evidence charts"');
+    }
+  });
+
   // Same rule as the PDF: the summary is the shareable blurb, not part of the report.
   it('excludes the Quick Summary', () => {
     const html = buildRcaWordHtml('## Quick Summary\n\nDown 30 minutes.\n\n# RCA Report: X\n\nDetail.', meta);

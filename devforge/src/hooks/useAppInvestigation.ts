@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import type {
-    InvestigationInterpretation, InvestigationMeta, InvestigationProgress, InvestigationRefusal,
+    EarlierInvestigation, InvestigationEpisode, InvestigationInterpretation, InvestigationMeta, InvestigationProgress, InvestigationRefusal, UptimeIncident,
 } from '@shared/types/app-investigation.types';
 import type { AzureSettings } from '@/types/settings.types';
 import { newRunId } from '@/lib/rca-report';
@@ -59,7 +59,7 @@ export default function useAppInvestigation() {
         setState(s => (s.interpretation ? { ...s, interpretation: { ...s.interpretation, ...patch } } : s));
     }, []);
 
-    const run = useCallback(async (args: { config: AzureSettings; repoPath: string; images?: Array<{ name: string; dataUrl: string }> }) => {
+    const run = useCallback(async (args: { config: AzureSettings; repoPath: string; images?: Array<{ name: string; dataUrl: string }>; uptimeRobotIncidents?: UptimeIncident[] | undefined; otherRepoPath?: string | undefined; earlier?: EarlierInvestigation[] | undefined; followUp?: boolean | undefined; episodes?: InvestigationEpisode[] | undefined }) => {
         const { query, interpretation } = state;
         if (!interpretation) return;
         const runId = newRunId();
@@ -68,13 +68,13 @@ export default function useAppInvestigation() {
 
         const mine = (d: { runId?: string | null }) => d.runId === runId;
         const offChunk = window.electronAPI.appInvestigation.onChunk((d) => {
-            if (mine(d)) setState(s => ({ ...s, stream: s.stream + d.chunk }));
+            if (mine(d)) setState(s => ({ ...s, stream: d.reset ? d.chunk : s.stream + d.chunk }));
         });
         const offProgress = window.electronAPI.appInvestigation.onProgress((d) => {
             if (mine(d)) setState(s => ({ ...s, trail: [...s.trail, d].slice(-MAX_TRAIL) }));
         });
         try {
-            const res = await window.electronAPI.appInvestigation.run({ runId, query, interpretation, config: args.config, repoPath: args.repoPath, images: args.images });
+            const res = await window.electronAPI.appInvestigation.run({ runId, query, interpretation, config: args.config, repoPath: args.repoPath, images: args.images, uptimeRobotIncidents: args.uptimeRobotIncidents, otherRepoPath: args.otherRepoPath, earlier: args.earlier, followUp: args.followUp, episodes: args.episodes });
             if (runIdRef.current !== runId) return;
             if (res.success) {
                 setState(s => ({

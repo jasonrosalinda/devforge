@@ -124,6 +124,7 @@ const {
 
 // SNAT port charts come from the App Service detector API — see azure-snat.cjs.
 const { fetchSnatCharts } = require('./azure-snat.cjs');
+const { withoutLoadTest } = require('./ai-query.cjs');
 // Restart events — same detector plumbing, but per site rather than per plan.
 const { fetchRestartCharts } = require('./azure-restarts.cjs');
 const { fetchAppReleases, siteResourceId: resourceId } = require('./azure-releases.cjs');
@@ -459,12 +460,12 @@ async function getAvailabilityFromAppInsights(appId, credential, range, granular
       fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: chartQuery, timespan }),
+        body: JSON.stringify({ query: withoutLoadTest(chartQuery), timespan }),
       }),
       fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: intervalQuery, timespan }),
+        body: JSON.stringify({ query: withoutLoadTest(intervalQuery), timespan }),
       }),
     ]);
     if (!chartRes.ok) return null;
@@ -507,7 +508,7 @@ async function getFailedRequestsByInstance(appId, credential, range, customStart
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
+      body: JSON.stringify({ query: withoutLoadTest(query), timespan }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -538,7 +539,7 @@ async function getContainerAppTimeSeries(appId, credential, range, customStart, 
       `requests | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
       `requests | where toint(resultCode) >= 400 and toint(resultCode) < 500 | summarize count=count() by bin(timestamp, ${bin}) | order by timestamp asc`,
     ];
-    const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: queries.join(';\n'), timespan }) });
+    const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(queries.join(';\n')), timespan }) });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.error) return null;
@@ -605,7 +606,7 @@ async function fetchEndpointDetail(appId, credential, endpoint, range, customSta
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
+      body: JSON.stringify({ query: withoutLoadTest(query), timespan }),
     });
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
@@ -767,7 +768,7 @@ async function fetchFiveXxRequests(appId, credential, startIso, endIso, limit = 
   const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
+    body: JSON.stringify({ query: withoutLoadTest(query), timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
@@ -818,7 +819,7 @@ async function fetchStatusBreakdown(appId, credential, cls, startIso, endIso, li
   const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
+    body: JSON.stringify({ query: withoutLoadTest(query), timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
@@ -836,6 +837,72 @@ async function fetchStatusBreakdown(appId, credential, cls, startIso, endIso, li
       bots: Number(bots) || 0,
     })),
   };
+}
+
+/**
+ * The downstream calls that failed in a window, by target: how many calls it got, how many
+ * failed and with which result codes — "ssoapi.mims.com: 4,482 of 9,000 failed, 429 ×4,482"
+ * is a dependency throttling the site, which a 5xx count alone cannot say. Busiest failures
+ * first. Sampling-corrected (sum of itemCount).
+ */
+async function fetchDownstreamFailures(appId, credential, startIso, endIso, limit = DOWNSTREAM_ROWS) {
+  const aiToken = (await credential.getToken('https://api.applicationinsights.io/.default')).token;
+  const query = [
+    'dependencies',
+    '| summarize calls=sum(itemCount), failed=sumif(itemCount, success == false) by target, type',
+    '| where failed > 0',
+    '| join kind=inner (dependencies | where success == false',
+    "    | summarize n=sum(itemCount) by target, type, code=iff(isempty(resultCode), '(none)', tostring(resultCode))",
+    "    | summarize codes=make_list(pack('code', code, 'n', n)) by target, type) on target, type",
+    '| project target, type, calls, failed, codes',
+    // Fetched wider than shown: blocked browser calls are dropped before the cut.
+    `| top ${limit * 3} by failed desc`,
+  ].join(' ');
+  const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: withoutLoadTest(query), timespan: `${new Date(startIso).toISOString()}/${new Date(endIso).toISOString()}` }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${txt}`.slice(0, 300));
+  }
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  const all = parseDownstreamRows(data.tables?.[0]?.rows);
+  const kept = all.filter(r => !browserBlocked(r));
+  return { rows: kept.slice(0, limit), hiddenBrowserBlocked: all.length - kept.length };
+}
+
+const DOWNSTREAM_ROWS = 15;
+
+/**
+ * A browser-side call (Fetch/Ajax, from the JavaScript SDK) whose failures are almost all
+ * status 0: the browser or an ad blocker cancelled it — Google Analytics, ad servers — so it
+ * says nothing about the site's own backends. Pure; exported for tests.
+ */
+function browserBlocked(r) {
+  if (!/^(fetch|ajax)$/i.test(r.type) || r.failed <= 0) return false;
+  const zero = r.codes.filter(c => c.code === '0' || c.code === '(none)').reduce((n, c) => n + c.count, 0);
+  return zero / r.failed >= 0.95;
+}
+
+/** Rows [target, type, calls, failed, codes] → objects, codes busiest first. Pure; exported for tests. */
+function parseDownstreamRows(rows) {
+  return (rows ?? []).map(([target, type, calls, failed, codes]) => {
+    let list = codes;
+    // A dynamic column arrives as JSON text.
+    if (typeof list === 'string') { try { list = JSON.parse(list); } catch { list = []; } }
+    return {
+      target: target == null ? '' : String(target),
+      type: type == null ? '' : String(type),
+      calls: Number(calls) || 0,
+      failed: Number(failed) || 0,
+      codes: (Array.isArray(list) ? list : [])
+        .map(c => ({ code: String(c?.code ?? '(none)'), count: Number(c?.n) || 0 }))
+        .sort((a, b) => b.count - a.count),
+    };
+  });
 }
 
 /** The App Insights app id for one site of a configured app: the id from Settings, else
@@ -1015,7 +1082,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   async function runQuery(query) {
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query, timespan }) });
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(query), timespan }) });
       if (!res.ok) { const t = await res.text().catch(() => ''); return { error: `${res.status}: ${t}` }; }
       const data = await res.json();
       if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
@@ -1027,7 +1094,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
 
   async function runQueryFull(query) {
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query, timespan }) });
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(query), timespan }) });
       if (!res.ok) { const t = await res.text().catch(() => ''); return { error: `${res.status}: ${t}` }; }
       const data = await res.json();
       if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
@@ -1041,7 +1108,7 @@ async function getRequestInsights(appId, credential, range, customStart, customE
   async function runBatch(queries) {
     const combined = queries.join(';\n');
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: combined, timespan }) });
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(combined), timespan }) });
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
         return queries.map(() => ({ error: `${res.status}: ${txt}` }));
@@ -2025,7 +2092,7 @@ async function getSite5xxSeries(appId, credential, customStart, customEnd) {
   const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, timespan: `${new Date(customStart).toISOString()}/${new Date(customEnd).toISOString()}` }),
+    body: JSON.stringify({ query: withoutLoadTest(query), timespan: `${new Date(customStart).toISOString()}/${new Date(customEnd).toISOString()}` }),
   });
   if (!res.ok) throw new Error(`App Insights ${res.status}`);
   const rows = (await res.json()).tables?.[0]?.rows ?? [];
@@ -2132,7 +2199,7 @@ async function aiBatchRunner(appId, credential, range, customStart, customEnd) {
 
   async function runBatch(queries) {
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: queries.join(';\n'), timespan }) });
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(queries.join(';\n')), timespan }) });
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
         return queries.map(() => ({ error: `${res.status}: ${txt}` }));
@@ -2206,7 +2273,7 @@ function makeRunQuery(appId, token, timespan) {
   };
   return async function runQuery(query) {
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query, timespan }) });
+      const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ query: withoutLoadTest(query), timespan }) });
       if (!res.ok) { const t = await res.text().catch(() => ''); return { error: `${res.status}: ${t}` }; }
       const data = await res.json();
       if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
@@ -2467,6 +2534,10 @@ const handler = (_mainWindow) => {
   ipcMain.handle('azure-metrics:fetch-5xx-requests', (_event, opts) =>
     withSiteAppId(opts, { rows: [], total: 0 }, (appId, cred) => fetchFiveXxRequests(appId, cred, opts.startIso, opts.endIso)));
 
+  // Failing downstream calls by target and result code. Not cached: asked for on demand.
+  ipcMain.handle('azure-metrics:fetch-downstream', (_event, opts) =>
+    withSiteAppId(opts, { rows: [] }, (appId, cred) => fetchDownstreamFailures(appId, cred, opts.startIso, opts.endIso)));
+
   // The codes and endpoints behind an active 4xx/5xx remark. Not cached, for the same reason.
   ipcMain.handle('azure-metrics:fetch-status-breakdown', (_event, opts) =>
     withSiteAppId(opts, { rows: [] }, (appId, cred) =>
@@ -2705,5 +2776,8 @@ handler._sqlDbResourceId = sqlDbResourceId;
 handler._getPlanInfo = getPlanInfo;
 handler._resolveSiteAppId = resolveSiteAppId;
 handler._RC_5XX_EXPR = RC_5XX_EXPR;
+handler._parseDownstreamRows = parseDownstreamRows;
+handler._browserBlocked = browserBlocked;
+handler._fetchDownstreamFailures = fetchDownstreamFailures;
 
 module.exports = handler;

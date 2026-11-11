@@ -11,8 +11,9 @@ import { UpdateIndicator } from "@/components/updater/update-indicator";
 import { cn } from "@/lib/utils";
 
 import { requestHealthCheckReload } from "@/lib/health-check-reload";
+import { onOpenInvestigation } from "@/lib/investigation-request";
 
-import { HEALTH_CHECK_PAGE, HOME_PAGE, TELEMETRY_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
+import { APP_INVESTIGATION_PAGE, HEALTH_CHECK_PAGE, HOME_PAGE, TELEMETRY_PAGE, findPage, pages, renderPage } from "./routes/page-routes";
 import { AppHeader } from "./components/layout/app-header";
 import { AppSidebar } from "./components/layout/app-sidebar";
 import { CommandPalette } from "./components/layout/command-palette";
@@ -48,6 +49,9 @@ export default function App() {
       openPage(HEALTH_CHECK_PAGE);
     }
   }), [openPage]);
+
+  // "Investigate" on an App Health Check card; the page itself picks up the request.
+  useEffect(() => onOpenInvestigation(() => openPage(APP_INVESTIGATION_PAGE)), [openPage]);
 
   useEffect(() => {
     if (!focusPanelRef.current) return;

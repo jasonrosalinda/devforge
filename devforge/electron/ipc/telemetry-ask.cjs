@@ -9,6 +9,7 @@
 
 const os = require('os');
 const { runClaudeCli, killTree, leanFlags } = require('./claude-cli.cjs');
+const { withoutLoadTest } = require('./ai-query.cjs');
 
 const AI_SCOPE = 'https://api.applicationinsights.io/.default';
 const ARM_SCOPE = 'https://management.azure.com/.default';
@@ -205,7 +206,8 @@ function guardKql(kql) {
  * One query against App Insights. Unlike makeRunQuery in azure-metrics.cjs this keeps
  * the column types — the renderer needs them to pick a chart.
  */
-async function runKql({ appId, token, kql, startIso, endIso, signal, timeoutMs = QUERY_TIMEOUT_MS }) {
+// Off for Ask Telemetry (a query runs exactly as the engineer wrote it); on for App Investigation's follow-ups.
+async function runKql({ appId, token, kql, startIso, endIso, signal, timeoutMs = QUERY_TIMEOUT_MS, excludeLoadTest = false }) {
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   if (signal) {
@@ -219,7 +221,7 @@ async function runKql({ appId, token, kql, startIso, endIso, signal, timeoutMs =
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-ms-app': 'devforge' },
-      body: JSON.stringify({ query: kql, timespan: `${startIso}/${endIso}` }),
+      body: JSON.stringify({ query: excludeLoadTest ? withoutLoadTest(kql) : kql, timespan: `${startIso}/${endIso}` }),
       signal: controller.signal,
     });
     if (!res.ok) {

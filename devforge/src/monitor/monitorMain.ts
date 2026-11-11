@@ -19,6 +19,7 @@ import {
   releaseAlertBody, watchKey,
 } from './releaseAlerts';
 import { CERT_CHECK_MS, certAlertLines } from './certAlerts';
+import { EVENT_POLL_MS, SNAT_WINDOW_MS, diffEvents, eventWindow, rebase, type EventWatch } from './eventAlerts';
 import type { CertStatus } from '@shared/types/certs.types';
 
 const WINDOW_MS = 6 * 3_600_000;
@@ -38,6 +39,10 @@ let releaseWatch = emptyReleaseWatch();
 // Certificate expiry, by host; checked once a day.
 let certLastRun: number | undefined;
 let certState: Record<string, CertStatus | undefined> = {};
+// Restart and SNAT detector alerts, by app; polled every EVENT_POLL_MS, not every tick.
+const eventWatch: Record<string, EventWatch> = {};
+const eventLastPoll: Record<string, number> = {};
+const eventAnchor: Record<string, number> = {};
 
 /** An IPC rejection arrives as "Error invoking remote method '…': Error: <message>". */
 function ipcErrorMessage(e: unknown): string {
@@ -105,6 +110,26 @@ async function tick() {
       previous[key] = next;
       if (lines.length) {
         await window.electronAPI.backgroundMonitor.alert({ title: `${label} — health alert`, body: lines.join('\n') });
+      }
+      if (m.type === 'appservice' && Date.now() - (eventLastPoll[key] ?? 0) >= EVENT_POLL_MS) {
+        const nowMs = Date.now();
+        eventLastPoll[key] = nowMs;
+        const win = eventWindow(eventAnchor[key], nowMs);
+        const base = { appKey: key, range: 'custom', config: azure, customEnd };
+        const restartsFrom = (ms: number) => window.electronAPI.azureMetrics.fetchRestarts({ ...base, customStart: new Date(ms).toISOString() }).catch(() => null);
+        // A failed detector call keeps the last state, so its next good read is not a flood.
+        const [restarts, snat] = await Promise.all([
+          restartsFrom(eventAnchor[key] ?? win.anchorMs),
+          window.electronAPI.azureMetrics.fetchSnat({ ...base, customStart: new Date(nowMs - SNAT_WINDOW_MS).toISOString() }).catch(() => null),
+        ]);
+        const events = diffEvents(eventWatch[key], restarts, snat);
+        eventWatch[key] = events.next;
+        if (events.lines.length) {
+          await window.electronAPI.backgroundMonitor.alert({ title: `${label} — health alert`, body: events.lines.join('\n') });
+        }
+        // Checked against the old start first, so nothing between the two is lost; then re-read from the new one.
+        if (win.moved) eventWatch[key] = rebase(eventWatch[key]!, await restartsFrom(win.anchorMs));
+        eventAnchor[key] = win.anchorMs;
       }
     }));
     await checkReleases(azure, keys);

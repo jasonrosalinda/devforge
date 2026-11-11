@@ -36,6 +36,20 @@ const SWAP_OPS = new Set([
   'microsoft.web/sites/slots/slotsswap/action',
 ]);
 
+// Production changes that are not releases, from the same Activity Log records: what a
+// person or automation did to the site or its plan. "Was it someone, or the platform?"
+// Kudu kills and platform healing are not here; the restart detector has those.
+const SITE_CHANGE_OPS = {
+  'microsoft.web/sites/restart/action': { kind: 'restart', label: 'Restart' },
+  'microsoft.web/sites/stop/action': { kind: 'stop', label: 'Stop' },
+  'microsoft.web/sites/start/action': { kind: 'start', label: 'Start' },
+  'microsoft.web/sites/config/write': { kind: 'config', label: 'Configuration change (app settings, connection strings or site config)' },
+  'microsoft.web/sites/write': { kind: 'site', label: 'Site settings change' },
+};
+const PLAN_CHANGE_OPS = {
+  'microsoft.web/serverfarms/write': { kind: 'plan', label: 'App Service plan change (scale or pricing tier)' },
+};
+
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Kudu deployment status for "Success". */
@@ -86,6 +100,41 @@ function parseActivitySwaps(records, siteResId) {
     });
   }
   return out;
+}
+
+/**
+ * Restarts, stop/start, config writes and plan changes on one production site, from
+ * Activity Log records. Only the site itself (a slot's change is not production) and,
+ * when known, its own App Service plan. Pure.
+ */
+function parseActivityChanges(records, siteResId, planResId = null) {
+  const site = siteResId.toLowerCase();
+  const plan = planResId ? planResId.toLowerCase() : null;
+  const seen = new Set();
+  const out = [];
+  for (const r of records ?? []) {
+    if (r?.status?.value !== 'Succeeded') continue;
+    const op = String(r?.operationName?.value ?? '').toLowerCase();
+    const rid = String(r?.resourceId ?? '').toLowerCase();
+    // config/write is logged on …/sites/x/config/appsettings; the rest on the site itself.
+    const onSite = rid === site || (op.startsWith('microsoft.web/sites/config/') && rid.startsWith(`${site}/config`));
+    const hit = (onSite && SITE_CHANGE_OPS[op]) || (plan && rid === plan && PLAN_CHANGE_OPS[op]);
+    if (!hit) continue;
+    const key = r.correlationId ? `${r.correlationId}|${op}` : null;
+    if (key) { if (seen.has(key)) continue; seen.add(key); }
+    const at = new Date(r.eventTimestamp);
+    if (Number.isNaN(at.getTime())) continue;
+    out.push({
+      at: at.toISOString(),
+      kind: hit.kind,
+      label: hit.label,
+      // A bare object id is a service principal: automation, not a person.
+      by: r.caller ? (GUID.test(r.caller) ? 'automation (service principal)' : r.caller) : undefined,
+    });
+  }
+  // One portal save writes appsettings and slotConfigNames separately: one change, not two.
+  return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    .filter((c, i, all) => !all.slice(0, i).some(p => p.kind === c.kind && Date.parse(c.at) - Date.parse(p.at) < COLLAPSE_MS));
 }
 
 /** The pipeline's JSON message, or null for a plain-text one ("OneDeploy"). */
@@ -167,7 +216,8 @@ function mergeReleases(...lists) {
   return merged.map(ev => Object.fromEntries(Object.entries(ev).filter(([, v]) => v !== undefined)));
 }
 
-async function fetchActivitySwaps(token, { subscriptionId, resourceGroup, siteResId, startIso, endIso }) {
+/** Every Activity Log record for the resource group in the range; swaps and changes are parsed from them. */
+async function fetchActivityRecords(token, { subscriptionId, resourceGroup, startIso, endIso }) {
   const filter = `eventTimestamp ge '${startIso}' and eventTimestamp le '${endIso}' and resourceGroupName eq '${resourceGroup}'`;
   let url = `${ARM}/subscriptions/${subscriptionId}/providers/Microsoft.Insights/eventtypes/management/values` +
     `?api-version=${ACTIVITY_API_VERSION}&$filter=${encodeURIComponent(filter)}` +
@@ -177,13 +227,19 @@ async function fetchActivitySwaps(token, { subscriptionId, resourceGroup, siteRe
     const { status, json } = await armGet(url, token);
     if (!json) {
       // A later page failing still leaves the earlier ones usable.
-      if (page === 0) return { status: sourceStatus(status), events: [] };
+      if (page === 0) return { status: sourceStatus(status), records: [] };
       break;
     }
     records.push(...(json.value ?? []));
     url = json.nextLink || null;
   }
-  return { status: 'ok', events: parseActivitySwaps(records, siteResId) };
+  return { status: 'ok', records };
+}
+
+/** The site's App Service plan id, so plan changes can be matched; null when unreadable. */
+async function fetchPlanId(token, siteResId) {
+  const { json } = await armGet(`${ARM}${siteResId}?api-version=${KUDU_API_VERSION}`, token);
+  return json?.properties?.serverFarmId ?? null;
 }
 
 async function fetchKuduDeployments(token, siteResId) {
@@ -215,13 +271,16 @@ async function fetchReleases(token, { subscriptionId, resourceGroup, siteResId, 
 
   let parts;
   let sources;
+  let changes = [];
   if (isAppService) {
-    const [activity, kudu] = await Promise.all([
-      fetchActivitySwaps(token, { subscriptionId, resourceGroup, siteResId, startIso: queryStartIso, endIso })
-        .catch(() => ({ status: 'error', events: [] })),
+    const [activity, kudu, planResId] = await Promise.all([
+      fetchActivityRecords(token, { subscriptionId, resourceGroup, startIso: queryStartIso, endIso })
+        .catch(() => ({ status: 'error', records: [] })),
       fetchKuduDeployments(token, siteResId).catch(() => ({ status: 'error', events: [] })),
+      fetchPlanId(token, siteResId).catch(() => null),
     ]);
-    parts = [activity.events, kudu.events];
+    parts = [parseActivitySwaps(activity.records, siteResId), kudu.events];
+    changes = parseActivityChanges(activity.records, siteResId, planResId).filter(c => Date.parse(c.at) <= endMs).slice(-MAX_EVENTS);
     sources = { activityLog: activity.status, kudu: kudu.status };
   } else {
     const revisions = await fetchRevisions(token, siteResId).catch(() => ({ status: 'error', events: [] }));
@@ -231,7 +290,7 @@ async function fetchReleases(token, { subscriptionId, resourceGroup, siteResId, 
 
   // Kudu's history is not windowed, so later-than-window records are cut here.
   const events = mergeReleases(...parts).filter(ev => Date.parse(ev.at) <= endMs).slice(-MAX_EVENTS);
-  return { events, last: events[events.length - 1] ?? null, sources };
+  return { events, last: events[events.length - 1] ?? null, sources, changes };
 }
 
 function siteResourceId(subscriptionId, site) {
@@ -265,6 +324,7 @@ module.exports = {
   LOOKBACK_MS,
   MAX_ACTIVITY_PAGES,
   parseActivitySwaps,
+  parseActivityChanges,
   parseKuduDeployments,
   parseRevisions,
   mergeReleases,

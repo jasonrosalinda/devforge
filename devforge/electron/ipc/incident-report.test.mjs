@@ -17,7 +17,24 @@ const {
   _detectBursts: detectBursts,
   _restartEvents: restartEvents,
   _topFrames: topFrames,
+  _siteSnatSection: siteSnatSection,
+  _siteSnatReport: siteSnatReport,
+  _meanOf: meanOf,
+  _anomalyEpisodesSection: anomalyEpisodesSection,
+  _baselineSection: baselineSection,
+  _baselinePeriods: baselinePeriods,
 } = handler;
+
+describe('meanOf', () => {
+  // An API with no health-check path publishes HealthCheckStatus as nulls: the report printed
+  // "Availability 0.00% | 100.00% (min)" because the average counted them as 0 and the min as 100.
+  it('averages only the points that carry a value, and is null when none do', () => {
+    expect(meanOf([{ average: null }, { average: null }], 'average')).toBeNull();
+    expect(meanOf([{ average: 100 }, { average: null }, { average: 50 }], 'average')).toBe(75);
+    expect(meanOf([], 'average')).toBeNull();
+    expect(meanOf(undefined, 'average')).toBeNull();
+  });
+});
 
 // The model sometimes appends an acknowledgement that it disregarded the
 // environment's caveman hook. The prompt forbids it, but prompt compliance is not
@@ -366,6 +383,12 @@ describe('detectBursts', () => {
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ start: Date.parse(t(5)), end: Date.parse(t(15)), failed: 160, total: 2000 });
     expect(out[0].peak).toBeCloseTo(0.1);
+  });
+
+  it('ignores a thin bucket: 1 failure in 10 requests is noise, 20 requests is not', () => {
+    expect(detectBursts([[t(0), 10, 5]])).toEqual([]);
+    expect(detectBursts([[t(0), 19, 19]])).toEqual([]);
+    expect(detectBursts([[t(0), 20, 2]])).toHaveLength(1);
   });
 
   it('keeps separate bursts apart', () => {
@@ -1035,5 +1058,119 @@ describe('rcaReportMarkdown', () => {
     expect(called).toBe(1);
     expect(stages[0]).toMatch(/Authenticating/);
     void md;
+  });
+
+  it('uses the episodes the page charts instead of the report\'s own', async () => {
+    const data = makeData();
+    data.episodes = [{ startT: '2026-11-10T09:05:00Z', endT: '2026-11-10T09:05:00Z', peakSeverity: 'Warning', bucketCount: 1, metricsInvolved: ['API 5xx'], peakValues: { 'API 5xx': 0.1 }, incidentType: 'noise' }];
+    const collect = async () => ({ data, anomaly: computeAnomalyScore(data), hasAppInsights: true, apiData: null, apiName: null });
+    const md = await handler._rcaReportMarkdown({
+      appName: 'a', resourceGroup: 'rg', startMs: Date.parse('2026-11-10T11:00:00Z'), endMs: Date.parse('2026-11-10T13:00:00Z'),
+      episodes: [{ startT: '2026-11-10T12:00:00Z', endT: '2026-11-10T12:20:00Z', peakSeverity: 'Critical', bucketCount: 21, metricsInvolved: ['CPU', 'API 5xx'], peakValues: { CPU: 99, 'API 5xx': 13.6 }, incidentType: 'API errors under app CPU pressure' }],
+    }, () => {}, collect);
+    expect(md).toContain('| 2026-11-10 20:00 SGT | 2026-11-10 20:20 SGT | Critical | 21 | CPU 99.0%, API 5xx 13.6% |');
+    expect(md).not.toContain('noise');
+  });
+});
+
+describe('SNAT ports section', () => {
+  const pt = (t, count) => ({ t, count });
+  const snat = (failed) => ({
+    charts: [
+      { title: 'SNAT port usage for TCP protocol', series: [
+        { name: 'wn0a (TCP_Used)', series: [pt('2026-11-01T06:00:00Z', 30), pt('2026-11-01T06:05:00Z', 120)] },
+        { name: 'wn0a (TCP_Allocated)', series: [pt('2026-11-01T06:00:00Z', 128)] },
+      ] },
+      { title: 'Pending SNAT connections', series: [{ name: 'wn0a', series: [pt('2026-11-01T06:05:00Z', 4)] }] },
+      { title: 'Failed SNAT connections', series: [{ name: 'wn0a', series: failed }] },
+      { title: 'New SNAT connections established', series: [] },
+    ],
+  });
+
+  it('flags failed SNAT connections with the first-seen time and per-instance peaks', () => {
+    const md = siteSnatSection({ snat: snat([pt('2026-11-01T06:05:00Z', 3), pt('2026-11-01T06:10:00Z', 9)]) }, 'Frontend');
+    expect(md).toContain('### Frontend');
+    expect(md).toContain('| wn0a | 120 | 128 |');
+    expect(md).toContain('Failed SNAT connections | 12 | 9 |');
+    expect(md).toContain('12 failed SNAT connections with port use at 94% of the allocation: outbound ports were close to exhausted.');
+  });
+
+  // 10 Nov, medu: 2 failed at 136 of 256 ports. "Ports ran out" there sent the agent the wrong way.
+  it('does not call failures at low port use exhaustion', () => {
+    const low = snat([pt('2026-11-01T06:10:00Z', 2)]);
+    low.charts[0].series[0].series = [pt('2026-11-01T06:05:00Z', 136)];
+    low.charts[0].series[1].series = [pt('2026-11-01T06:05:00Z', 256)];
+    const md = siteSnatSection({ snat: low }, 'Frontend');
+    expect(md).toContain('2 failed SNAT connections, but port use peaked at only 53% of the allocation, so this is not port exhaustion');
+    expect(md).not.toMatch(/exhausted/);
+  });
+
+  it('says none when nothing failed, and warns when usage neared the allocation', () => {
+    const md = siteSnatSection({ snat: snat([pt('2026-11-01T06:05:00Z', 0)]) }, 'API');
+    expect(md).toContain('No failed SNAT connections in the window, but port use reached 94% of the allocation on an instance');
+    expect(md).not.toMatch(/exhaust/);
+  });
+
+  it('prints a shared plan\'s SNAT pool once, telling the reader not to add the API\'s copy', () => {
+    const ev = { snat: snat([pt('2026-11-01T06:05:00Z', 1)]) };
+    const shared = siteSnatReport({ fe: ev, api: ev, sharedPlan: true });
+    expect(shared.match(/\| wn0a \| 120 \| 128 \|/g)).toHaveLength(1);
+    expect(shared).toContain('### API\n\nSame App Service plan as the frontend');
+    const separate = siteSnatReport({ fe: ev, api: ev, sharedPlan: false });
+    expect(separate.match(/\| wn0a \| 120 \| 128 \|/g)).toHaveLength(2);
+  });
+
+  it('is unknown, not none, without detector data, and empty when the site was not fetched', () => {
+    expect(siteSnatSection({ snat: null }, 'API')).toContain('unknown (not "none")');
+    expect(siteSnatSection(null, 'API')).toBe('');
+  });
+});
+
+describe('baseline comparison', () => {
+  const H = 3600_000, D = 24 * H;
+  const start = Date.parse('2026-11-10T11:00:00Z');
+
+  it('compares with a day and a week earlier only when they cannot overlap the window', () => {
+    expect(baselinePeriods(start, start + 2 * H).map(p => p.key)).toEqual(['now', 'day', 'week']);
+    expect(baselinePeriods(start, start + 2 * D).map(p => p.key)).toEqual(['now', 'week']);
+    expect(baselinePeriods(start, start + 8 * D).map(p => p.key)).toEqual(['now']);
+    expect(baselinePeriods(start, start + 2 * H)[1]).toMatchObject({ startMs: start - D, endMs: start + 2 * H - D });
+  });
+
+  it('shows each metric against the same clock time earlier, with how many times higher now is', () => {
+    const md = baselineSection([
+      { key: 'now', label: 'This window', startMs: start, requests: 120000, fiveXx: 4407, p95: 1200, exceptions: 4482, depFailed: 900 },
+      { key: 'day', label: 'Day before', startMs: start - D, requests: 100000, fiveXx: 20, p95: 300, exceptions: 0, depFailed: 900 },
+    ]);
+    expect(md).toContain('## Compared With Normal');
+    expect(md).toContain('| Metric | This window (2026-11-10 19:00 SGT) | Day before (2026-11-09 19:00 SGT) |');
+    expect(md).toContain('| Requests | 120,000 | 100,000 (now ×1.2) |');
+    expect(md).toContain('| 5xx | 4,407 (3.67%) | 20 (0.02%) (now ×220) |');
+    expect(md).toContain('| Exceptions | 4,482 | 0 (new) |');
+    expect(md).toContain('| Failed dependency calls | 900 | 900 (same) |');
+  });
+
+  it('is empty without a baseline, and marks an unknown figure instead of zero', () => {
+    expect(baselineSection(null)).toBe('');
+    expect(baselineSection([{ key: 'now', label: 'This window', startMs: start, requests: 1, fiveXx: 0, p95: null, exceptions: null, depFailed: null }])).toBe('');
+    const md = baselineSection([
+      { key: 'now', label: 'This window', startMs: start, requests: 10, fiveXx: 0, p95: null, exceptions: null, depFailed: 3 },
+      { key: 'week', label: 'Week before', startMs: start - 7 * D, requests: 10, fiveXx: 0, p95: null, exceptions: null, depFailed: 1 },
+    ]);
+    expect(md).toContain('| Exceptions | — | — |');
+    expect(md).toContain('| Failed dependency calls | 3 | 1 (now ×3.0) |');
+  });
+});
+
+describe('anomaly episodes section', () => {
+  it('lists each episode with its peaks and likely type, and says none when there are none', () => {
+    const md = anomalyEpisodesSection([{
+      startT: '2026-11-10T12:00:00Z', endT: '2026-11-10T12:10:00Z', peakSeverity: 'Critical', bucketCount: 3,
+      metricsInvolved: ['CPU', 'API 5xx'], peakValues: { CPU: 99, 'API 5xx': 13.6 }, incidentType: 'API errors under app CPU pressure',
+    }]);
+    expect(md).toContain('## Anomaly Episodes');
+    expect(md).toContain('| 2026-11-10 20:00 SGT | 2026-11-10 20:10 SGT | Critical | 3 | CPU 99.0%, API 5xx 13.6% | API errors under app CPU pressure |');
+    expect(anomalyEpisodesSection([])).toContain('No Warning or Critical episode in this window.');
+    expect(anomalyEpisodesSection(undefined)).toBe('');
   });
 });

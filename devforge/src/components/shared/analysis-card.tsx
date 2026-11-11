@@ -10,9 +10,33 @@ export type AnalysisState = { status: 'running' | 'done' | 'error'; markdown: st
 // Shared shell for Claude-written reports: PageSpeed's quick read and repository
 // investigation, and App Investigation. Same four states, same streaming pane — only
 // the labels differ.
+/** A finished report, split under the `insert` heading so a component can sit inside it. */
+function ReportBody({ markdown, insert, onReportClick }: {
+    markdown: string;
+    insert?: { after: RegExp; node: React.ReactNode } | undefined;
+    onReportClick?: ((e: React.MouseEvent<HTMLDivElement>) => void) | undefined;
+}) {
+    const hit = insert ? insert.after.exec(markdown) : null;
+    if (!insert || !hit) {
+        return (<>
+            {insert?.node}
+            <div className="ps-analysis-content" onClick={onReportClick} dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(markdown) }} />
+        </>);
+    }
+    // Split at a heading line, a block boundary, so each half renders as complete markdown.
+    const cut = hit.index + hit[0].length;
+    return (
+        <div className="ps-analysis-content" onClick={onReportClick}>
+            <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(markdown.slice(0, cut)) }} />
+            {insert.node}
+            <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(markdown.slice(cut)) }} />
+        </div>
+    );
+}
+
 export function AnalysisCard({
     state, heading, icon, open, onToggle, onRetry, retryHint, runningLabel, writingLabel, progress, onCancel, footer, onReportClick,
-    tabs, showBody = true, children,
+    tabs, showBody = true, children, insert,
 }: {
     state: AnalysisState;
     heading: string;
@@ -26,6 +50,9 @@ export function AnalysisCard({
     progress?: string | undefined;
     onCancel?: (() => void) | undefined;
     footer?: React.ReactNode;
+    /** Placed inside a finished report, right after the first line `after` matches (a
+     *  heading) — e.g. charts under "## Evidences"; above the report when nothing matches. */
+    insert?: { after: RegExp; node: React.ReactNode } | undefined;
     /** Click handler on the rendered report, for delegated links such as code citations. */
     onReportClick?: ((e: React.MouseEvent<HTMLDivElement>) => void) | undefined;
     /** A tab strip shown at the top of the card body. */
@@ -89,9 +116,7 @@ export function AnalysisCard({
                             </Hint>
                         </div>
                     )}
-                    {state.status === 'done' && (
-                        <div className="ps-analysis-content" onClick={onReportClick} dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(state.markdown) }} />
-                    )}
+                    {state.status === 'done' && <ReportBody markdown={state.markdown} insert={insert} onReportClick={onReportClick} />}
                     {footer}
                     </>)}
                     {children}

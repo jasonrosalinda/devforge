@@ -10,9 +10,9 @@ import { useRcaReport } from '@/hooks/useRcaReport';
 import { useSettings } from '@/context/settings-context';
 import { useSettingsUi } from '@/context/settings-ui-context';
 import { isElectron } from '@/lib/environment';
-import { parseCitation } from '@/lib/safe-markdown';
+import { citationRoot, parseCitation } from '@/lib/safe-markdown';
 import {
-    deleteInvestigation, loadInvestigationHistory, metaOf, saveInvestigation, type InvestigationHistoryEntry,
+    deleteInvestigation, earlierInvestigations, loadInvestigationHistory, metaOf, saveInvestigation, type InvestigationHistoryEntry,
 } from '@/lib/app-investigation-history';
 import { newRunId, splitInvestigationReport } from '@/lib/rca-report';
 import type { AzureAppEntry, AzureSettings } from '@/types/settings.types';
@@ -21,11 +21,17 @@ import { releaseStatus, releaseTitle, SOURCE_LABEL } from '@/components/azure/re
 import { toDatetimeLocal } from '@/components/app-health-check/styles';
 import { downtimePeriod, formatSgt, formatSgtRange } from '@/components/azure/rcaHtml';
 import { useUptimeRobotMonitor } from '@/hooks/useUptimeRobotMonitor';
+import { onInvestigationRequest } from '@/lib/investigation-request';
+import useInvestigationTelemetry, { investigationEpisodes } from '@/hooks/useInvestigationTelemetry';
+import { EVIDENCE_HEADING, numberEvidence, withEvidenceImages } from '@/lib/evidence-markers';
+import { loadHtml2Canvas } from '@/hooks/useCopyElementAsImage';
+import { InvestigationCharts } from './investigation-charts';
 import { RcaSection } from '@/components/azure/rcaSection';
 import { MAX_IMAGE_BYTES, imageFilesFrom, readAsDataUrl } from '@/components/azure/richTextField';
 import { AnalysisCard, type AnalysisState } from '@/components/shared/analysis-card';
 import { Segmented } from '@/components/telemetry/telemetry-ask';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Card, CardContent } from '@/components/ui/card';
 import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
@@ -68,6 +74,10 @@ const imageSize = (src: string) => new Promise<string>(resolve => {
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
 // The API shares the app's repository unless it has its own.
+const FOLLOW_UP_KEY = 'app-investigation:follow-up';
+/** How long Run waits for the charts' data before going without its anomaly episodes. */
+const CHART_WAIT_MS = 45_000;
+
 const repoFor = (app: AzureAppEntry | undefined, target: 'app' | 'api') =>
     (target === 'api' && app?.apiSourcePath) || app?.sourcePath || '';
 const hasSeparateApiRepo = (app: AzureAppEntry | undefined) => !!app?.apiSourcePath && app.apiSourcePath !== app.sourcePath;
@@ -118,6 +128,12 @@ export default function AppInvestigation() {
         return () => document.removeEventListener('paste', onPaste);
     }, []);
     const [history, setHistory] = useState<InvestigationHistoryEntry[]>(loadInvestigationHistory);
+    // A per-person preference, so plain localStorage; a blocked store just means "off".
+    const [followUp, setFollowUp] = useState<boolean>(() => { try { return localStorage.getItem(FOLLOW_UP_KEY) === '1'; } catch { return false; } });
+    const setFollowUpPref = (on: boolean) => {
+        setFollowUp(on);
+        try { localStorage.setItem(FOLLOW_UP_KEY, on ? '1' : '0'); } catch { /* not remembered */ }
+    };
     const [currentId, setCurrentId] = useState<string | null>(null);
 
     // Settings load after first render; pick the first app once they arrive.
@@ -138,12 +154,18 @@ export default function AppInvestigation() {
         return { startMs: i?.startMs ?? endMs - PRESET_MS[preset], endMs };
     }, [i?.startMs, i?.endMs, preset]);
     // Incident Period as App Health Check measures it: UptimeRobot downtime in the window.
-    const { monitors: urMonitors } = useUptimeRobotMonitor(
+    const { monitors: urMonitors, loading: urLoading, error: urError } = useUptimeRobotMonitor(
         settings.apiKeys.uptimeRobotApiKey, app?.uptimeRobotMonitorIds,
         new Date(rcaWindow.startMs).toISOString(), new Date(rcaWindow.endMs).toISOString(),
     );
-    const rcaPeriod = downtimePeriod(urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1)
-        .map(l => ({ start: l.datetime * 1000, end: (l.datetime + l.duration) * 1000 }))));
+    const urDown = urMonitors.flatMap(m => (m.logs ?? []).filter(l => l.type === 1).map(l => ({
+        monitor: m.friendly_name, start: l.datetime * 1000, end: (l.datetime + l.duration) * 1000, reason: l.reason?.detail,
+    })));
+    const rcaPeriod = downtimePeriod(urDown);
+    // Sent to the agent only once loaded: an empty list would tell it "no downtime".
+    const urReady = !!(settings.apiKeys.uptimeRobotApiKey && app?.uptimeRobotMonitorIds?.length) && !urLoading && !urError;
+    // App Health Check's own data for the window, at 1-minute buckets: the charts under Evidences.
+    const telemetry = useInvestigationTelemetry(i ? app?.name : undefined, settings.azure, i ? { startMs: i.startMs, endMs: i.endMs } : null);
 
     const getPayload = useCallback(() => ({
         subscriptionId: settings.azure.subscriptionId,
@@ -162,7 +184,9 @@ export default function AppInvestigation() {
         loadBalancerResourceId: app?.loadBalancerResourceId,
         startMs: rcaWindow.startMs,
         endMs: rcaWindow.endMs,
-    }), [settings.azure.subscriptionId, app, rcaWindow]);
+        // An RCA generated before a run builds its own report: give it the episodes the charts show.
+        episodes: telemetry.data ? investigationEpisodes(telemetry.data.metrics) : undefined,
+    }), [settings.azure.subscriptionId, app, rcaWindow, telemetry.data]);
     const rca = useRcaReport({ appKey: app?.name ?? '', getPayload, fileSuffix: app?.incidentSuffix });
     // A report only fills blank fields, so the next incident starts on a fresh form once
     // one has been filled. Notes typed before anything filled it are kept.
@@ -175,23 +199,52 @@ export default function AppInvestigation() {
         rca.reset();
     };
 
-    const doAsk = (q = query) => {
+    const doAsk = (q = query, from?: { appKey: string; startMs: number; endMs: number }): boolean => {
         const text = q.trim();
-        if (!text || busy || !apps.length) return;
+        if (!text || busy || !apps.length) return false;
         setQuery(text);
         setRepoOverride('');
         setCurrentId(null);
         freshRca();
+        if (from) setSelectedAppKey(from.appKey);
         const end = Date.now();
-        void interpret({ query: text, config: settings.azure, selectedAppKey: selectedAppKey || null, fallbackWindow: { startMs: end - PRESET_MS[preset], endMs: end } });
+        void interpret({
+            query: text, config: settings.azure, selectedAppKey: from?.appKey ?? (selectedAppKey || null),
+            fallbackWindow: from ? { startMs: from.startMs, endMs: from.endMs } : { startMs: end - PRESET_MS[preset], endMs: end },
+        });
+        return true;
     };
+    // "Investigate" on an App Health Check card: interpret its question; the engineer reviews it and runs.
+    const doAskRef = useRef(doAsk);
+    doAskRef.current = doAsk;
+    const toastRef = useRef(toast);
+    toastRef.current = toast;
+    useEffect(() => onInvestigationRequest(req => {
+        if (!doAskRef.current(req.query, req)) toastRef.current.error('An investigation is already running here. Cancel it or wait, then click Investigate again.');
+    }), []);
 
-    const doRun = () => {
-        if (!i || !repoPath) return;
-        freshRca();
-        setReportOpen(true);
-        setTab('findings');
-        void run({ config: settings.azure, repoPath, images });
+    const starting = useRef(false);
+    const doRun = async () => {
+        if (!i || !repoPath || starting.current) return;
+        starting.current = true;
+        try {
+            freshRca();
+            setReportOpen(true);
+            setTab('findings');
+            // With separate app and API repositories, the other one is read too.
+            const otherRepoPath = hasSeparateApiRepo(app) && app?.apiName ? repoFor(app, i.target === 'api' ? 'app' : 'api') : undefined;
+            // The charts' data has usually loaded while the interpretation was reviewed; its
+            // episodes go to the agent so it reads the anomalies the charts show.
+            const charted = await Promise.race([telemetry.ready(), new Promise<null>(r => setTimeout(() => r(null), CHART_WAIT_MS))]);
+            void run({
+                config: settings.azure, repoPath, images, uptimeRobotIncidents: urReady ? urDown : undefined, otherRepoPath,
+                earlier: earlierInvestigations(history, i.appKey, i),
+                followUp,
+                episodes: charted ? investigationEpisodes(charted.metrics) : undefined,
+            });
+        } finally {
+            starting.current = false;
+        }
     };
 
     // Save each finished run once, the moment it lands.
@@ -203,6 +256,7 @@ export default function AppInvestigation() {
             meta: {
                 repoRoot: state.meta.repoRoot, branch: state.meta.branch, head: state.meta.head,
                 durationMs: state.meta.durationMs, warnings: state.meta.warnings,
+                otherRepoRoot: state.meta.otherRepoRoot, otherTarget: state.meta.otherTarget,
             },
         });
         setCurrentId(id);
@@ -214,7 +268,8 @@ export default function AppInvestigation() {
         const el = (e.target as HTMLElement).closest('code[data-cite]');
         const cite = el && parseCitation(el.textContent ?? '');
         if (!cite || !state.meta) return;
-        void window.electronAPI.appInvestigation.openCitation({ root: state.meta.repoRoot, ...cite }).then(r => {
+        const at = citationRoot(cite.file, state.meta, i?.target ?? 'app');
+        void window.electronAPI.appInvestigation.openCitation({ root: at.root, file: at.file, line: cite.line }).then(r => {
             if (!r.success) toast.error(r.error ?? 'Could not open the file.');
         });
     };
@@ -227,10 +282,36 @@ export default function AppInvestigation() {
 
     // One run writes both: the findings, then the RCA that fills the RCA and Tracker tabs.
     const parts = useMemo(() => splitInvestigationReport(state.report), [state.report]);
+    // Each timed Evidences bullet gets a number, and the charts mark the same number at its time.
+    const evidence = useMemo(
+        () => (i ? numberEvidence(parts.findings, i) : { markdown: parts.findings, markers: [] }),
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- only the window matters, not the rest of the interpretation
+        [parts.findings, i?.startMs, i?.endMs]);
+    // The exports carry the on-screen charts under Evidences, one picture per chart so a page
+    // can break between them, and their numbered marks still match the numbered bullets.
+    // Without them they go as text.
+    const withCharts = async (markdown: string): Promise<string> => {
+        const section = document.querySelector<HTMLElement>('section[aria-label="Evidence charts"]');
+        const charts = section ? [...section.querySelectorAll<HTMLElement>('[data-evidence-chart]')] : [];
+        if (!charts.length) return markdown;
+        try {
+            const html2canvas = await loadHtml2Canvas();
+            const backgroundColor = getComputedStyle(document.body).backgroundColor || '#ffffff';
+            const images = [];
+            for (const el of charts) {
+                const canvas: HTMLCanvasElement = await html2canvas(el, { backgroundColor, scale: 2, logging: false, useForeignObject: false });
+                images.push({ src: canvas.toDataURL('image/png'), alt: el.dataset.evidenceChart || 'Evidence chart' });
+            }
+            return withEvidenceImages(markdown, images, section?.querySelector('[data-evidence-caption]')?.textContent ?? '');
+        } catch {
+            toast.error('The charts could not be captured, so the export has the text only.');
+            return markdown;
+        }
+    };
     const analysis: AnalysisState = state.status === 'running'
         ? { status: 'running', markdown: splitInvestigationReport(state.stream).findings, error: null }
         : state.status === 'done'
-            ? { status: 'done', markdown: parts.findings, error: null }
+            ? { status: 'done', markdown: evidence.markdown, error: null }
             : { status: 'error', markdown: '', error: state.error };
     const showReport = state.status === 'running' || state.status === 'done' || (state.status === 'error' && !!i);
 
@@ -376,6 +457,8 @@ export default function AppInvestigation() {
                         onBrowse={() => void pickRepo()}
                         onOpenSettings={() => openSettings('azure')}
                         onRun={doRun}
+                        followUp={followUp}
+                        onFollowUp={setFollowUpPref}
                         onEditAgain={backToConfirm}
                         running={state.status === 'running'}
                         done={state.status === 'done'}
@@ -407,15 +490,23 @@ export default function AppInvestigation() {
                             writingLabel="Writing the report…"
                             onCancel={() => void cancel()}
                             onReportClick={onReportClick}
+                            insert={i ? {
+                                after: EVIDENCE_HEADING,
+                                node: <InvestigationCharts
+                                    telemetry={telemetry.data} loading={telemetry.loading} error={telemetry.error}
+                                    startMs={i.startMs} endMs={i.endMs} markers={evidence.markers}
+                                    hasApi={!!app?.apiName} urMonitors={urMonitors} appKey={app?.name ?? ''} config={settings.azure}
+                                />,
+                            } : undefined}
                             footer={state.status === 'running'
                                 ? <Trail items={state.trail} />
                                 : state.status === 'done' && state.meta && (
                                     <ReportFooter
                                         meta={state.meta}
-                                        onSave={() => void rca.exportMd('investigation', parts.findings)}
-                                        onPdf={() => void rca.exportPdf('investigation', parts.findings)}
-                                        onWord={() => void rca.exportWord('investigation', parts.findings)}
-                                        onCopy={() => void rca.copyTeams(parts.findings)}
+                                        onSave={() => void rca.exportMd('investigation', evidence.markdown)}
+                                        onPdf={() => void withCharts(evidence.markdown).then(md => rca.exportPdf('investigation', md))}
+                                        onWord={() => void withCharts(evidence.markdown).then(md => rca.exportWord('investigation', md))}
+                                        onCopy={() => void withCharts(evidence.markdown).then(md => rca.copyTeams(md))}
                                         onReset={() => { reset(); setCurrentId(null); freshRca(); setImages([]); }}
                                     />
                                 )}
@@ -483,7 +574,7 @@ export default function AppInvestigation() {
 
 function UnderstoodCard({
     interpretation: i, apps, config, appLabel, repoPath, repoIsOverride, locked, running, done,
-    onEdit, onBrowse, onOpenSettings, onRun, onEditAgain,
+    onEdit, onBrowse, onOpenSettings, onRun, onEditAgain, followUp, onFollowUp,
 }: {
     interpretation: NonNullable<ReturnType<typeof useAppInvestigation>['state']['interpretation']>;
     apps: AzureAppEntry[];
@@ -499,6 +590,8 @@ function UnderstoodCard({
     onOpenSettings: () => void;
     onRun: () => void;
     onEditAgain: () => void;
+    followUp: boolean;
+    onFollowUp: (on: boolean) => void;
 }) {
     const app = apps.find(a => a.name === i.appKey);
     const windowInvalid = !(i.endMs > i.startMs);
@@ -540,7 +633,7 @@ function UnderstoodCard({
                     </Field>
                     {/* One repository for app and API: the choice changes nothing, so it is hidden. */}
                     {hasSeparateApiRepo(app) && (
-                        <Field label="Code to read">
+                        <Field label="Main repository (both are read; this one gets the full diffs)">
                             <Segmented value={i.target} onChange={v => onEdit({ target: v as 'app' | 'api' })}
                                 options={[
                                     { value: 'app', label: 'App repository', disabled: locked },
@@ -550,7 +643,8 @@ function UnderstoodCard({
                     )}
                 </div>
 
-                {!windowInvalid && <WindowReleases config={config} appKey={i.appKey} startMs={i.startMs} endMs={i.endMs} hasApi={!!app?.apiName} target={i.target} repoPath={repoPath} />}
+                {!windowInvalid && <WindowReleases config={config} appKey={i.appKey} startMs={i.startMs} endMs={i.endMs} hasApi={!!app?.apiName} target={i.target} repoPath={repoPath}
+                    otherRepoPath={hasSeparateApiRepo(app) && app?.apiName ? repoFor(app, i.target === 'api' ? 'app' : 'api') : undefined} />}
 
                 {i.symptoms.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -564,6 +658,11 @@ function UnderstoodCard({
                     {repoPath
                         ? <span className="min-w-0 flex-1 truncate font-mono" title={repoPath}>{repoPath}{repoIsOverride && <span className="ml-1 font-sans text-muted-foreground">(this run only)</span>}</span>
                         : <span className="flex-1 text-warning">No {i.target === 'api' ? 'API' : 'app'} repository set for {appLabel(app)}.</span>}
+                    {repoPath && hasSeparateApiRepo(app) && app?.apiName && (
+                        <span className="shrink-0 text-muted-foreground" title={repoFor(app, i.target === 'api' ? 'app' : 'api')}>
+                            + {i.target === 'api' ? 'app' : 'API'} repository, read alongside
+                        </span>
+                    )}
                     {!locked && (
                         <>
                             <Hint label="Use a different folder for this run">
@@ -579,6 +678,12 @@ function UnderstoodCard({
                 <div className="flex items-center gap-2">
                     <span className="text-muted-foreground">Claude reads only: Azure telemetry for this window, git history, and the repository’s files.</span>
                     <div className="flex-1" />
+                    <Hint label="Claude may ask for up to 3 read-only App Insights queries; devForge runs them for the incident window and Claude writes the final report with the results. About twice the time and tokens.">
+                        <label className="flex items-center gap-1.5 text-muted-foreground">
+                            <Switch checked={followUp} onCheckedChange={onFollowUp} disabled={running} aria-label="Follow-up queries" />
+                            Follow-up queries
+                        </label>
+                    </Hint>
                     {done
                         ? <Button size="sm" variant="outline" onClick={onEditAgain}><Wrench /> Adjust & re-run</Button>
                         : (
@@ -597,8 +702,10 @@ function UnderstoodCard({
 }
 
 /** The last release live at the window's end (as App Health Check shows it), and whether one landed inside the window. */
-function WindowReleases({ config, appKey, startMs, endMs, hasApi, target, repoPath }: {
+function WindowReleases({ config, appKey, startMs, endMs, hasApi, target, repoPath, otherRepoPath }: {
     config: AzureSettings; appKey: string; startMs: number; endMs: number; hasApi: boolean; target: 'app' | 'api'; repoPath: string;
+    /** The other site's repository when it has its own; it is read too, at its own site's release. */
+    otherRepoPath?: string | undefined;
 }) {
     const [rel, setRel] = useState<{ loading: boolean; fe: ReleaseResult | null; api: ReleaseResult | null }>({ loading: true, fe: null, api: null });
     useEffect(() => {
@@ -620,7 +727,11 @@ function WindowReleases({ config, appKey, startMs, endMs, hasApi, target, repoPa
         return at >= startMs && at <= endMs;
     }).length;
     // The release live at the window end on the site whose code is read.
-    const live = (target === 'api' ? rel.api : rel.fe)?.events.filter(ev => Date.parse(ev.at) <= endMs).at(-1) ?? null;
+    const liveOn = (site: 'app' | 'api') => (site === 'api' ? rel.api : rel.fe)?.events.filter(ev => Date.parse(ev.at) <= endMs).at(-1) ?? null;
+    const live = liveOn(target);
+    const otherTarget = target === 'api' ? 'app' : 'api';
+    const otherLive = liveOn(otherTarget);
+    const repoLabel = (site: 'app' | 'api') => (site === 'api' ? 'API repository' : 'App repository');
     const sites = [
         { key: 'app', label: 'Frontend', r: rel.fe },
         ...(hasApi ? [{ key: 'api', label: 'API', r: rel.api }] : []),
@@ -639,7 +750,8 @@ function WindowReleases({ config, appKey, startMs, endMs, hasApi, target, repoPa
                 ? <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Loading releases…</span>
                 : (
                     <>
-                        {repoPath && <DeployedBranch repoPath={repoPath} endMs={endMs} commit={live?.commit} branch={live?.branch} />}
+                        {repoPath && <DeployedBranch repoPath={repoPath} endMs={endMs} commit={live?.commit} branch={live?.branch} {...(otherRepoPath ? { label: repoLabel(target) } : {})} />}
+                        {otherRepoPath && <DeployedBranch repoPath={otherRepoPath} endMs={endMs} commit={otherLive?.commit} branch={otherLive?.branch} label={repoLabel(otherTarget)} />}
                         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
                             {sites.map(s => (
                                 <Fragment key={s.key}>
@@ -682,7 +794,7 @@ const BASIS_TITLE = {
 } as const;
 
 /** "Release branch": the code the investigation treats as production at the window end. */
-function DeployedBranch({ repoPath, endMs, commit, branch }: { repoPath: string; endMs: number; commit?: string | undefined; branch?: string | undefined }) {
+function DeployedBranch({ repoPath, endMs, commit, branch, label }: { repoPath: string; endMs: number; commit?: string | undefined; branch?: string | undefined; label?: string | undefined }) {
     const [res, setRes] = useState<Awaited<ReturnType<typeof window.electronAPI.appInvestigation.deployedRef>> | null>(null);
     useEffect(() => {
         let live = true;
@@ -700,6 +812,7 @@ function DeployedBranch({ repoPath, endMs, commit, branch }: { repoPath: string;
         <div className="flex flex-col gap-0.5" title={[res.basis && BASIS_TITLE[res.basis], res.note].filter(Boolean).join('\n')}>
             <div className="flex flex-wrap items-center gap-2">
                 <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+                {label && <span className="text-xs text-muted-foreground">{label}</span>}
                 <span className="font-mono text-sm font-semibold">{res.branch}</span>
                 {res.sha && <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{res.sha}</span>}
                 {badge && <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.cls}`}>{badge.text}</span>}
@@ -727,7 +840,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const PHASE_ICON: Record<InvestigationProgress['phase'], React.ComponentType<{ className?: string }>> = {
-    repo: FolderGit2, azure: Cloud, git: GitCommitHorizontal, agent: Sparkles, init: Sparkles, tool: FileCode2, denied: X,
+    repo: FolderGit2, azure: Cloud, git: GitCommitHorizontal, agent: Sparkles, init: Sparkles, tool: FileCode2, denied: X, verify: Check, query: Search,
 };
 
 /** The live investigation trail: host stages, then every file Claude opens or searches. */

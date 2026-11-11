@@ -207,8 +207,14 @@ function runClaudeCli({
             if (/not recognized|ENOENT|not found/i.test(errOut)) {
                 return finish(reject, tagged('Claude CLI not found on PATH — install Claude Code or check your PATH.', 'CLI_MISSING'));
             }
-            const tail = errOut.trim().slice(-400);
-            finish(reject, tagged(`Claude run failed (exit ${code}).${tail ? ' ' + tail : ''}`, 'AGENT_FAILED'));
+            // The result event says why a run stopped (budget, turn limit, API error); stderr is
+            // often empty, so without it a failure read only "exit 1".
+            const reason = [
+                meta.subtype && meta.subtype !== 'success' ? meta.subtype : '',
+                resultText.trim().slice(-300),
+                errOut.trim().slice(-400),
+            ].filter(Boolean).join(' — ');
+            finish(reject, tagged(`Claude run failed (exit ${code}).${reason ? ' ' + reason : ''}`, 'AGENT_FAILED'));
         });
 
         try {

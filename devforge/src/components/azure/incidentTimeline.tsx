@@ -29,7 +29,7 @@ export interface TimelineItem {
 }
 
 export interface TimelineLane {
-  key: 'releases' | 'restarts' | 'crashes' | 'downtime' | 'anomalies' | 'http5xx' | 'http5xxApi';
+  key: 'releases' | 'changes' | 'restarts' | 'crashes' | 'downtime' | 'anomalies' | 'http5xx' | 'http5xxApi';
   label: string;
   items: TimelineItem[];
 }
@@ -47,6 +47,9 @@ export interface TimelineInput {
   apiCrashes?: CrashResult | null | undefined;
   urMonitors?: UptimeRobotMonitor[] | undefined;
 }
+
+/** Fewest requests a bucket needs before its 5xx rate can start a burst. Mirrors BURST_MIN_REQUESTS in electron/ipc/incident-report.cjs. */
+export const BURST_MIN_REQUESTS = 20;
 
 const SEVERITY_COLOR: Record<Exclude<AnomalySeverity, 'Info'>, string> = { Critical: UI.error, Warning: UI.warning };
 
@@ -84,6 +87,15 @@ export function buildTimelineLanes(input: TimelineInput): TimelineLane[] {
       title: `${siteTag(site)}${releaseTitle(event)}`,
       color: RELEASE_COLORS[site],
       release: { site, event },
+    })));
+
+  // Activity Log changes that are not releases: a person or automation restarting, reconfiguring or rescaling.
+  const changes = sites.flatMap(site =>
+    ((site === 'fe' ? input.releases : input.apiReleases)?.changes ?? []).map((c): TimelineItem => ({
+      startMs: Date.parse(c.at),
+      site, cause: c.kind,
+      title: `${siteTag(site)}${formatSgt(Date.parse(c.at))} · ${c.label}${c.by ? `\nby ${c.by}` : ''}`,
+      color: c.kind === 'restart' || c.kind === 'stop' ? UI.warning : UI.textDim,
     })));
 
   const restarts = sites.flatMap(site =>
@@ -131,17 +143,19 @@ export function buildTimelineLanes(input: TimelineInput): TimelineLane[] {
 
   // Per site, from each site's own App Insights request timeline (true 5xx per bucket).
   // The frontend falls back to the card's 5xx series when App Insights has no timeline.
-  const siteRates = (site: 'fe' | 'api'): { rates: Array<{ t: string; rate: number }>; stepMs: number } => {
+  const siteRates = (site: 'fe' | 'api'): { rates: Array<{ t: string; rate: number; count?: number }>; stepMs: number } => {
     const overall = (site === 'fe' ? metrics.requestInsights : metrics.apiRequestInsights)?.performance?.overallSeries;
     if (overall?.length) {
-      return { rates: errorRateSeries(overall, 'c5').map(p => ({ t: p.t, rate: p.v / 100 })), stepMs: inferSeriesStepMs(overall) };
+      const counts = new Map(overall.map(p => [p.t, p.count]));
+      return { rates: errorRateSeries(overall, 'c5').map(p => ({ t: p.t, rate: p.v / 100, count: counts.get(p.t) ?? 0 })), stepMs: inferSeriesStepMs(overall) };
     }
     if (site === 'api') return { rates: [], stepMs: 0 };
     return { rates: httpRateBuckets(metrics.failedRequestsSeries, metrics.requestsSeries), stepMs: inferSeriesStepMs(metrics.requestsSeries ?? []) };
   };
   const bursts = (site: 'fe' | 'api'): TimelineItem[] => {
     const { rates, stepMs } = siteRates(site);
-    const badStarts = rates.filter(r => r.rate > HTTP_5XX_RATE).map(r => Date.parse(r.t));
+    // A bucket with too few requests is noise (1 failure in 10 at 3am); the fallback series has no counts, so it keeps the rate rule alone.
+    const badStarts = rates.filter(r => r.rate > HTTP_5XX_RATE && (r.count === undefined || r.count >= BURST_MIN_REQUESTS)).map(r => Date.parse(r.t));
     const peakIn = (s: number, e: number) => Math.max(...rates.filter(r => { const t = Date.parse(r.t); return t >= s && t < e; }).map(r => r.rate));
     return mergeBuckets(badStarts, stepMs).map((iv): TimelineItem => ({
       startMs: iv.start, endMs: iv.end, color: UI.error, burstSite: site, site, peak: peakIn(iv.start, iv.end),
@@ -151,6 +165,7 @@ export function buildTimelineLanes(input: TimelineInput): TimelineLane[] {
 
   const lanes: TimelineLane[] = [
     { key: 'releases', label: 'Releases', items: releases },
+    { key: 'changes', label: 'Changes', items: changes },
     { key: 'restarts', label: 'Restarts', items: restarts },
     { key: 'crashes', label: 'Crashes', items: crashes },
     { key: 'downtime', label: 'Downtime', items: downtime },

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { findSnatDetector, parseSnatDetector, detectGrainMs, SNAT_CHART_TITLES } = require('./azure-snat.cjs');
+const { findSnatDetector, parseSnatDetector, detectGrainMs, SNAT_CHART_TITLES, splitSeriesName, snatSummary } = require('./azure-snat.cjs');
 
 const detectorList = {
   value: [
@@ -175,5 +175,21 @@ describe('detectGrainMs', () => {
   it('returns null when there is nothing to measure', () => {
     expect(detectGrainMs([{ title: 'x', series: [at(0)] }])).toBeNull();
     expect(detectGrainMs([])).toBeNull();
+  });
+});
+
+describe('snatSummary', () => {
+  it('splits series names either way round', () => {
+    expect(splitSeriesName('wn0a (TCP_Used)')).toEqual({ instance: 'wn0a', counter: 'TCP_Used' });
+    expect(splitSeriesName('TCP_Allocated (wn0b)')).toEqual({ instance: 'wn0b', counter: 'TCP_Allocated' });
+    expect(splitSeriesName('plain')).toEqual({ instance: 'plain', counter: '' });
+  });
+
+  it('is null with no charts, and treats an empty chart as zero but a missing one as unknown', () => {
+    expect(snatSummary(null)).toBeNull();
+    expect(snatSummary({ charts: [] })).toBeNull();
+    const s = snatSummary({ charts: [{ title: 'Failed SNAT connections', series: [] }] });
+    expect(s.failed).toMatchObject({ total: 0, peak: 0, peakAt: null });
+    expect(s.pending).toBeNull();
   });
 });

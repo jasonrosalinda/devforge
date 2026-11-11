@@ -105,3 +105,19 @@ describe('summarize', () => {
     expect(result.max).toBe(0);
   });
 });
+
+describe('downstream failures', () => {
+  const am = require('./azure-metrics.cjs');
+  it('reads each target with its result codes busiest first, the codes arriving as JSON text', () => {
+    const rows = am._parseDownstreamRows([
+      ['ssoapi.mims.com | cid', 'Http (tracked component)', 13546, 4830, '[{"code":"500","n":3},{"code":"429","n":4827}]'],
+    ]);
+    expect(rows).toEqual([{ target: 'ssoapi.mims.com | cid', type: 'Http (tracked component)', calls: 13546, failed: 4830, codes: [{ code: '429', count: 4827 }, { code: '500', count: 3 }] }]);
+  });
+  it('treats a browser call cancelled in the browser (status 0) as noise, not a failing backend', () => {
+    const row = (type, codes) => ({ target: 't', type, calls: 100, failed: codes.reduce((n, c) => n + c.count, 0), codes });
+    expect(am._browserBlocked(row('Fetch', [{ code: '0', count: 99 }, { code: '403', count: 1 }]))).toBe(true);
+    expect(am._browserBlocked(row('Fetch', [{ code: '403', count: 80 }, { code: '0', count: 20 }]))).toBe(false);
+    expect(am._browserBlocked(row('HTTP', [{ code: '0', count: 100 }]))).toBe(false);
+  });
+});

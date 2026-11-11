@@ -7,9 +7,9 @@ import path from 'path';
 const require = createRequire(import.meta.url);
 const {
     guardQuery, parseSgt, buildInterpretPrompt, parseInterpretation, normalizeInterpretation,
-    buildGitSeedArgs, gatherGitSeed, resolveDeployedRef, liveRelease, formatReleases, buildInvestigationPrompt, resolveCitation, resolveRepoRoot, isGithubUrl, incidentOpts,
+    buildGitSeedArgs, gatherGitSeed, resolveDeployedRef, liveRelease, formatReleases, formatChanges, buildInvestigationPrompt, resolveCitation, resolveRepoRoot, isGithubUrl, incidentOpts,
     HEADINGS, FINDINGS_HEADINGS, DIRECTIVE, INTERPRET_FLAGS, OUT_OF_SCOPE_PHRASE, MAX_WINDOW_MS, writeAttachments, MAX_IMAGES,
-    capAzureReport, API_REPORT_LINES, AZURE_REPORT_LINES, deployedWorktree, buildCodeMap, locateMentioned,
+    capAzureReport, API_REPORT_LINES, AZURE_REPORT_LINES, deployedWorktree, buildCodeMap, locateMentioned, cleanUptimeIncidents, uptimePeriod, checkCitations, citationWarning, cleanEarlier, cleanEpisodes, sectionOf, parseFollowUps, vetFollowUp, followUpResults, revisePrompt, FOLLOW_UP_INSTRUCTION,
 } = require('./app-investigation.cjs').__test__;
 const { stripReportPreamble, FILE_READ_AGENT_FLAGS } = require('./claude-cli.cjs');
 
@@ -241,6 +241,31 @@ describe('capAzureReport', () => {
     it('caps a report with no API section as one', () => {
         expect(capAzureReport(rows('fe', AZURE_REPORT_LINES + 50))).not.toContain(`fe ${AZURE_REPORT_LINES + 49}`);
         expect(capAzureReport(null)).toBe('');
+    });
+
+    // A 24h window put a 288-row user-traffic table in section 16, and the tail cap then
+    // dropped sections 17 (Restarts & Crashes) and 18 (SNAT Ports) entirely.
+    it('keeps every section on a long report, trimming only the largest', () => {
+        const report = [
+            '## 1. Small', rows('one', 5),
+            '## 16. User Traffic & Bursts', rows('traffic', 900),
+            '## 17. Restarts & Crashes', rows('restart', 8),
+            '## 18. SNAT Ports (App Service detector)', rows('snat', 8),
+        ].join('\n');
+        const out = capAzureReport(report);
+        for (const h of ['## 1. Small', '## 17. Restarts & Crashes', '## 18. SNAT Ports', 'restart 7', 'snat 7', 'one 4']) expect(out).toContain(h);
+        expect(out).toMatch(/traffic 0\n/);
+        expect(out).toMatch(/_… \d+ more lines in this section \(trimmed to fit the run budget\)_/);
+        expect(out.split('\n').length).toBeLessThanOrEqual(AZURE_REPORT_LINES + 5);
+    });
+
+    it('leaves collapsed full-data tables out, naming what was left out', () => {
+        const report = `## 16. User Traffic\n- peak 1,083 users at 20:05\n<details>\n<summary>Full user traffic timeline (288 × 5-min buckets, SGT)</summary>\n\n| t | n |\n|---|---|\n| a | 1 |\n</details>\n## 17. Restarts & Crashes\nnone`;
+        const out = capAzureReport(report);
+        expect(out).toContain('- peak 1,083 users at 20:05');
+        expect(out).toContain('_(Full user traffic timeline (288 × 5-min buckets, SGT) left out of this copy to fit the run budget.)_');
+        expect(out).not.toContain('<details>');
+        expect(out).toContain('## 17. Restarts & Crashes');
     });
 });
 
@@ -474,6 +499,24 @@ describe('buildInvestigationPrompt', () => {
         expect(prompt).toContain('## PRODUCTION RELEASES');
         expect(prompt).toMatch(/release history unavailable/);
         expect(prompt).not.toContain('Files on disk are the checked-out branch');
+    });
+
+    it('gives the agent UptimeRobot downtime and uses it as the RCA period', () => {
+        const uptime = cleanUptimeIncidents([
+            { monitor: 'MIMS CPD', start: sgt(2026, 11, 6, 14, 5), end: sgt(2026, 11, 6, 14, 20), reason: 'Connection Timeout' },
+        ]);
+        const p = buildInvestigationPrompt({ interpretation, query: 'q', app: APPS[0], repoRoot: 'r', azureReport: '', seed: { branch: 'b', head: 'h', commits: '', stat: '', patches: '' }, uptime });
+        expect(p).toContain('## EXTERNAL DOWNTIME');
+        expect(p).toContain('- MIMS CPD: down 2026-11-06 14:05 SGT → 2026-11-06 14:20 SGT (15 min) — Connection Timeout');
+        expect(p).toContain('**Incident Period:** 2026-11-06 14:05 SGT → 2026-11-06 14:20 SGT');
+        expect(p).toMatch(/MEASURED outage/);
+    });
+
+    it('says UptimeRobot is unavailable rather than "no downtime" when none was sent', () => {
+        expect(prompt).toMatch(/EXTERNAL DOWNTIME[^\n]*\n\(not available/);
+        expect(prompt).not.toMatch(/MEASURED outage/);
+        const none = buildInvestigationPrompt({ interpretation, query: 'q', app: APPS[0], repoRoot: 'r', azureReport: '', seed: { branch: 'b', head: 'h', commits: '', stat: '', patches: '' }, uptime: [] });
+        expect(none).toContain('(no downtime recorded in this window)');
     });
 
     it('warns when the files on disk are not the release branch', () => {
@@ -818,5 +861,339 @@ describe('code map', () => {
         expect(prompt).toContain('## CODE MAP');
         expect(prompt).toContain('Files the telemetry names:\n- Medu.Web/Controllers/UserController.cs');
         expect(prompt).toContain('Medu.Web/Controllers/: UserController.cs');
+    });
+});
+
+describe('cleanUptimeIncidents', () => {
+    it('keeps valid periods in order, clips text and drops bad bounds', () => {
+        const out = cleanUptimeIncidents([
+            { monitor: 'B', start: 2000, end: 5000 },
+            { monitor: 'A'.repeat(200), start: 1000, end: 61000, reason: 'r'.repeat(500) },
+            { monitor: 'bad', start: 5, end: 1 },
+            { monitor: 'nan', start: 'x', end: 2 },
+        ]);
+        expect(out.map(x => x.start)).toEqual([1000, 2000]);
+        expect(out[0]).toMatchObject({ duration: 60 });
+        expect(out[0].monitor).toHaveLength(80);
+        expect(out[0].reason).toHaveLength(200);
+        expect(cleanUptimeIncidents(undefined)).toBeUndefined();
+        expect(cleanUptimeIncidents('x')).toBeUndefined();
+        expect(uptimePeriod([])).toBe('');
+    });
+});
+
+describe('formatChanges', () => {
+    const start = Date.parse('2026-11-06T06:00:00Z'), end = Date.parse('2026-11-06T08:00:00Z');
+    it('lists Activity Log changes from the lookback to the window end, marking those inside the window', () => {
+        const releases = {
+            fe: { changes: [
+                { at: '2026-11-06T06:30:00Z', kind: 'restart', label: 'Restart', by: 'ops@mims.com' },
+                { at: '2026-11-06T09:00:00Z', kind: 'config', label: 'Configuration change' },
+            ] },
+            api: { changes: [{ at: '2026-11-06T05:00:00Z', kind: 'plan', label: 'App Service plan change', by: 'automation (service principal)' }] },
+        };
+        const out = formatChanges(releases, start, end);
+        expect(out).toContain('- Frontend 2026-11-06 14:30 SGT **(inside the incident window)** · Restart · by ops@mims.com');
+        expect(out).toContain('- API 2026-11-06 13:00 SGT · App Service plan change · by automation (service principal)');
+        expect(out).not.toContain('Configuration change');
+    });
+    it('says none, or unavailable without release data', () => {
+        expect(formatChanges({ fe: { changes: [] } }, start, end)).toBe('(none recorded)');
+        expect(formatChanges(null, start, end)).toMatch(/^\(unavailable/);
+    });
+});
+
+describe('two repositories in one run', () => {
+    const { execFileSync } = require('child_process');
+    const ENV = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    const seedOf = (branch) => ({ branch, head: 'h', commits: 'c1\tfix', stat: 'stat', patches: 'diff' });
+    const interpretation = { question: 'q', category: 'errors', symptoms: [], startMs: 0, endMs: 3600000, target: 'app' };
+
+    it('tells the agent it can read both sites and how to cite the second one', () => {
+        const p = buildInvestigationPrompt({
+            interpretation, query: 'q', app: APPS[0], repoRoot: '/wt/app', azureReport: '', seed: seedOf('release/app'),
+            other: { site: 'api', codeRoot: '/wt/api', seed: seedOf('release/api'), codeMap: 'Api/Controllers/: UserController.cs', located: ['Api/Controllers/UserController.cs'] },
+        });
+        expect(p).toContain('- Second repository: the API source at /wt/api (branch release/api, HEAD h)');
+        expect(p).toContain("You can read BOTH sites' code");
+        expect(p).toContain('`@api/relative/path/File.ext:LINE`');
+        expect(p).toContain('## SECOND REPOSITORY: the API');
+        expect(p).toContain('- Api/Controllers/UserController.cs');
+        expect(p).not.toMatch(/when the evidence points at the other site, say so and name what to read there/);
+    });
+
+    it('keeps the one-repository wording without a second repository', () => {
+        const p = buildInvestigationPrompt({ interpretation, query: 'q', app: APPS[0], repoRoot: '/r', azureReport: '', seed: seedOf('b') });
+        expect(p).not.toContain('SECOND REPOSITORY');
+        expect(p).toMatch(/when the evidence points at the other site, say so/);
+    });
+
+    it('runs with both deployed releases, the second readable through --add-dir, and neither checkout touched', async () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-two-'));
+        const repo = (name, file) => {
+            const dir = path.join(base, name);
+            fs.mkdirSync(dir);
+            const run = (args) => execFileSync('git', args, { cwd: dir, env: ENV }).toString().trim();
+            run(['init', '-q', '-b', 'release/2026.11']);
+            fs.writeFileSync(path.join(dir, file), 'released');
+            run(['add', '.']); run(['commit', '-q', '-m', 'release']);
+            run(['checkout', '-q', '-b', 'feature/x']);
+            return dir;
+        };
+        const appDir = repo('medu-app', 'App.cs');
+        const apiDir = repo('medu-api', 'Api.cs');
+        const handlers = {};
+        require.cache[require.resolve('electron')] = {
+            exports: { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } }, dialog: {}, shell: { openExternal: vi.fn() } },
+        };
+        const runClaudeCli = vi.fn(async () => ({ text: '## Summary\nok', meta: {} }));
+        require('./app-investigation.cjs')(null, {
+            runClaudeCli, repoCacheDir: path.join(base, 'cache'), loadReleases: async () => null,
+            incidentReport: { _collectIncident: async () => ({ data: {} }), _generateMarkdown: () => '## Report\nthrown at Api.cs:3' },
+        });
+        const endMs = Date.now() + 60000;
+        const r = await handlers['app-investigation:run']({ sender: { isDestroyed: () => false, send: vi.fn() } }, {
+            query: 'MEDU 500s', config: { subscriptionId: 'sub', apps: APPS },
+            interpretation: { appKey: 'prdmeduapp', target: 'app', startMs: endMs - 3600000, endMs, category: 'errors', question: 'q?' },
+            repoPath: appDir, otherRepoPath: apiDir,
+        });
+        expect(r).toMatchObject({ success: true, meta: { otherTarget: 'api' } });
+        // No Azure release recorded a commit, so the second repository's basis is an estimate, and says so.
+        expect(r.meta.warnings).toContainEqual({ code: 'OTHER_REPO_BASIS', message: expect.stringMatching(/API repository was read at release\/2026\.11 .*estimated/) });
+        const call = runClaudeCli.mock.calls[0][0];
+        expect(call.flags.some(f => f.startsWith('--add-dir') && f.includes(r.meta.otherRepoRoot))).toBe(true);
+        expect(fs.existsSync(path.join(r.meta.otherRepoRoot, 'Api.cs'))).toBe(true);
+        expect(call.promptBody).toContain('## SECOND REPOSITORY: the API');
+        expect(call.promptBody).toContain('Files the telemetry names:\n- Api.cs');
+        for (const dir of [appDir, apiDir]) {
+            expect(execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dir }).toString().trim()).toBe('feature/x');
+        }
+
+        // A second repository that cannot be opened is a warning, not a failed run.
+        const r2 = await handlers['app-investigation:run']({ sender: { isDestroyed: () => false, send: vi.fn() } }, {
+            query: 'MEDU 500s', config: { subscriptionId: 'sub', apps: APPS },
+            interpretation: { appKey: 'prdmeduapp', target: 'app', startMs: endMs - 3600000, endMs, category: 'errors', question: 'q?' },
+            repoPath: appDir, otherRepoPath: path.join(base, 'missing'),
+        });
+        expect(r2.success).toBe(true);
+        expect(r2.meta.warnings.map(w => w.code)).toContain('OTHER_REPO');
+        expect(r2.meta.otherRepoRoot).toBeUndefined();
+
+        for (const dir of [appDir, apiDir]) execFileSync('git', ['worktree', 'prune'], { cwd: dir });
+        fs.rmSync(base, { recursive: true, force: true });
+    });
+});
+
+describe('checkCitations', () => {
+    const { execFileSync } = require('child_process');
+    const ENV = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    const repo = (file, lines) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-cite-'));
+        fs.mkdirSync(path.join(dir, 'src'));
+        fs.writeFileSync(path.join(dir, 'src', file), Array.from({ length: lines }, (_, n) => `line ${n + 1}`).join('\n'));
+        execFileSync('git', ['init', '-q'], { cwd: dir });
+        execFileSync('git', ['add', '.'], { cwd: dir });
+        execFileSync('git', ['commit', '-q', '-m', 'x'], { cwd: dir, env: ENV });
+        return { dir, sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir }).toString().trim() };
+    };
+
+    it('passes real files, lines and commits, in either repository', async () => {
+        const app = repo('Page.cs', 20), api = repo('UserController.cs', 120);
+        const report = `See \`src/Page.cs:12\`, \`src/Page.cs:3-20\`, \`@api/src/UserController.cs:91\` and commit \`${api.sha}\`. Build \`20261015\` is not a SHA.`;
+        const out = await checkCitations(report, [{ site: 'app', codeRoot: app.dir, root: app.dir }, { site: 'api', codeRoot: api.dir, root: api.dir }]);
+        expect(out).toEqual({ checked: 4, bad: [] });
+        expect(citationWarning(out)).toBeNull();
+        for (const d of [app.dir, api.dir]) fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    it('flags a missing file, a line past the end, an unknown commit and a second-repo path read in the wrong repo', async () => {
+        const app = repo('Page.cs', 20);
+        const report = '`src/Missing.cs:4` `src/Page.cs:70` `src/Page.cs:15-25` `deadbeef1` `@api/src/Page.cs:2` `src/Page.cs:1`';
+        const out = await checkCitations(report, [{ site: 'app', codeRoot: app.dir, root: app.dir }]);
+        expect(out.checked).toBe(6);
+        expect(out.bad).toEqual([
+            { cite: '`src/Missing.cs:4`', reason: 'file not found' },
+            { cite: '`src/Page.cs:70`', reason: 'line past the end (the file has 20)' },
+            { cite: '`src/Page.cs:15-25`', reason: 'line past the end (the file has 20)' },
+            { cite: '`deadbeef1`', reason: 'commit not in the repository' },
+        ]);
+        expect(citationWarning(out)).toMatchObject({ code: 'CITATIONS', message: expect.stringMatching(/^4 of 6 code citations could not be verified/) });
+        fs.rmSync(app.dir, { recursive: true, force: true });
+    });
+
+    it('ignores hosts, trace ids and tokens that only look like citations or commits', async () => {
+        const app = repo('Page.cs', 5);
+        const report = 'Calls to `meduapi.mims.com:443` and `prd.redis.cache.windows.net:6380`; operation `4bf92f3577b34da6a3ce929d0e0e4736`; '
+            + 'PublicKeyToken `b03f5f7f11d50a3a`; build `20261015`.';
+        expect(await checkCitations(report, [{ site: 'app', codeRoot: app.dir, root: app.dir }])).toEqual({ checked: 0, bad: [] });
+        fs.rmSync(app.dir, { recursive: true, force: true });
+    });
+
+    it('says a second-repository file is missing its prefix rather than not found', async () => {
+        const app = repo('Page.cs', 5), api = repo('UserController.cs', 120);
+        const out = await checkCitations('`src/UserController.cs:91`', [{ site: 'app', codeRoot: app.dir, root: app.dir }, { site: 'api', codeRoot: api.dir, root: api.dir }]);
+        expect(out.bad).toEqual([{ cite: '`src/UserController.cs:91`', reason: 'in the API repository: missing the @api/ prefix' }]);
+        for (const d of [app.dir, api.dir]) fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    it('resolves a bare file name when one file in the deployed tree has it, and says when several do', async () => {
+        const app = repo('Page.cs', 20);
+        const one = await checkCitations('`Page.cs:12`', [{ site: 'app', codeRoot: app.dir, root: app.dir, paths: ['src/Page.cs', 'src/Other.cs'] }]);
+        expect(one).toEqual({ checked: 1, bad: [] });
+        const two = await checkCitations('`Page.cs:12`', [{ site: 'app', codeRoot: app.dir, root: app.dir, paths: ['src/Page.cs', 'tests/Page.cs'] }]);
+        expect(two.bad).toEqual([{ cite: '`Page.cs:12`', reason: '2 files have this name: cite the path' }]);
+        const past = await checkCitations('`Page.cs:99`', [{ site: 'app', codeRoot: app.dir, root: app.dir, paths: ['src/Page.cs'] }]);
+        expect(past.bad).toEqual([{ cite: '`Page.cs:99`', reason: 'line past the end (the file has 20)' }]);
+        fs.rmSync(app.dir, { recursive: true, force: true });
+    });
+
+    it('cannot be walked out of the repository', async () => {
+        const app = repo('Page.cs', 5);
+        const out = await checkCitations('`../../etc/secret.cs:1`', [{ site: 'app', codeRoot: app.dir, root: app.dir }]);
+        expect(out.bad).toEqual([{ cite: '`../../etc/secret.cs:1`', reason: 'file not found' }]);
+        fs.rmSync(app.dir, { recursive: true, force: true });
+    });
+});
+
+describe('cleanEpisodes', () => {
+    it('keeps valid Warning/Critical episodes from the page, normalised, and drops the rest', () => {
+        const out = cleanEpisodes([
+            { startT: '2026-11-10T12:00:00Z', endT: '2026-11-10T12:25:00Z', peakSeverity: 'Critical', bucketCount: 26, metricsInvolved: ['CPU', 'API 5xx', 7], peakValues: { CPU: 99, 'API 5xx': '13.6' }, incidentType: 'x'.repeat(300) },
+            { startT: 'nope', endT: '2026-11-10T12:25:00Z', peakSeverity: 'Critical' },
+            { startT: '2026-11-10T12:00:00Z', endT: '2026-11-10T12:25:00Z', peakSeverity: 'Info' },
+        ]);
+        expect(out).toEqual([{
+            startT: '2026-11-10T12:00:00.000Z', endT: '2026-11-10T12:25:00.000Z', peakSeverity: 'Critical', bucketCount: 26,
+            metricsInvolved: ['CPU', 'API 5xx', '7'], peakValues: { CPU: 99 }, incidentType: 'x'.repeat(200),
+        }]);
+        expect(cleanEpisodes(undefined)).toBeUndefined();
+        expect(cleanEpisodes([])).toEqual([]);
+    });
+});
+
+describe('earlier investigations', () => {
+    const report = '## Summary\nThe API ran out of SNAT ports at 20:05.\n\n## Timeline\n| t |\n\n## Root Cause\n- **Cause:** a new HttpClient per call.\n- **Confidence:** High\n\n## Recommended Fix\n1. Reuse the client.';
+
+    it('pulls one section by heading, stopping at the next', () => {
+        expect(sectionOf(report, 'Summary')).toBe('The API ran out of SNAT ports at 20:05.');
+        expect(sectionOf(report, 'Root Cause')).toBe('- **Cause:** a new HttpClient per call.\n- **Confidence:** High');
+        expect(sectionOf(report, 'Gaps & Next Checks')).toBe('');
+    });
+
+    it('keeps at most three, only their Summary and Root Cause, and drops bad entries', () => {
+        const ok = { startMs: 1, endMs: 2, question: 'q'.repeat(400), report };
+        const out = cleanEarlier([ok, { startMs: 'x', endMs: 2, report }, { startMs: 1, endMs: 2, report: 'no headings' }, ok, ok, ok]);
+        // Four valid entries, the bad ones dropped before the cap of three.
+        expect(out).toHaveLength(3);
+        expect(out[0]).toEqual({ startMs: 1, endMs: 2, question: 'q'.repeat(300), summary: 'The API ran out of SNAT ports at 20:05.', rootCause: expect.stringContaining('new HttpClient') });
+        expect(cleanEarlier(undefined)).toBeUndefined();
+    });
+
+    it('puts them in the prompt as context, asking to call a repeat recurring', () => {
+        const p = buildInvestigationPrompt({
+            interpretation: { question: 'q', category: 'errors', symptoms: [], startMs: 0, endMs: 3600000, target: 'app' },
+            query: 'q', app: APPS[0], repoRoot: '/r', azureReport: '', seed: { branch: 'b', head: 'h', commits: '', stat: '', patches: '' },
+            earlier: cleanEarlier([{ startMs: sgt(2026, 11, 1, 20, 0), endMs: sgt(2026, 11, 1, 21, 0), question: 'Why was MEDU down?', report }]),
+        });
+        expect(p).toContain('## EARLIER INVESTIGATIONS OF THIS APP');
+        expect(p).toContain('### 2026-11-01 20:00 SGT → 2026-11-01 21:00 SGT: Why was MEDU down?');
+        expect(p).toContain('**Root cause then:**\n- **Cause:** a new HttpClient per call.');
+        expect(p).toMatch(/call it \*\*recurring\*\*/);
+        const none = buildInvestigationPrompt({
+            interpretation: { question: 'q', category: 'errors', symptoms: [], startMs: 0, endMs: 3600000, target: 'app' },
+            query: 'q', app: APPS[0], repoRoot: '/r', azureReport: '', seed: { branch: 'b', head: 'h', commits: '', stat: '', patches: '' },
+        });
+        expect(none).not.toContain('EARLIER INVESTIGATIONS');
+    });
+});
+
+describe('follow-up queries', () => {
+    const draft = '## Summary\nAPI 5xx burst.\n\n## Gaps & Next Checks\n- which endpoint\n\n# RCA Report: x\n\n## Follow-up Queries\nSite: api — which endpoints failed at 20:05\n```kql\nrequests | where success == false | summarize count() by name\n```\nSite: frontend — dependency targets\n```kql\ndependencies | summarize count() by target\n```\n';
+
+    it('strips the section from the draft and reads each query with its site and purpose', () => {
+        const out = parseFollowUps(draft);
+        expect(out.report).not.toContain('Follow-up Queries');
+        expect(out.report.endsWith('# RCA Report: x')).toBe(true);
+        expect(out.queries).toEqual([
+            { site: 'api', purpose: 'which endpoints failed at 20:05', kql: 'requests | where success == false | summarize count() by name' },
+            { site: 'fe', purpose: 'dependency targets', kql: 'dependencies | summarize count() by target' },
+        ]);
+        expect(parseFollowUps('## Summary\nx')).toEqual({ report: '## Summary\nx', queries: [] });
+    });
+
+    it('refuses queries that reach outside this App Insights resource, and caps the rows', () => {
+        for (const bad of ['externaldata (x:string) [@"https://evil"]', "app('other').requests", "workspace('w').T", 'requests | evaluate bag_unpack(x)', '.drop table x', "cluster('c').database('d').T"]) {
+            expect(vetFollowUp(bad), bad).toBeInstanceOf(Error);
+        }
+        expect(vetFollowUp('requests | summarize count() by name')).toBe('requests | summarize count() by name\n| take 31');
+        expect(vetFollowUp('requests | take 5')).toBe('requests | take 5');
+    });
+
+    it('fences the results as data and tells the second pass not to ask again', () => {
+        const results = [
+            { site: 'api', purpose: 'which endpoints', kql: 'requests', columns: [{ name: 'name' }, { name: 'count_' }], rows: [['POST /a|b', 4011]], error: null },
+            { site: 'fe', purpose: 'deps', kql: 'x', columns: [], rows: [], error: 'refused: no' },
+        ];
+        const md = followUpResults(results);
+        expect(md).toContain('| POST /a\\|b | 4011 |');
+        expect(md).toContain('**Not run / failed:** refused: no');
+        const p = revisePrompt('BASE', 'the draft', results);
+        expect(p.startsWith('BASE\n')).toBe(true);
+        expect(p).toContain('<<<RESULTS');
+        expect(p).toMatch(/Do NOT add a Follow-up Queries section/);
+    });
+
+    it('runs the queries the agent asked for and replaces the draft with the revised report', async () => {
+        const handlers = {};
+        require.cache[require.resolve('electron')] = {
+            exports: { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } }, dialog: {}, shell: { openExternal: vi.fn() } },
+        };
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'inv-fu-'));
+        const { execFileSync } = require('child_process');
+        execFileSync('git', ['init', '-q'], { cwd: base });
+        execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'x'], { cwd: base, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+        const runClaudeCli = vi.fn()
+            .mockResolvedValueOnce({ text: draft, meta: { costUsd: 0.5, tokens: { input: 10, output: 5, total: 15 } } })
+            .mockResolvedValueOnce({ text: '## Summary\nRevised: POST User/SaveUserProfile failed 4,011 times.', meta: { costUsd: 0.25, tokens: { input: 20, output: 5, total: 25 } } });
+        const runKql = vi.fn(async ({ appId }) => (appId === 'ai-api' ? { columns: [{ name: 'name' }], rows: [['POST User/SaveUserProfile']] } : { error: 'Syntax error' }));
+        require('./app-investigation.cjs')(null, {
+            runClaudeCli, runKql, getAiToken: async () => 'tok', loadReleases: async () => null, repoCacheDir: path.join(base, 'cache'),
+            incidentReport: { _collectIncident: async () => ({ data: {}, aiIds: { fe: 'ai-fe', api: 'ai-api' } }), _generateMarkdown: () => '## Report' },
+        });
+        const endMs = Date.now() - 60000;
+        const sent = vi.fn();
+        const r = await handlers['app-investigation:run']({ sender: { isDestroyed: () => false, send: sent } }, {
+            query: 'MEDU 500s', config: { subscriptionId: 'sub', apps: APPS }, followUp: true,
+            interpretation: { appKey: 'prdmeduapp', target: 'app', startMs: endMs - 3600000, endMs, category: 'errors', question: 'q?' },
+            repoPath: base,
+        });
+        expect(r.success).toBe(true);
+        expect(runClaudeCli.mock.calls[0][0].promptBody).toContain('## OPTIONAL: FOLLOW-UP QUERIES');
+        expect(runKql.mock.calls.map(c => c[0].appId)).toEqual(['ai-api', 'ai-fe']);
+        expect(runKql.mock.calls[0][0].kql).toMatch(/\| take 31$/);
+        const second = runClaudeCli.mock.calls[1][0].promptBody;
+        expect(second).not.toContain('## OPTIONAL: FOLLOW-UP QUERIES');
+        expect(second).toContain('| POST User/SaveUserProfile |');
+        expect(second).toContain('**Not run / failed:** Syntax error');
+        expect(r.report).toBe('## Summary\nRevised: POST User/SaveUserProfile failed 4,011 times.');
+        expect(r.meta.costUsd).toBe(0.75);
+        // The live text restarts for the final pass, which streams like the first.
+        expect(sent).toHaveBeenCalledWith('app-investigation:chunk', expect.objectContaining({ reset: true, chunk: '' }));
+        expect(typeof runClaudeCli.mock.calls[1][0].onText).toBe('function');
+        expect(r.meta.warnings.map(w => w.code)).toContain('FOLLOW_UP');
+
+        // Off: one pass, no instruction, no queries.
+        runClaudeCli.mockReset().mockResolvedValueOnce({ text: draft, meta: {} });
+        runKql.mockClear();
+        const off = await handlers['app-investigation:run']({ sender: { isDestroyed: () => false, send: vi.fn() } }, {
+            query: 'MEDU 500s', config: { subscriptionId: 'sub', apps: APPS },
+            interpretation: { appKey: 'prdmeduapp', target: 'app', startMs: endMs - 3600000, endMs, category: 'errors', question: 'q?' },
+            repoPath: base,
+        });
+        expect(runClaudeCli).toHaveBeenCalledTimes(1);
+        expect(runClaudeCli.mock.calls[0][0].promptBody).not.toContain('FOLLOW-UP QUERIES');
+        expect(runKql).not.toHaveBeenCalled();
+        expect(off.success).toBe(true);
+        fs.rmSync(base, { recursive: true, force: true });
     });
 });

@@ -32,6 +32,9 @@ const { _RC_5XX_EXPR: RC_5XX_EXPR } = azureMetrics;
 
 const { fetchRestartCharts, restartSummary, restartEvents } = require('./azure-restarts.cjs');
 const { fetchCrashData, crashTotals } = require('./azure-crashmonitoring.cjs');
+const { fetchSnatCharts, snatSummary } = require('./azure-snat.cjs');
+const { incidentEpisodes, cleanEpisodes } = require('./anomaly-episodes.cjs');
+const { withoutLoadTest } = require('./ai-query.cjs');
 
 const REPORTS_DIR = path.join(os.homedir(), '.claude', 'agents', 'incident-reports');
 
@@ -232,7 +235,7 @@ async function runKQL(appId, aiToken, timespan, query) {
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
+      body: JSON.stringify({ query: withoutLoadTest(query), timespan }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -248,7 +251,7 @@ async function runKQLNamed(appId, aiToken, timespan, query) {
     const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, timespan }),
+      body: JSON.stringify({ query: withoutLoadTest(query), timespan }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -591,13 +594,15 @@ requests
 
 const BURST_RATE = 0.05;
 const BURST_STEP_MS = 5 * 60_000;
+// A bucket this thin is noise (1 failure in 10 requests at 3am). Mirrors BURST_MIN_REQUESTS in incidentTimeline.tsx.
+const BURST_MIN_REQUESTS = 20;
 const MAX_BURSTS = 3;   // the worst few get the endpoint / downstream drilldown
 
 /** Pure. rows: [timestamp, total, failed] per 5-minute bucket, any order. */
 function detectBursts(rows) {
   const bad = (rows ?? [])
     .map(([t, total, failed]) => ({ start: Date.parse(t), total: Number(total) || 0, failed: Number(failed) || 0 }))
-    .filter(b => !isNaN(b.start) && b.total > 0 && b.failed / b.total > BURST_RATE)
+    .filter(b => !isNaN(b.start) && b.total >= BURST_MIN_REQUESTS && b.failed / b.total > BURST_RATE)
     .sort((a, b) => a.start - b.start);
   const out = [];
   for (const b of bad) {
@@ -615,13 +620,17 @@ function detectBursts(rows) {
 
 const OP_CLEAN = `extend opClean=iif(operation_Name has "?", substring(operation_Name, 0, indexof(operation_Name, "?")), operation_Name)`;
 
-/** Bursts for one site, the worst MAX_BURSTS with their top 5xx endpoints and failing downstream calls. */
+/**
+ * Bursts for one site, the worst MAX_BURSTS with their top 5xx endpoints and failing
+ * downstream calls, plus the 5-minute rows [t, total, 5xx, 4xx] they came from (the
+ * anomaly detector's error-rate signals, so it needs no query of its own).
+ */
 async function fetchFiveXxBursts(appId, aiToken, timespan) {
   const rows = await runKQL(appId, aiToken, timespan,
-    `requests | extend rc=toint(resultCode) | summarize total=sum(itemCount), failed=sumif(itemCount, ${RC_5XX_EXPR}) by bin(timestamp, 5m)`);
+    `requests | extend rc=toint(resultCode) | summarize total=sum(itemCount), failed=sumif(itemCount, ${RC_5XX_EXPR}), c4=sumif(itemCount, rc >= 400 and rc < 500) by bin(timestamp, 5m)`);
   if (!rows) return null;
   const worst = detectBursts(rows).sort((a, b) => b.failed - a.failed).slice(0, MAX_BURSTS).sort((a, b) => a.start - b.start);
-  return Promise.all(worst.map(async (b) => {
+  const bursts = await Promise.all(worst.map(async (b) => {
     const span = `${new Date(b.start).toISOString()}/${new Date(b.end).toISOString()}`;
     const [eps, deps] = await Promise.all([
       runKQL(appId, aiToken, span,
@@ -638,6 +647,7 @@ async function fetchFiveXxBursts(appId, aiToken, timespan) {
       deps: (deps ?? []).map(([op, type, target, failed]) => ({ op: String(op ?? '') || '(no operation)', type: String(type ?? ''), target: String(target ?? ''), failed: Number(failed) || 0 })),
     };
   }));
+  return { bursts, rows };
 }
 
 /** Markdown for the 5xx bursts; '' when they could not be fetched. Pure. */
@@ -645,9 +655,9 @@ function fiveXxBurstsSection(bursts, heading) {
   if (!bursts) return '';
   let md = `${heading}\n\n`;
   if (!bursts.length) {
-    return md + `_No 5xx burst: 5xx stayed at or below ${BURST_RATE * 100}% of requests in every 5-minute bucket (the same rule as App Health Check's Incident Timeline)._\n\n`;
+    return md + `_No 5xx burst: 5xx stayed at or below ${BURST_RATE * 100}% of requests in every 5-minute bucket with at least ${BURST_MIN_REQUESTS} requests (the same rule as App Health Check's Incident Timeline)._\n\n`;
   }
-  md += `_A burst is a run of 5-minute buckets where 5xx is above ${BURST_RATE * 100}% of requests (the same rule as App Health Check's Incident Timeline). A burst can start before downtime, and that is often the first sign of the cause. Only the worst ${MAX_BURSTS} get the drilldown._\n\n`;
+  md += `_A burst is a run of 5-minute buckets where 5xx is above ${BURST_RATE * 100}% of at least ${BURST_MIN_REQUESTS} requests (the same rule as App Health Check's Incident Timeline). A burst can start before downtime, and that is often the first sign of the cause. Only the worst ${MAX_BURSTS} get the drilldown._\n\n`;
   md += mdTable(['Start (SGT)', 'End (SGT)', 'Peak 5xx %', '5xx', 'Requests'],
     bursts.map(b => [sgt(b.start), sgt(b.end), (b.peak * 100).toFixed(1) + '%', b.failed.toLocaleString(), b.total.toLocaleString()]));
   md += '\n';
@@ -666,6 +676,98 @@ function fiveXxBurstsSection(bursts, heading) {
   return md;
 }
 
+// ── Anomaly episodes ──────────────────────────────────────────────────────────
+
+/** Markdown for the correlated anomaly episodes (App Health Check's detector); '' when not computed. Pure. */
+function anomalyEpisodesSection(episodes) {
+  if (!Array.isArray(episodes)) return '';
+  let md = `## Anomaly Episodes\n\n_The same correlated detector as App Health Check's Anomaly Detection row: each metric against its own trend for this window (CPU, memory, DB, FE/API 4xx and 5xx rates), joined per 5-minute bucket. Critical = both sites erroring, or errors with CPU/DB pressure; Warning = one site erroring, or two pressure signals. CPU-only blips are left out._\n\n`;
+  if (!episodes.length) return md + `No Warning or Critical episode in this window.\n\n`;
+  md += mdTable(['Start (SGT)', 'End (SGT)', 'Severity', 'Buckets', 'Metrics (peak)', 'Likely type'], episodes.map(e => [
+    sgt(e.startT), sgt(e.endT), e.peakSeverity, e.bucketCount,
+    e.metricsInvolved.map(n => `${n} ${Number(e.peakValues[n] ?? 0).toFixed(1)}%`).join(', '),
+    e.incidentType || null,
+  ]));
+  return md + '\n';
+}
+
+// ── Baseline: the same window earlier ─────────────────────────────────────────
+// "5xx 3.6%" says little on its own; "3.6% against 0.02% at the same time yesterday"
+// says it is the incident. Same clock time, so daily traffic shape cancels out.
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/** This window and the same clock time a day and a week earlier, each only when it cannot overlap this one. Pure. */
+function baselinePeriods(startMs, endMs) {
+  const len = endMs - startMs;
+  return [
+    { key: 'now', label: 'This window', startMs, endMs },
+    len <= DAY_MS ? { key: 'day', label: 'Day before', startMs: startMs - DAY_MS, endMs: endMs - DAY_MS } : null,
+    len <= 7 * DAY_MS ? { key: 'week', label: 'Week before', startMs: startMs - 7 * DAY_MS, endMs: endMs - 7 * DAY_MS } : null,
+  ].filter(Boolean);
+}
+
+/** Request, 5xx, P95, exception and failed-dependency totals per period; null without a baseline period or data. */
+async function fetchBaseline(appId, aiToken, startMs, endMs) {
+  const periods = baselinePeriods(startMs, endMs);
+  if (periods.length < 2) return null;
+  const iso = (ms) => new Date(ms).toISOString();
+  const tagged = (table, filter = '') => `union ${periods.map(p =>
+    `(${table} | where timestamp between (datetime(${iso(p.startMs)}) .. datetime(${iso(p.endMs)}))${filter} | extend period='${p.key}')`).join(', ')}`;
+  const timespan = `${iso(Math.min(...periods.map(p => p.startMs)))}/${iso(endMs)}`;
+  const [req, exc, dep] = await Promise.all([
+    runKQLNamed(appId, aiToken, timespan, `${tagged('requests')} | extend rc=toint(resultCode) | summarize requests=sum(itemCount), fiveXx=sumif(itemCount, ${RC_5XX_EXPR}), p95=percentile(duration, 95) by period`),
+    runKQLNamed(appId, aiToken, timespan, `${tagged('exceptions')} | summarize exceptions=sum(itemCount) by period`),
+    runKQLNamed(appId, aiToken, timespan, `${tagged('dependencies', ' | where success == false')} | summarize depFailed=sum(itemCount) by period`),
+  ]);
+  if (!req) return null;
+  const byPeriod = (res, key) => {
+    const out = {};
+    if (!res) return out;
+    const pi = res.cols.indexOf('period'), vi = res.cols.indexOf(key);
+    for (const r of res.rows) out[r[pi]] = Number(r[vi]) || 0;
+    return out;
+  };
+  const cols = { requests: byPeriod(req, 'requests'), fiveXx: byPeriod(req, 'fiveXx'), p95: byPeriod(req, 'p95'), exceptions: byPeriod(exc, 'exceptions'), depFailed: byPeriod(dep, 'depFailed') };
+  return periods.map(p => ({
+    key: p.key, label: p.label, startMs: p.startMs, endMs: p.endMs,
+    requests: cols.requests[p.key] ?? 0, fiveXx: cols.fiveXx[p.key] ?? 0, p95: cols.p95[p.key] ?? null,
+    // A failed query is unknown, not zero.
+    exceptions: exc ? (cols.exceptions[p.key] ?? 0) : null,
+    depFailed: dep ? (cols.depFailed[p.key] ?? 0) : null,
+  }));
+}
+
+/** "×3.2" against a baseline value; "new" when the baseline had none. Pure. */
+function ratioText(now, base) {
+  if (now == null || base == null) return '';
+  if (base === 0) return now > 0 ? ' (new)' : '';
+  const r = now / base;
+  return r >= 0.95 && r <= 1.05 ? ' (same)' : ` (now ×${r >= 10 ? Math.round(r) : r.toFixed(1)})`;
+}
+
+/** Markdown comparing this window with the same clock time earlier; '' without a baseline. Pure. */
+function baselineSection(rows, heading = '## Compared With Normal') {
+  if (!rows || rows.length < 2) return '';
+  const [now, ...base] = rows;
+  const pct = (r) => (r.requests > 0 ? ` (${((r.fiveXx / r.requests) * 100).toFixed(2)}%)` : '');
+  const num = (v) => (v == null ? '—' : Number(v).toLocaleString());
+  const cell = (r, v, nowV, fmt = num) => `${fmt(v)}${r === now ? '' : ratioText(nowV, v)}`;
+  const line = (name, get, fmt) => `| ${name} | ${rows.map(r => cell(r, get(r), get(now), fmt)).join(' | ')} |`;
+  return [
+    `${heading}\n`,
+    '_The same clock time earlier, so the daily traffic shape cancels out. "now ×N" is this window against that one. A baseline period can hold its own incident or an older release; check before calling a change abnormal._\n',
+    `| Metric | ${rows.map(r => `${r.label} (${sgt(r.startMs)})`).join(' | ')} |`,
+    `|---|${rows.map(() => '---').join('|')}|`,
+    line('Requests', r => r.requests),
+    `| 5xx | ${rows.map(r => `${num(r.fiveXx)}${pct(r)}${r === now ? '' : ratioText(now.fiveXx, r.fiveXx)}`).join(' | ')} |`,
+    line('P95 response', r => r.p95, (v) => (v == null ? '—' : msFormat(v))),
+    line('Exceptions', r => r.exceptions),
+    line('Failed dependency calls', r => r.depFailed),
+    '',
+  ].join('\n') + '\n';
+}
+
 // ── Restarts & crashes ────────────────────────────────────────────────────────
 // The same App Service detectors App Health Check shows. "The process died, and why"
 // is the one thing availability and 5xx cannot say: Kudu kill, App Crash or Platform Healing.
@@ -674,11 +776,12 @@ const MAX_EVENT_ROWS = 20;
 
 /** Restarts and crashes for one App Service site; each is null when its detector is missing or fails. */
 async function fetchSiteEvents(token, siteResId, startIso, endIso) {
-  const [restarts, crashes] = await Promise.all([
+  const [restarts, crashes, snat] = await Promise.all([
     fetchRestartCharts(token, siteResId, startIso, endIso, 'PT5M').catch(() => null),
     fetchCrashData(token, siteResId, startIso, endIso, 'PT5M').catch(() => null),
+    fetchSnatCharts(token, siteResId, startIso, endIso, 'PT5M').catch(() => null),
   ]);
-  return { restarts, crashes };
+  return { restarts, crashes, snat };
 }
 
 /** Markdown for one site's restarts and crashes; '' when the site has none to report on. Pure. */
@@ -729,6 +832,50 @@ function siteEventsSection(ev, label) {
     }
   }
   return md;
+}
+
+/** Markdown for one site's SNAT port detector; '' when the site was not fetched. Pure. */
+function siteSnatSection(ev, label) {
+  if (!ev) return '';
+  const sum = snatSummary(ev.snat);
+  const head = `### ${label}\n\n`;
+  if (!sum) return `${head}_No SNAT detector data for this site, so port usage is unknown (not "none")._\n\n`;
+  let md = head;
+  if (sum.instances.length) {
+    md += mdTable(['Instance', 'Peak ports used', 'Peak ports allocated'],
+      sum.instances.slice(0, 8).map(i => [i.instance, i.peakUsed, i.peakAllocated || null])) + '\n';
+  }
+  const at = (t) => (t ? sgt(t) : null);
+  const row = (name, c) => c && [name, c.total, c.peak, at(c.peakAt), at(c.firstAt)];
+  md += mdTable(['Counter', 'Total', 'Peak per bucket', 'Peak at (SGT)', 'First seen (SGT)'], [
+    row('Failed SNAT connections', sum.failed),
+    row('Pending SNAT connections', sum.pending),
+    row('New SNAT connections', sum.created),
+  ].filter(Boolean)) + '\n';
+  const failed = sum.failed?.total ?? 0;
+  const usage = Math.max(0, ...sum.instances.filter(i => i.peakAllocated).map(i => i.peakUsed / i.peakAllocated));
+  const pctText = `${Math.round(usage * 100)}% of the allocation`;
+  // A failed SNAT connection is exhaustion only when the pool was nearly used up; otherwise
+  // the destination refused or timed out. Saying "ports ran out" at 53% misled the agent.
+  if (failed > 0 && usage >= SNAT_NEAR_FULL) {
+    return md + `**${failed} failed SNAT connection${failed === 1 ? '' : 's'} with port use at ${pctText}: outbound ports were close to exhausted.** Compare the first-seen time with the 5xx bursts and downtime.\n\n`;
+  }
+  if (failed > 0) {
+    return md + `**${failed} failed SNAT connection${failed === 1 ? '' : 's'}, but port use peaked at only ${pctText}, so this is not port exhaustion:** the destination refused or timed out those connections. Compare the first-seen time with the failing downstream calls.\n\n`;
+  }
+  return md + `No failed SNAT connections in the window${usage >= SNAT_NEAR_FULL ? `, but port use reached ${pctText} on an instance` : ''}.\n\n`;
+}
+
+const SNAT_NEAR_FULL = 0.8;
+
+/** Markdown for the SNAT detector of both sites; '' when neither was fetched. */
+function siteSnatReport(siteEvents) {
+  // One App Service plan is one set of instances and one SNAT pool: the API's figures repeat the frontend's.
+  const api = siteEvents?.sharedPlan && siteEvents?.fe
+    ? (siteEvents.api ? '### API\n\nSame App Service plan as the frontend, so the same instances and SNAT pool: the figures above cover both sites. Do not add them together.\n\n' : '')
+    : siteSnatSection(siteEvents?.api, 'API');
+  const parts = [siteSnatSection(siteEvents?.fe, 'Frontend'), api].filter(Boolean);
+  return parts.length ? `## 18. SNAT Ports (App Service detector)\n\nDirect port allocation evidence, the same charts App Health Check shows. Section 6 only infers SNAT from exception text.\n\n${parts.join('')}` : '';
 }
 
 /** Markdown for restarts and crashes of both sites; '' when neither was fetched. */
@@ -1051,7 +1198,7 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
          [exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
           failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
           failedUrlsByStatus, slowUrls, oomInsights, dependencyTimeouts,
-          timeoutsByEndpoint, socketSkew, userTraffic, fiveXxBursts, exceptionPeaks],
+          timeoutsByEndpoint, socketSkew, userTraffic, fiveXx, exceptionPeaks],
          [socketCounters, planCapacity, connectionsSeries,
           instReqSplit, inst5xxSplit, instProbeSplit, dbCpuSeries, dbMemSeries]]
     = await Promise.all([armPromises, kqlPromises, infraPromises]);
@@ -1074,7 +1221,8 @@ async function fetchAllIncidentData(token, aiToken, resId, planResId, appId, sta
     exceptionAnalysis, endpointLatency, sqlDeep, deploymentEvents, snatIndicators,
     failedDeps, trafficInsight, highFreqIPs, threadPoolCounters, gcCounters,
     failedUrlsByStatus, slowUrls,
-    oomInsights, dependencyTimeouts, timeoutsByEndpoint, socketSkew, userTraffic, fiveXxBursts, exceptionPeaks,
+    oomInsights, dependencyTimeouts, timeoutsByEndpoint, socketSkew, userTraffic, exceptionPeaks,
+    fiveXxBursts: fiveXx?.bursts ?? null, fiveXxRows: fiveXx?.rows ?? null,
     socketCounters, planCapacity, connectionsSeries, dbCpuSeries, dbMemSeries,
     instanceHealthSeries, instanceProbeSeries,
   };
@@ -1161,7 +1309,8 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = 
     dependencyTimeouts: val(8),
     userTraffic: val(9),
     failedUrlsByStatus: val(10),
-    fiveXxBursts: val(11),
+    fiveXxBursts: val(11)?.bursts ?? null,
+    fiveXxRows: val(11)?.rows ?? null,
     exceptionPeaks: val(12),
     reqSummary: reqRows?.[0] ?? null,
     arm: armResults ? {
@@ -1174,10 +1323,23 @@ async function fetchApiIncidentData(aiToken, appId, startTime, endTime, token = 
 
 // ── Anomaly score ─────────────────────────────────────────────────────────────
 
+/** Mean of the points that carry a value; null when none do. A missing point is "no data",
+ *  not 0: counting it as 0 printed an API with no health-check data as "Availability 0.00%". */
+function meanOf(arr, key) {
+  const vals = (arr ?? []).map(p => p?.[key]).filter(Number.isFinite);
+  return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+}
+
+/** Lowest value among the points that carry one; null when none do. */
+function minOf(arr, key) {
+  const vals = (arr ?? []).map(p => p?.[key]).filter(Number.isFinite);
+  return vals.length ? Math.min(...vals) : null;
+}
+
 function computeAnomalyScore(data) {
   const { availSeries, cpuSeries, rtSeries, fail5xxSeries, snatIndicators, sqlDeep, trafficInsight } = data;
 
-  const avg = (arr, key) => arr.length ? arr.reduce((s, p) => s + (p[key] ?? 0), 0) / arr.length : 0;
+  const avg = (arr, key) => meanOf(arr, key) ?? 0;
   const sum = (arr, key) => arr.reduce((s, p) => s + (p[key] ?? 0), 0);
 
   const availPct = avg(availSeries, 'average');
@@ -1609,7 +1771,7 @@ function generateMarkdown({ appName, resourceGroup, startMs, endMs, data, anomal
   const startSGT = msToSGT(startMs);
   const endSGT = msToSGT(endMs);
 
-  const avg = (arr, key) => arr.length ? arr.reduce((s, p) => s + (p[key] ?? 0), 0) / arr.length : null;
+  const avg = meanOf;
   const maxV = (arr, key) => arr.length ? Math.max(...arr.map(p => p[key] ?? 0)) : null;
 
   const totalReqs = data.requestsSeries.reduce((s, p) => s + (p.total ?? 0), 0);
@@ -1623,7 +1785,7 @@ function generateMarkdown({ appName, resourceGroup, startMs, endMs, data, anomal
   const rtAvg = avg(data.rtSeries, 'average');
   const rtMax = maxV(data.rtSeries, 'maximum');
   const availAvg = avg(data.availSeries, 'average');
-  const availMin = data.availSeries.length ? Math.min(...data.availSeries.map(p => p.average ?? 100)) : null;
+  const availMin = minOf(data.availSeries, 'average');
   const downPts = data.availSeries.filter(p => (p.average ?? 100) < 99.5).length;
   const downMins = downPts * 5;
 
@@ -1696,7 +1858,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
 | HTTP 4xx | — | — | ${total4xx.toLocaleString()} (${dispReqs > 0 ? ((total4xx / dispReqs) * 100).toFixed(2) + '%' : 'n/a'}) |
 | Unique users | — | ${data.userTraffic?.peak?.users ? data.userTraffic.peak.users.toLocaleString() + ' (peak 5m)' : '—'} | ${anomaly.uniqueUsers ? anomaly.uniqueUsers.toLocaleString() : '—'} |
 
----
+${hasAppInsights ? baselineSection(data.baseline) : ''}---
 
 `;
 
@@ -1721,6 +1883,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
 
   // ── Deterministic Incident Timeline ──
   md += buildTimelineSection(data, downtimeIntervals);
+  md += anomalyEpisodesSection(data.episodes);
   md += `---\n\n`;
 
   // ── Category 1: Dependency Saturation ──
@@ -2160,6 +2323,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
   md += userTrafficSection(data.userTraffic, hasAppInsights, '## 16. User Traffic & Bursts');
 
   md += siteEventsReport(data.siteEvents);
+  md += siteSnatReport(data.siteEvents);
 
   // ── API Section ──
   if (apiData && apiName) {
@@ -2180,6 +2344,7 @@ Socket-layer and application-timeout exceptions are counted separately and never
     } else {
       md += `### Summary\n\n_No request data._\n\n`;
     }
+    md += baselineSection(apiData.baseline, '### Compared With Normal');
 
     // ARM metrics for the API. Previously absent entirely, so the model was told
     // to "address both throughout" with no CPU, memory, or availability for the API.
@@ -2188,13 +2353,13 @@ Socket-layer and application-timeout exceptions are counted separately and never
       md += `_API ARM metrics unavailable — the API resource could not be resolved in resource group \`${resourceGroup}\`. CPU, memory, and availability for the API are unknown; do not infer them from the frontend app._\n\n`;
     } else {
       const a = apiData.arm;
-      const aAvg = (arr, key) => arr.length ? arr.reduce((s, p) => s + (p[key] ?? 0), 0) / arr.length : null;
+      const aAvg = meanOf;
       const aMax = (arr, key) => arr.length ? Math.max(...arr.map(p => p[key] ?? 0)) : null;
       const apiTotalReqs = a.requestsSeries.reduce((s, p) => s + (p.total ?? 0), 0);
       const apiTotal5xx = a.fail5xxSeries.reduce((s, p) => s + (p.total ?? 0), 0);
       const apiTotal4xx = a.fail4xxSeries.reduce((s, p) => s + (p.total ?? 0), 0);
       const apiAvailAvg = aAvg(a.availSeries, 'average');
-      const apiAvailMin = a.availSeries.length ? Math.min(...a.availSeries.map(p => p.average ?? 100)) : null;
+      const apiAvailMin = minOf(a.availSeries, 'average');
       md += `| Metric | Average | Peak / Min | Total |\n|---|---|---|---|\n`;
       md += `| Availability | ${apiAvailAvg !== null ? apiAvailAvg.toFixed(2) + '%' : '—'} | ${apiAvailMin !== null ? apiAvailMin.toFixed(2) + '% (min)' : '—'} | — |\n`;
       md += `| CPU (plan) | ${pct(aAvg(a.cpuSeries, 'average'))} | ${pct(aMax(a.cpuSeries, 'maximum'))} | — |\n`;
@@ -2417,7 +2582,10 @@ async function collectIncident(opts) {
     ? fetchSiteEvents(token, resId, startTime.toISOString(), endTime.toISOString()).catch(() => null)
     : Promise.resolve(null);
 
-  const [data, apiData, edge, feEvents, apiEvents] = await Promise.all([
+  const baseline = (id) => (id && aiToken)
+    ? fetchBaseline(id, aiToken, startTime.getTime(), endTime.getTime()).catch(() => null)
+    : Promise.resolve(null);
+  const [data, apiData, edge, feEvents, apiEvents, feBaseline, apiBaseline] = await Promise.all([
     fetchAllIncidentData(token, aiToken, appResId, planResId, appInsightsAppId, startTime, endTime, isContainerApp, dbResId),
     ((apiInsightsAppId && aiToken) || apiSharesInsights)
       ? fetchApiIncidentData(aiToken, apiInsightsAppId, startTime, endTime, token, apiResId, apiPlanResId).catch(() => null)
@@ -2427,16 +2595,24 @@ async function collectIncident(opts) {
       : Promise.resolve(null),
     events(appResId, isContainerApp),
     events(apiResId, isApiContainerApp),
+    baseline(appInsightsAppId),
+    baseline(apiInsightsAppId),
   ]);
   if (apiData && apiSharesInsights) apiData.sharedInsights = true;
-  data.siteEvents = { fe: feEvents, api: apiEvents };
+  data.baseline = feBaseline;
+  data.episodes = incidentEpisodes(data, apiData);
+  if (apiData) apiData.baseline = apiBaseline;
+  // ARM ids differ in casing between calls, so the plan comparison ignores case.
+  data.siteEvents = { fe: feEvents, api: apiEvents, sharedPlan: !!planResId && String(planResId).toLowerCase() === String(apiPlanResId ?? '').toLowerCase() };
   data.edge = edge;
   data.hasEdgeConfig = hasEdgeConfig;
   data.hasDbConfig = !!dbResId;
   const anomaly = computeAnomalyScore(data);
   const hasAppInsights = !!(appInsightsAppId && aiToken);
 
-  return { data, anomaly, hasAppInsights, apiData, apiName: apiName || null };
+  // The ids it resolved, so an investigation's follow-up queries run against the same resources.
+  const aiIds = { fe: appInsightsAppId || null, api: apiInsightsAppId || (apiSharesInsights ? appInsightsAppId : null) || null };
+  return { data, anomaly, hasAppInsights, apiData, apiName: apiName || null, aiIds };
 }
 
 // ── Claude RCA ──────────────────────────────────────────────────────────────
@@ -2912,6 +3088,9 @@ async function rcaReportMarkdown(opts, stage, collect = collectIncident) {
   }
   stage('Authenticating with Azure & pulling telemetry (CPU, memory, requests, 5xx, exceptions, dependencies, SQL + DB server, socket/TCP counters, per-instance health, OOM, user traffic) for app + API');
   const { data, anomaly, hasAppInsights, apiData, apiName } = await collect(opts);
+  // App Investigation sends the episodes its charts show (App Health Check's detector at 1 minute).
+  const pageEpisodes = cleanEpisodes(opts.episodes);
+  if (pageEpisodes) data.episodes = pageEpisodes;
 
   stage('Assembling 16-category incident report' + (hasAppInsights ? '' : ' (App Insights not configured — ARM metrics only)'));
   return generateMarkdown({
@@ -3147,6 +3326,12 @@ handler._stripModelNarration = stripModelNarration;
 handler._generateMarkdown = generateMarkdown;
 handler._detectBursts = detectBursts;
 handler._restartEvents = restartEvents;
+handler._meanOf = meanOf;
+handler._anomalyEpisodesSection = anomalyEpisodesSection;
+handler._baselineSection = baselineSection;
+handler._baselinePeriods = baselinePeriods;
+handler._siteSnatSection = siteSnatSection;
+handler._siteSnatReport = siteSnatReport;
 handler._topFrames = topFrames;
 handler._buildRcaPrompt = buildRcaPrompt;
 handler._buildAiRemarksPrompt = buildAiRemarksPrompt;

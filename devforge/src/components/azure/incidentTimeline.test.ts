@@ -22,8 +22,19 @@ const lane = (lanes: ReturnType<typeof buildTimelineLanes>, key: string) => lane
 describe('buildTimelineLanes', () => {
   it('returns every lane, empty when nothing happened', () => {
     const lanes = buildTimelineLanes(input());
-    expect(lanes.map(l => l.key)).toEqual(['releases', 'restarts', 'crashes', 'downtime', 'anomalies', 'http5xx']);
+    expect(lanes.map(l => l.key)).toEqual(['releases', 'changes', 'restarts', 'crashes', 'downtime', 'anomalies', 'http5xx']);
     expect(lanes.every(l => l.items.length === 0)).toBe(true);
+  });
+
+  it('shows Activity Log changes per site with who made them, inside the range only', () => {
+    const fe: ReleaseResult = { events: [], last: null, sources: {}, changes: [
+      { at: iso(-60), kind: 'config', label: 'Configuration change' },
+      { at: iso(15), kind: 'restart', label: 'Restart', by: 'ops@mims.com' },
+    ] };
+    const api: ReleaseResult = { events: [], last: null, sources: {}, changes: [{ at: iso(40), kind: 'plan', label: 'App Service plan change' }] };
+    const items = lane(buildTimelineLanes(input({ hasApi: true, releases: fe, apiReleases: api })), 'changes').items;
+    expect(items.map(i => [i.startMs, i.site, i.cause])).toEqual([[T0 + 15 * MIN, 'fe', 'restart'], [T0 + 40 * MIN, 'api', 'plan']]);
+    expect(items[0]!.title).toMatch(/^FE · .* · Restart\nby ops@mims\.com$/);
   });
 
   it('keeps releases inside the range and drops the 30-day look-back ones', () => {
@@ -125,6 +136,13 @@ describe('buildTimelineLanes', () => {
     expect(api.label).toBe('API 5xx');
     expect(api.items.map(i => [i.startMs, i.endMs, i.burstSite])).toEqual([[T0 + 30 * MIN, T0 + 60 * MIN, 'api']]);
     expect(api.items[0]!.title).toMatch(/^API · 5xx above 5%.*\nPeak 9\.0%$/s);
+  });
+
+  it('ignores a bucket with too few requests even when its 5xx rate is high', () => {
+    const series = [{ n: 10, c5: 5 }, { n: 100, c5: 0 }, { n: 100, c5: 10 }].map((b, i) => ({ t: iso(i * 15), count: b.n, c4: 0, c5: b.c5, avgMs: 0, p95: 0 }));
+    const metrics = { ...baseMetrics, requestInsights: { performance: { overallSeries: series } } } as unknown as AppMetrics;
+    const items = lane(buildTimelineLanes(input({ metrics })), 'http5xx').items;
+    expect(items.map(i => i.startMs)).toEqual([T0 + 30 * MIN]);
   });
 
   it('has no API lane for an app without an API', () => {

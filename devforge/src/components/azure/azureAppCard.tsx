@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, Loader2 } from 'lucide-react';
+import { Share2, ChevronDown, ChevronRight, Sparkles, SlidersHorizontal, Loader2, SearchCode } from 'lucide-react';
+import { buildInvestigationRequest, requestInvestigation } from '@/lib/investigation-request';
 import { marked } from 'marked';
 import { Hint } from '@/components/ui/hint';
 import { toast } from 'sonner';
@@ -8,7 +9,7 @@ import type { AppMetrics, SocketInsights, TimeoutInsights, OomInsights, SocketCo
 import type { AzureSettings } from '@/types/settings.types';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE } from './azureMetricChart';
+import { CombinedChart, MetricLegend, InstanceHealthChart, CHART_COLORS, INSTANCE_PALETTE, WorkerCountChart } from './azureMetricChart';
 import { activeRemarkList, breakdownTarget, buildRemarks, collectRemarks, formatStatusBreakdown, nowRemarkItems, nowRemarkText } from './azureAppRemarks';
 import { buildRemarkStory, type StoryTone } from './remarkStory';
 import { RemarkStoryView } from './remarkStoryView';
@@ -16,6 +17,9 @@ import { SnatPortsRows, snatSummary } from './snatPortSection';
 import { AnomalyDetectionRow } from './anomalySection';
 import { RestartRows, restartTotals } from './restartSection';
 import { CrashMonitoringRows, crashTotals } from './crashMonitoringSection';
+import { headerVitals } from './headerVitals';
+import { workerCounts } from './workerCount';
+import { DownstreamFailures } from './downstreamFailures';
 import { buildSiteTeamsCopy, instanceColors, snatColors, uptimeColors, type SiteCopySection } from './siteTeamsCopy';
 import { IncidentTimeline, buildTimelineLanes } from './incidentTimeline';
 import { ReleaseVerdictDialog, type ReleaseVerdictTarget } from './releaseVerdictDialog';
@@ -1789,6 +1793,20 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
               <span style={{ color: CHART_COLORS.memMax }}>Mem {(+metrics.memory.max).toFixed(2)}{metrics.memUnit}</span>
             </span>
           )}
+          {headerVitals({
+            // A shared plan has one SNAT pool: counting the API's copy too would double it (same rule as the table rows).
+            snat: metrics.snat, apiSnat: metrics.apiSharesPlan === false ? metrics.apiSnat : undefined,
+            restarts, apiRestarts: hasApi ? apiRestarts : undefined,
+            crashes, apiCrashes: hasApi ? apiCrashes : undefined,
+          }).map(v => (
+            <Hint key={v.key} label={v.key === 'snat'
+              ? 'Peak SNAT ports used against allocated, frontend and API; failed means outbound connections were refused'
+              : `Frontend and API ${v.key} in this range, from the App Service detectors`}>
+              <span className="text-[10px] font-semibold" style={{ color: v.tone === 'bad' ? UI.error : v.tone === 'warn' ? UI.warning : UI.textMuted }}>
+                {v.text}
+              </span>
+            </Hint>
+          ))}
           {([
             { tag: 'Frontend',  show: true,   ai: feHasInsights },
             { tag: 'API', show: hasApi,  ai: apiHasInsights },
@@ -1865,6 +1883,27 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <Share2 className="w-3.5 h-3.5" />}
               {(isCopying || isTeamsCopying) ? 'Copying…' : 'Copy for Teams'}
+            </Button>
+          </Hint>
+          <Hint label={remarksReady ? 'Open App Investigation for this app, focused on the downtime or worst 5xx burst in range' : 'Waiting for the card to finish loading'}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
+              // Waits for the UptimeRobot logs and details, or the downtime and bursts it focuses on are incomplete.
+              disabled={!remarksReady}
+              onClick={() => requestInvestigation(buildInvestigationRequest({
+                appKey, appLabel: platformName, rangeStartMs: timelineStartMs, rangeEndMs: timelineEndMs,
+                // Empty while the Timeline and Remarks blocks are both hidden; built for the click then.
+                lanes: timelineLanes.length ? timelineLanes : buildTimelineLanes({
+                  startMs: timelineStartMs, endMs: timelineEndMs, metrics, hasApi: !!releaseApiName,
+                  releases, apiReleases, restarts, apiRestarts, crashes, apiCrashes, urMonitors,
+                }),
+              }))}
+              data-html2canvas-ignore="true"
+            >
+              <SearchCode className="w-3.5 h-3.5" />
+              Investigate
             </Button>
           </Hint>
         </div>
@@ -2055,14 +2094,21 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                             const chartRows = selectedInstanceName && rows.some(r => r.name === selectedInstanceName)
                               ? rows.filter(r => r.name === selectedInstanceName)
                               : rows;
-                            return (
+                            return (<>
+                          {/* Capacity over time first: how many workers served requests in each
+                              bucket, so a scale-in or a dead worker shows as a step. */}
+                          <div style={{ fontSize: 10, color: UI.textDim, paddingLeft: 8 }}>Workers serving requests</div>
+                          <WorkerCountChart
+                            rows={workerCounts(metrics.cpu.series.map(p => p.t), metrics.instanceHealthSeries, hasApi ? metrics.apiInstanceHealthSeries : null)}
+                            syncId={hoverSyncId}
+                          />
                           <InstanceHealthChart
                             instances={chartRows.map(r => ({ name: r.name, label: r.label, series: r.points }))}
                             colors={chartRows.map(r => r.color)}
                             height={150}
                             syncId={hoverSyncId}
                           />
-                            );
+                            </>);
                           })()}
                           {/* Legend doubles as the readout the removed rows carried:
                               colour, name, role, avg, min, and lifecycle range — and as
@@ -2430,6 +2476,11 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                 captureTag="fe"
               />
             )}
+            {visibleBlocks.performance && metrics.appInsightsConfigured && (
+              <tr data-html2canvas-ignore="true"><td colSpan={4}>
+                <DownstreamFailures appKey={appKey} site="fe" config={azureSettings} startIso={new Date(timelineStartMs).toISOString()} endIso={new Date(timelineEndMs).toISOString()} collapsible />
+              </td></tr>
+            )}
             {visibleBlocks.exceptions && metrics.appInsightsConfigured && metrics.requestInsights && !metrics.requestInsights.error && (() => {
               const errorTypes = metrics.requestInsights.errorTypes ?? [];
               const hasDetail  = errorTypes.length > 0;
@@ -2600,6 +2651,11 @@ function AzureAppCardInner({ appKey, metrics, loading, detailsLoading = false, d
                   error={metrics.apiRequestInsights?.error}
                   captureTag="api"
                 />
+              )}
+              {visibleBlocks.performance && apiHasInsights && (
+                <tr data-html2canvas-ignore="true"><td colSpan={4}>
+                  <DownstreamFailures appKey={appKey} site="api" config={azureSettings} startIso={new Date(timelineStartMs).toISOString()} endIso={new Date(timelineEndMs).toISOString()} collapsible />
+                </td></tr>
               )}
               {visibleBlocks.exceptions && apiHasInsights && metrics.apiRequestInsights && !metrics.apiRequestInsights.error && (() => {
                 const apiErrorTypes = metrics.apiRequestInsights.errorTypes ?? [];

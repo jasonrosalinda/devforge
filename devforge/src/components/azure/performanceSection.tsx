@@ -64,8 +64,10 @@ function perfChartState(
  * the endpoint table underneath is the drill-down you open deliberately.
  */
 export function PerformanceChart({
-  perf, fmtMs, syncId, deps, selected, captureTag,
+  perf, fmtMs, syncId, deps, selected, captureTag, drillHint = true,
 }: {
+  /** False where there is no endpoint table to expand (App Investigation). */
+  drillHint?: boolean | undefined;
   perf: EndpointPerformance;
   fmtMs: (ms: number | null) => string;
   /** Card-wide hover group, so the crosshair tracks the CPU/memory chart. */
@@ -110,8 +112,8 @@ export function PerformanceChart({
               {/* Stated, not implied: this is all traffic, while the figures on the row
                   above cover the merged set only — so the two totals will not agree, and
                   a reader who assumes they should will read the gap as a bug. */}
-              <span style={{ color: UI.textDim }}> — all requests to this site, including the ones
-              outside the {endpoints.length}-endpoint list in Performance below. Expand it and click a row to chart one.</span></>}
+              <span style={{ color: UI.textDim }}> — all requests to this site{drillHint ? <>, including the ones
+              outside the {endpoints.length}-endpoint list in Performance below. Expand it and click a row to chart one.</> : '.'}</span></>}
       </div>
 
       {/* paddingBottom (not the legend row's own margin) is what html2canvas actually
@@ -175,7 +177,7 @@ export function PerformanceChart({
           it: this is instruction rather than measurement, and mixing it in made the centred
           figures wrap around a sentence. */}
       <div style={{ color: UI.textDim, paddingLeft: 8, marginBottom: 5 }}>
-        bar height is requests per {bin ?? 'bucket'} — click an endpoint row in Performance to chart it, click it again for the total.
+        bar height is requests per {bin ?? 'bucket'}{drillHint ? ' — click an endpoint row in Performance to chart it, click it again for the total.' : '.'}
       </div>
 
     </div>

@@ -15,6 +15,7 @@ const {
   _RC_5XX_EXPR: RC_5XX_EXPR,
 } = metrics;
 const { sharedCredential } = require('./azure-credential.cjs');
+const { withoutLoadTest } = require('./ai-query.cjs');
 
 const COST_API = '2023-03-01';
 // shortcut: stops after this many Cost Management pages; one month of one subscription grouped by RG x service fits easily, raise it if the total ever reads short.
@@ -58,7 +59,7 @@ async function countFiveXx(appId, credential, startIso, endIso) {
   const res = await fetch(`https://api.applicationinsights.io/v1/apps/${appId}/query`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${aiToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, timespan: `${startIso}/${endIso}` }),
+    body: JSON.stringify({ query: withoutLoadTest(query), timespan: `${startIso}/${endIso}` }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');

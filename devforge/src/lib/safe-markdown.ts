@@ -25,6 +25,23 @@ export function parseCitation(text: string): { file: string; line: number } | nu
     return { file: m[1]!, line: Number(m[2]) };
 }
 
+/**
+ * Which repository a citation opens in: `@api/x.cs:3` or `@app/x.cs:3` is the second
+ * repository of a two-repository run (or the main one, if the agent prefixed that too);
+ * anything else is the main repository.
+ */
+export function citationRoot(
+    file: string,
+    meta: { repoRoot: string; otherRepoRoot?: string | undefined; otherTarget?: 'app' | 'api' | undefined },
+    target: 'app' | 'api',
+): { root: string; file: string } {
+    const m = /^@(app|api)\/(.+)$/.exec(file);
+    if (!m) return { root: meta.repoRoot, file };
+    const rest = m[2]!;
+    if (m[1] === meta.otherTarget && meta.otherRepoRoot) return { root: meta.otherRepoRoot, file: rest };
+    return { root: meta.repoRoot, file: m[1] === target ? rest : file };
+}
+
 const safe = new Marked({
     renderer: {
         codespan({ text }: Tokens.Codespan) {

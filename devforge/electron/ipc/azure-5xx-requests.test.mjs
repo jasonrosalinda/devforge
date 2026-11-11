@@ -24,7 +24,9 @@ describe('fetchFiveXxRequests', () => {
     expect(init.headers.Authorization).toBe('Bearer tok');
     const body = JSON.parse(init.body);
     expect(body.timespan).toBe(`${START}/${END}`);
-    const [count, list] = body.query.split(';\n');
+    // The load-test prelude (ai-query.cjs) comes first; the request's own statements follow it.
+    expect(body.query).toMatch(/^let requests = requests \| where cloud_RoleName !endswith '-loadtest';/);
+    const [count, list] = body.query.split(';\n').filter(s => !s.startsWith('let '));
     // Same 5xx definition as the card: includes failures with no usable code.
     expect(count).toContain('rc >= 500 or (success == false');
     expect(count).toContain('summarize total=sum(itemCount)');

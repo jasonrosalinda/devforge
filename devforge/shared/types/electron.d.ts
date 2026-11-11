@@ -37,6 +37,8 @@ export interface IncidentPayload {
     frontDoorResourceId?: string | undefined;
     loadBalancerResourceId?: string | undefined;
     uptimeRobotIncidents?: unknown[] | undefined;
+    /** App Investigation: the anomaly episodes its charts show, used instead of the report's own. */
+    episodes?: unknown[] | undefined;
 }
 
 // A label ("v3.14.1") resolved against the audited site's repository. When it does

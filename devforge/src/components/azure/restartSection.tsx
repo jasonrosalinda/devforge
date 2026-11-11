@@ -111,8 +111,8 @@ export function parseRestartProse(text: string): RestartEvent[] {
 /** "We analyzed `6` Kudu Kill Events, `1` App Crash Event." → totals per cause. */
 export function parseRestartHeadline(text: string): Array<{ cause: string; count: number }> {
   const out: Array<{ cause: string; count: number }> = [];
-  // The backticks are the detector's own emphasis around each figure.
-  for (const m of text.matchAll(/`?(\d+)`?\s+([A-Za-z()\s]+?)\s+Events?\b/g)) {
+  // The backticks are the detector's own emphasis around each figure, sometimes two of them (``3``).
+  for (const m of text.matchAll(/`*(\d+)`*\s+([A-Za-z()\s]+?)\s+Events?\b/g)) {
     const count = Number(m[1]);
     const cause = canonicalCause((m[2] ?? '').trim());
     if (count > 0 && cause) out.push({ cause, count });
